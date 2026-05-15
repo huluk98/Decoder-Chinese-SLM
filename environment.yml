@@ -1,0 +1,22 @@
+name: chatlm-decoder
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch>=2.4
+  - pytorch-cuda=12.4
+  - pyyaml>=6.0
+  - tqdm>=4.66
+  - pip:
+      - transformers>=4.48
+      - datasets>=2.19
+      - tokenizers>=0.19
+      - accelerate>=1.0
+      - safetensors>=0.4.5
+      - sentencepiece>=0.2
+      - hf-transfer>=0.1.8
+      - hf-xet>=1.1.0
