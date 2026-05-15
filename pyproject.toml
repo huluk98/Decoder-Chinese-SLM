@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatlm-decoder"
+version = "0.1.0"
+description = "Decoder-only Chinese mini language model training skeleton"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2",
+  "transformers>=4.48",
+  "datasets>=2.19",
+  "tokenizers>=0.19",
+  "PyYAML>=6.0",
+  "tqdm>=4.66",
+  "accelerate>=1.0",
+  "safetensors>=0.4.5",
+  "sentencepiece>=0.2",
+  "hf-transfer>=0.1.8",
+  "hf-xet>=1.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

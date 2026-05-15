@@ -1,0 +1,68 @@
+run:
+  seed: 123
+  output_dir: runs/smoke
+
+tokenizer:
+  path: artifacts/tokenizer-smoke
+  vocab_size: 512
+  min_frequency: 1
+  max_samples: 200
+  train_if_missing: true
+
+preprocess:
+  enabled: true
+  output_path: data/processed/smoke_normalized.jsonl
+  manifest_path: data/processed/smoke_normalized.manifest.json
+  overwrite: false
+  dedupe: true
+  min_chars: 1
+  max_chars: null
+  min_rows: 1
+  shuffle_before_write: false
+
+model:
+  architecture: llama
+  vocab_size: 512
+  block_size: 128
+  num_hidden_layers: 2
+  num_attention_heads: 2
+  num_key_value_heads: 1
+  hidden_size: 128
+  intermediate_size: 344
+  hidden_act: silu
+  rms_norm_eps: 0.000001
+  rope_theta: 10000.0
+  attention_dropout: 0.0
+  attention_bias: false
+  mlp_bias: false
+  tie_word_embeddings: false
+  attn_implementation: sdpa
+  gradient_checkpointing: false
+
+data:
+  streaming: false
+  drop_last: false
+  add_eos: true
+  sources:
+    - type: local_jsonl
+      path: data/sample_zh_dialog.jsonl
+      format: prompt_response
+      prompt_fields: [prompt]
+      response_fields: [response]
+
+train:
+  batch_size: 2
+  grad_accum_steps: 1
+  max_steps: 5
+  learning_rate: 0.0005
+  min_learning_rate: 0.00005
+  warmup_steps: 1
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.95
+  max_grad_norm: 1.0
+  precision: fp32
+  num_workers: 0
+  log_every: 1
+  save_every: 5
+  compile: false
