@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
+import time
 from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -146,7 +149,20 @@ def _iter_hf_dataset(
     default_shuffle_buffer: int | None,
     default_seed: int,
     default_cache_dir: str | None = None,
+    default_download_timeout: int | None = None,
+    default_etag_timeout: int | None = None,
+    default_endpoint: str | None = None,
 ) -> Iterator[dict[str, Any]]:
+    endpoint = source.get("endpoint", default_endpoint)
+    download_timeout = source.get("download_timeout", default_download_timeout)
+    etag_timeout = source.get("etag_timeout", default_etag_timeout)
+    if endpoint:
+        os.environ.setdefault("HF_ENDPOINT", str(endpoint))
+    if download_timeout is not None:
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(download_timeout))
+    if etag_timeout is not None:
+        os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", str(etag_timeout))
+
     try:
         from datasets import load_dataset
     except ImportError as exc:
@@ -183,6 +199,49 @@ def _iter_hf_dataset(
     yield from dataset
 
 
+def _iter_with_retries(
+    source: dict[str, Any],
+    data_config: dict[str, Any],
+    default_streaming: bool,
+    default_shuffle_buffer: int | None,
+    default_seed: int,
+    default_cache_dir: str | None,
+) -> Iterator[dict[str, Any]]:
+    retries = int(source.get("retries", data_config.get("hf_retries", 3)))
+    sleep_seconds = float(source.get("retry_sleep_seconds", data_config.get("hf_retry_sleep_seconds", 10)))
+    backoff = float(source.get("retry_backoff", data_config.get("hf_retry_backoff", 2.0)))
+    attempt = 0
+
+    while True:
+        try:
+            yield from _iter_hf_dataset(
+                source,
+                default_streaming,
+                default_shuffle_buffer,
+                default_seed,
+                default_cache_dir,
+                data_config.get("hf_download_timeout"),
+                data_config.get("hf_etag_timeout"),
+                data_config.get("hf_endpoint"),
+            )
+            return
+        except Exception as exc:
+            attempt += 1
+            if attempt > retries:
+                raise RuntimeError(
+                    f"Failed to load Hugging Face source {source.get('path')} "
+                    f"after {retries} retries. Last error: {exc}"
+                ) from exc
+
+            wait = sleep_seconds * (backoff ** (attempt - 1))
+            print(
+                f"[data] {source.get('path')} failed on attempt {attempt}/{retries}: {exc}. "
+                f"Retrying in {wait:.1f}s...",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+
 def iter_records(
     data_config: dict[str, Any],
     rank: int = 0,
@@ -197,8 +256,9 @@ def iter_records(
         if source_type == "local_jsonl":
             records = _iter_local_jsonl(source["path"])
         elif source_type == "hf":
-            records = _iter_hf_dataset(
+            records = _iter_with_retries(
                 source,
+                data_config,
                 default_streaming,
                 default_shuffle_buffer,
                 default_seed,
