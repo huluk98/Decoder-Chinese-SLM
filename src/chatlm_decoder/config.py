@@ -86,6 +86,13 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["train"].setdefault("log_every", 10)
     config["train"].setdefault("save_every", 1000)
     config["train"].setdefault("compile", False)
+    config["train"].setdefault("deepspeed", {})
+    if config["train"]["deepspeed"] is None:
+        config["train"]["deepspeed"] = {}
+    if isinstance(config["train"]["deepspeed"], dict):
+        config["train"]["deepspeed"].setdefault("enabled", False)
+        config["train"]["deepspeed"].setdefault("config_path", None)
+        config["train"]["deepspeed"].setdefault("fused_adam", True)
 
     config["_config_path"] = str(config_path)
     config["_config_dir"] = str(config_path.parent)
