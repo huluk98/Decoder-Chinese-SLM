@@ -218,6 +218,41 @@ def _resolve_local_data_files(value: Any, base_path: Path) -> Any:
     return [_resolve_local_data_files(item, base_path) for item in value]
 
 
+def _data_file_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_data_file_values(item))
+        return values
+    return [str(item) for item in value]
+
+
+def _dataset_builder_for_data_files(data_files: Any) -> str | None:
+    suffixes = {Path(path).suffix.lower() for path in _data_file_values(data_files)}
+    if suffixes and suffixes <= {".json", ".jsonl"}:
+        return "json"
+    if suffixes == {".parquet"}:
+        return "parquet"
+    return None
+
+
+def _find_snapshot_data_files(snapshot_path: Path) -> list[str]:
+    patterns = ("*.jsonl", "*.json", "*.parquet")
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(snapshot_path.rglob(pattern))
+    return [
+        str(path)
+        for path in sorted(files)
+        if not any(part.startswith(".") for part in path.relative_to(snapshot_path).parts)
+        and path.name not in {"dataset_infos.json"}
+    ]
+
+
 def download_hf_sources(
     data_config: dict[str, Any],
     force_download: bool = False,
@@ -338,6 +373,8 @@ def _iter_hf_dataset(
     data_files = source.get("data_files")
     if data_files and load_from_local_snapshot:
         data_files = _resolve_local_data_files(data_files, Path(path))
+    if load_from_local_snapshot and not data_files:
+        data_files = _find_snapshot_data_files(Path(path))
     cache_dir = source.get("cache_dir", default_cache_dir)
     revision = source.get("revision")
     kwargs = {"split": split, "streaming": streaming}
@@ -348,7 +385,11 @@ def _iter_hf_dataset(
     if revision and not load_from_local_snapshot:
         kwargs["revision"] = revision
 
-    dataset = load_dataset(path, name, **kwargs) if name else load_dataset(path, **kwargs)
+    builder = _dataset_builder_for_data_files(data_files) if load_from_local_snapshot else None
+    if builder:
+        dataset = load_dataset(builder, **kwargs)
+    else:
+        dataset = load_dataset(path, name, **kwargs) if name else load_dataset(path, **kwargs)
 
     shuffle_buffer = source.get("shuffle_buffer", default_shuffle_buffer)
     if streaming and shuffle_buffer:
