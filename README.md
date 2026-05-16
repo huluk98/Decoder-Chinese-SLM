@@ -190,6 +190,8 @@ CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN T
 
 The 7-GPU fast config keeps the same 0.2B Llama-style model shape, but uses `train.batch_size: 16` and `train.grad_accum_steps: 5`, giving `7 * 16 * 5 = 560` samples per optimizer update.
 
+The H20 configs also set `train.tf32: true` and `train.float32_matmul_precision: high`, which enables TensorFloat-32 Tensor Cores for any FP32 matrix multiplication paths while keeping the main training precision at BF16.
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:

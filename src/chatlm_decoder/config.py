@@ -77,6 +77,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["train"].setdefault("beta2", 0.95)
     config["train"].setdefault("max_grad_norm", 1.0)
     config["train"].setdefault("precision", "bf16")
+    config["train"].setdefault("tf32", False)
+    config["train"].setdefault("float32_matmul_precision", "highest")
     config["train"].setdefault("num_workers", 0)
     config["train"].setdefault("log_every", 10)
     config["train"].setdefault("save_every", 1000)
