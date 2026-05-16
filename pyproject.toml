@@ -21,6 +21,7 @@ dependencies = [
   "sentencepiece>=0.2",
   "hf-transfer>=0.1.8",
   "hf-xet>=1.1.0",
+  "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]

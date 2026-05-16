@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import json
 import math
 import os
@@ -144,6 +145,49 @@ def learning_rate_for_step(step: int, train_config: dict[str, Any]) -> float:
 def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
     for group in optimizer.param_groups:
         group["lr"] = lr
+
+
+class MetricsLogger:
+    def __init__(self, output_dir: Path, enabled: bool = True) -> None:
+        self.enabled = enabled
+        self.handle = None
+        self.writer = None
+        if not enabled:
+            return
+
+        metrics_dir = output_dir / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        self.path = metrics_dir / "training_metrics.csv"
+        is_new_file = not self.path.exists() or self.path.stat().st_size == 0
+        self.handle = self.path.open("a", encoding="utf-8", newline="")
+        self.writer = csv.DictWriter(
+            self.handle,
+            fieldnames=[
+                "time_seconds",
+                "step",
+                "loss",
+                "lr",
+                "world_size",
+                "effective_global_batch",
+                "block_size",
+                "tokens_per_step",
+                "tokens_per_second",
+                "seconds_per_step",
+            ],
+        )
+        if is_new_file:
+            self.writer.writeheader()
+            self.handle.flush()
+
+    def log(self, row: dict[str, Any]) -> None:
+        if not self.enabled or self.writer is None or self.handle is None:
+            return
+        self.writer.writerow(row)
+        self.handle.flush()
+
+    def close(self) -> None:
+        if self.handle is not None:
+            self.handle.close()
 
 
 def deepspeed_settings(train_config: dict[str, Any]) -> dict[str, Any]:
@@ -507,115 +551,134 @@ def main() -> None:
     warned_high_first_loss = False
 
     progress = trange(1, int(train_config["max_steps"]) + 1, desc="training", disable=not is_main_process(rank))
+    run_start_time = time.perf_counter()
     last_log_time = time.perf_counter()
     tokens_since_log = 0
     steps_since_log = 0
-    for step in progress:
-        lr = learning_rate_for_step(step - 1, train_config)
-        set_optimizer_lr(optimizer, lr)
-        accumulated_raw_loss = 0.0
+    metrics_logger = MetricsLogger(output_dir, enabled=is_main_process(rank))
+    try:
+        for step in progress:
+            lr = learning_rate_for_step(step - 1, train_config)
+            set_optimizer_lr(optimizer, lr)
+            accumulated_raw_loss = 0.0
 
-        for micro_step in range(grad_accum_steps):
-            try:
-                batch = next(data_iter)
-            except StopIteration:
-                data_iter = iter(dataloader)
-                batch = next(data_iter)
+            for micro_step in range(grad_accum_steps):
+                try:
+                    batch = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(dataloader)
+                    batch = next(data_iter)
 
-            batch = {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
-            sync_context = (
-                model.no_sync()
-                if not use_deepspeed
-                and world_size > 1
-                and hasattr(model, "no_sync")
-                and micro_step < grad_accum_steps - 1
-                else nullcontext()
-            )
-            with sync_context:
-                precision_context = nullcontext() if use_deepspeed else autocast_for(device, str(train_config["precision"]))
-                with precision_context:
-                    outputs = model(**batch)
-                    raw_loss = outputs.loss
-
-                if not printed_first_batch_debug:
-                    print_first_batch_debug(
-                        rank=rank,
-                        local_rank=local_rank,
-                        world_size=world_size,
-                        train_config=train_config,
-                        model=model,
-                        tokenizer=tokenizer,
-                        batch=batch,
-                        block_size=block_size,
-                        effective_global_batch=effective_global_batch,
-                    )
-                    printed_first_batch_debug = True
-
-                accumulated_raw_loss += float(raw_loss.detach().cpu())
-                if use_deepspeed:
-                    model.backward(raw_loss)
-                    model.step()
-                else:
-                    loss = raw_loss / grad_accum_steps
-                    scaler.scale(loss).backward()
-
-        if not use_deepspeed:
-            if float(train_config["max_grad_norm"]) > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_config["max_grad_norm"]))
-
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
-
-        logged_loss = accumulated_raw_loss / grad_accum_steps
-        if world_size > 1 and distributed_is_initialized():
-            loss_tensor = torch.tensor(logged_loss, device=device)
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
-            logged_loss = float(loss_tensor.detach().cpu())
-
-        if step == 1 and not warned_high_first_loss:
-            if is_main_process(rank) and logged_loss > 30:
-                expected_random_loss = math.log(float(getattr(unwrap_model(model).config, "vocab_size")))
-                print(
-                    f"[warning] first logged loss {logged_loss:.4f} is much larger than "
-                    f"log(vocab_size) ~= {expected_random_loss:.2f}. Check labels/token ids."
+                batch = {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
+                sync_context = (
+                    model.no_sync()
+                    if not use_deepspeed
+                    and world_size > 1
+                    and hasattr(model, "no_sync")
+                    and micro_step < grad_accum_steps - 1
+                    else nullcontext()
                 )
-            warned_high_first_loss = True
+                with sync_context:
+                    precision_context = nullcontext() if use_deepspeed else autocast_for(device, str(train_config["precision"]))
+                    with precision_context:
+                        outputs = model(**batch)
+                        raw_loss = outputs.loss
 
-        tokens_since_log += effective_global_batch * block_size
-        steps_since_log += 1
+                    if not printed_first_batch_debug:
+                        print_first_batch_debug(
+                            rank=rank,
+                            local_rank=local_rank,
+                            world_size=world_size,
+                            train_config=train_config,
+                            model=model,
+                            tokenizer=tokenizer,
+                            batch=batch,
+                            block_size=block_size,
+                            effective_global_batch=effective_global_batch,
+                        )
+                        printed_first_batch_debug = True
 
-        if step % int(train_config["log_every"]) == 0 and is_main_process(rank):
-            now = time.perf_counter()
-            elapsed = max(1e-6, now - last_log_time)
-            tokens_per_second = tokens_since_log / elapsed
-            seconds_per_step = elapsed / max(1, steps_since_log)
-            progress.set_postfix(
-                loss=f"{logged_loss:.4f}",
-                lr=f"{lr:.2e}",
-                world_size=world_size,
-                egb=effective_global_batch,
-                tok_s=f"{tokens_per_second / 1000.0:.1f}k",
-                step_s=f"{seconds_per_step:.2f}",
-            )
-            last_log_time = now
-            tokens_since_log = 0
-            steps_since_log = 0
+                    accumulated_raw_loss += float(raw_loss.detach().cpu())
+                    if use_deepspeed:
+                        model.backward(raw_loss)
+                        model.step()
+                    else:
+                        loss = raw_loss / grad_accum_steps
+                        scaler.scale(loss).backward()
 
-        should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
-        if should_save:
-            save_checkpoint(
-                model=model,
-                tokenizer=tokenizer,
-                output_dir=output_dir,
-                step=step,
-                optimizer=optimizer,
-                config=config,
-                rank=rank,
-                world_size=world_size,
-                use_deepspeed=use_deepspeed,
-            )
+            if not use_deepspeed:
+                if float(train_config["max_grad_norm"]) > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_config["max_grad_norm"]))
+
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            logged_loss = accumulated_raw_loss / grad_accum_steps
+            if world_size > 1 and distributed_is_initialized():
+                loss_tensor = torch.tensor(logged_loss, device=device)
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+                logged_loss = float(loss_tensor.detach().cpu())
+
+            if step == 1 and not warned_high_first_loss:
+                if is_main_process(rank) and logged_loss > 30:
+                    expected_random_loss = math.log(float(getattr(unwrap_model(model).config, "vocab_size")))
+                    print(
+                        f"[warning] first logged loss {logged_loss:.4f} is much larger than "
+                        f"log(vocab_size) ~= {expected_random_loss:.2f}. Check labels/token ids."
+                    )
+                warned_high_first_loss = True
+
+            tokens_since_log += effective_global_batch * block_size
+            steps_since_log += 1
+
+            if (step == 1 or step % int(train_config["log_every"]) == 0) and is_main_process(rank):
+                now = time.perf_counter()
+                elapsed = max(1e-6, now - last_log_time)
+                tokens_per_second = tokens_since_log / elapsed
+                seconds_per_step = elapsed / max(1, steps_since_log)
+                progress.set_postfix(
+                    loss=f"{logged_loss:.4f}",
+                    lr=f"{lr:.2e}",
+                    world_size=world_size,
+                    egb=effective_global_batch,
+                    tok_s=f"{tokens_per_second / 1000.0:.1f}k",
+                    step_s=f"{seconds_per_step:.2f}",
+                )
+                metrics_logger.log(
+                    {
+                        "time_seconds": f"{now - run_start_time:.3f}",
+                        "step": step,
+                        "loss": f"{logged_loss:.8f}",
+                        "lr": f"{lr:.12g}",
+                        "world_size": world_size,
+                        "effective_global_batch": effective_global_batch,
+                        "block_size": block_size,
+                        "tokens_per_step": effective_global_batch * block_size,
+                        "tokens_per_second": f"{tokens_per_second:.6f}",
+                        "seconds_per_step": f"{seconds_per_step:.6f}",
+                    }
+                )
+                last_log_time = now
+                tokens_since_log = 0
+                steps_since_log = 0
+
+            should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
+            if should_save:
+                save_checkpoint(
+                    model=model,
+                    tokenizer=tokenizer,
+                    output_dir=output_dir,
+                    step=step,
+                    optimizer=optimizer,
+                    config=config,
+                    rank=rank,
+                    world_size=world_size,
+                    use_deepspeed=use_deepspeed,
+                )
+    finally:
+        metrics_logger.close()
 
     if distributed_is_initialized():
         dist.destroy_process_group()

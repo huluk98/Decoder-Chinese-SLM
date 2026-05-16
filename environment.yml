@@ -22,3 +22,4 @@ dependencies:
       - hf-transfer>=0.1.8
       - hf-xet>=1.1.0
       - deepspeed>=0.14.5
+      - matplotlib>=3.8
