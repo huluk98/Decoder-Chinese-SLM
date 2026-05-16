@@ -18,6 +18,8 @@ preprocess:
   min_chars: 8
   max_chars: null
   min_rows: 9000000
+  strict_min_rows: false
+  continue_on_source_error: true
   shuffle_before_write: false
 
 model:
