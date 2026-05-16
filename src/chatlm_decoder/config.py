@@ -61,6 +61,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["preprocess"].setdefault("min_rows", None)
     config["preprocess"].setdefault("strict_min_rows", True)
     config["preprocess"].setdefault("continue_on_source_error", False)
+    config["preprocess"].setdefault("download_first", False)
+    config["preprocess"].setdefault("download_manifest_path", f"{config['preprocess']['output_path']}.download_manifest.json")
+    config["preprocess"].setdefault("continue_on_download_error", None)
     config["preprocess"].setdefault("shuffle_before_write", False)
 
     config["train"].setdefault("batch_size", 1)

@@ -12,6 +12,7 @@ dependencies = [
   "torch>=2.2",
   "transformers>=4.48",
   "datasets>=2.19",
+  "huggingface_hub>=0.24",
   "tokenizers>=0.19",
   "PyYAML>=6.0",
   "tqdm>=4.66",
