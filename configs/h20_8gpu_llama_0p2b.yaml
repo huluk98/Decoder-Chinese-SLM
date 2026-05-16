@@ -83,7 +83,12 @@ data:
       max_samples: null
     - type: hf
       path: wangrui6/Zhihu-KOL
-      data_files: data/*.parquet
+      data_files:
+        - data/train-00000-of-00005-a1278ede4e8c5cdb.parquet
+        - data/train-00001-of-00005-1fc2da944397e9c2.parquet
+        - data/train-00002-of-00005-68ced004a1458143.parquet
+        - data/train-00003-of-00005-1dae36b67c12169f.parquet
+        - data/train-00004-of-00005-c374cc9fbda9fda7.parquet
       split: train
       format: prompt_response
       prompt_fields: [INSTRUCTION]
