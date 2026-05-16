@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -53,6 +54,8 @@ def _preprocess_config(config: dict[str, Any]) -> dict[str, Any]:
     preprocess_config.setdefault("min_chars", 8)
     preprocess_config.setdefault("max_chars", None)
     preprocess_config.setdefault("min_rows", None)
+    preprocess_config.setdefault("strict_min_rows", True)
+    preprocess_config.setdefault("continue_on_source_error", False)
     preprocess_config.setdefault("shuffle_before_write", False)
     return preprocess_config
 
@@ -89,6 +92,8 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
 
     min_rows = preprocess_config["min_rows"]
     min_rows = int(min_rows) if min_rows is not None else None
+    strict_min_rows = bool(preprocess_config["strict_min_rows"])
+    continue_on_source_error = bool(preprocess_config["continue_on_source_error"])
 
     if output_path.exists() and not overwrite:
         manifest = {
@@ -101,10 +106,18 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
             with manifest_path.open("r", encoding="utf-8") as handle:
                 manifest.update(json.load(handle))
             manifest["already_exists"] = True
-        if min_rows is not None and int(manifest.get("written", 0)) < min_rows:
+        below_min_rows = min_rows is not None and int(manifest.get("written", 0)) < min_rows
+        manifest["below_min_rows"] = bool(below_min_rows)
+        if below_min_rows and strict_min_rows:
             raise RuntimeError(
                 f"Processed dataset has {manifest.get('written', 0):,} rows, below min_rows={min_rows:,}. "
                 "Run with --force after adding/fixing sources."
+            )
+        if below_min_rows:
+            print(
+                f"[preprocess] Existing dataset has {manifest.get('written', 0):,} rows, "
+                f"below min_rows={min_rows:,}. Continuing because strict_min_rows=false.",
+                file=sys.stderr,
             )
         return manifest
 
@@ -123,58 +136,90 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
     dedupe = bool(preprocess_config["dedupe"])
     seen: set[str] = set()
     counts: dict[str, dict[str, int]] = defaultdict(lambda: {"read": 0, "written": 0, "skipped": 0})
+    failed_sources: list[dict[str, str]] = []
     total_read = 0
     total_written = 0
     total_skipped = 0
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    sources = data_config.get("sources", [])
 
     with tmp_path.open("w", encoding="utf-8") as handle:
-        for record, source in tqdm(iter_records(data_config), desc="preprocess", unit="row"):
-            total_read += 1
+        for source_index, source in enumerate(sources, start=1):
             name = _source_name(source)
-            counts[name]["read"] += 1
+            source_data_config = copy.deepcopy(data_config)
+            source_data_config["sources"] = [source]
+            progress_desc = f"preprocess {source_index}/{len(sources)} {name}"
 
-            raw_text = format_record(record, source)
-            if not raw_text:
-                total_skipped += 1
-                counts[name]["skipped"] += 1
+            try:
+                records = iter_records(source_data_config)
+                for record, record_source in tqdm(records, desc=progress_desc, unit="row"):
+                    total_read += 1
+                    record_name = _source_name(record_source)
+                    counts[record_name]["read"] += 1
+
+                    raw_text = format_record(record, record_source)
+                    if not raw_text:
+                        total_skipped += 1
+                        counts[record_name]["skipped"] += 1
+                        continue
+
+                    text = normalize_text(raw_text)
+                    if len(text) < min_chars or (max_chars is not None and len(text) > max_chars):
+                        total_skipped += 1
+                        counts[record_name]["skipped"] += 1
+                        continue
+
+                    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+                    if dedupe and digest in seen:
+                        total_skipped += 1
+                        counts[record_name]["skipped"] += 1
+                        continue
+                    seen.add(digest)
+
+                    handle.write(json.dumps({"text": text, "source": record_name}, ensure_ascii=False) + "\n")
+                    total_written += 1
+                    counts[record_name]["written"] += 1
+            except Exception as exc:
+                failed_sources.append({"source": name, "error": str(exc)})
+                counts[name]["failed"] = 1
+                if not continue_on_source_error:
+                    raise
+                print(
+                    f"[preprocess] Skipping failed source {name}: {exc}",
+                    file=sys.stderr,
+                )
                 continue
-
-            text = normalize_text(raw_text)
-            if len(text) < min_chars or (max_chars is not None and len(text) > max_chars):
-                total_skipped += 1
-                counts[name]["skipped"] += 1
-                continue
-
-            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
-            if dedupe and digest in seen:
-                total_skipped += 1
-                counts[name]["skipped"] += 1
-                continue
-            seen.add(digest)
-
-            handle.write(json.dumps({"text": text, "source": name}, ensure_ascii=False) + "\n")
-            total_written += 1
-            counts[name]["written"] += 1
 
     tmp_path.replace(output_path)
+    below_min_rows = min_rows is not None and total_written < min_rows
 
     manifest = {
         "output_path": str(output_path),
+        "manifest_path": str(manifest_path),
         "written": total_written,
         "read": total_read,
         "skipped": total_skipped,
         "dedupe": dedupe,
         "min_rows": min_rows,
+        "strict_min_rows": strict_min_rows,
+        "continue_on_source_error": continue_on_source_error,
+        "below_min_rows": bool(below_min_rows),
+        "failed_sources": failed_sources,
         "sources": counts,
     }
     with manifest_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    if min_rows is not None and total_written < min_rows:
+    if below_min_rows and strict_min_rows:
         raise RuntimeError(
             f"Processed dataset has {total_written:,} rows, below min_rows={min_rows:,}. "
             "At least one configured source may be missing, empty, or using the wrong schema."
+        )
+    if below_min_rows:
+        print(
+            f"[preprocess] Wrote {total_written:,} rows, below min_rows={min_rows:,}. "
+            "Continuing because strict_min_rows=false; inspect failed_sources in the manifest.",
+            file=sys.stderr,
         )
     return manifest
 
