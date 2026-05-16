@@ -16,7 +16,8 @@ The size also keeps the experiment legible: training runs finish faster, ablatio
 
 - Config-driven model/training setup in `configs/`.
 - Hugging Face tokenizer training with Chinese-friendly BPE special tokens.
-- Dataset preprocessing that downloads all configured sources, normalizes schemas, and writes one merged JSONL before tokenizer training.
+- Dataset staging that downloads all configured Hugging Face sources locally before normalization.
+- Dataset preprocessing that normalizes cached/local sources and writes one merged JSONL before tokenizer training.
 - Streaming dataset pipeline for public Hugging Face datasets and local JSONL files.
 - Llama-style decoder definition backed by `transformers.LlamaForCausalLM`.
 - RoPE positions, RMSNorm, SwiGLU, grouped-query attention, bias-free projections, and SDPA attention.
@@ -36,7 +37,7 @@ This repo now configures public Hugging Face mirrors/equivalents for those sourc
 - [`BelleGroup/train_1M_CN`](https://huggingface.co/datasets/BelleGroup/train_1M_CN), [`BelleGroup/train_2M_CN`](https://huggingface.co/datasets/BelleGroup/train_2M_CN), and [`BelleGroup/train_3.5M_CN`](https://huggingface.co/datasets/BelleGroup/train_3.5M_CN), BELLE instruction/chat data.
 - [`YeungNLP/firefly-pretrain-dataset`](https://huggingface.co/datasets/YeungNLP/firefly-pretrain-dataset), `wiki_zh.jsonl`, Chinese Wikipedia-like text.
 
-The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The full-data configs keep `min_rows: 9000000` as a target-size warning. They also set `continue_on_source_error: true`, so a flaky source is logged in the manifest and the preprocessor moves on to the next source instead of discarding hours of completed work.
+The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The full-data configs keep `min_rows: 9000000` as a target-size warning. They also set `download_first: true` and `continue_on_source_error: true`, so the pipeline first downloads dataset snapshots into the local Hugging Face cache, then normalizes from local/cache-backed files. A flaky source is logged in the manifest and the preprocessor moves on to the next source instead of discarding hours of completed work.
 
 ## Conda Setup
 
@@ -65,29 +66,37 @@ python scripts/generate.py \
 
 ## Train A 0.2B-ish Model
 
-Train a tokenizer first. This command automatically downloads every configured dataset source, normalizes the records into one JSONL file, then trains the tokenizer from that merged file. The target vocab size is 29,298 to mirror ChatLM-mini-Chinese.
+Train a tokenizer first. This command automatically downloads every configured dataset source into the local cache, normalizes the cached/local records into one JSONL file, then trains the tokenizer from that merged file. The target vocab size is 29,298 to mirror ChatLM-mini-Chinese.
 
 ```bash
 python scripts/train_tokenizer.py --config configs/model_0p2b.yaml
 ```
 
-To run only the download/normalization step:
+To run only the download stage:
+
+```bash
+python scripts/download_data.py --config configs/model_0p2b.yaml
+```
+
+To run the download and normalization stages:
 
 ```bash
 python scripts/prepare_data.py --config configs/model_0p2b.yaml
 ```
 
-The merged dataset is written to `data/processed/chatlm_public_sources_0p2b.jsonl`, with counts in `data/processed/chatlm_public_sources_0p2b.manifest.json`. The raw Hugging Face cache goes under `data/raw/huggingface`.
+The download manifest is written to `data/raw/chatlm_public_sources_0p2b.download_manifest.json`. The merged dataset is written to `data/processed/chatlm_public_sources_0p2b.jsonl`, with counts in `data/processed/chatlm_public_sources_0p2b.manifest.json`. The raw Hugging Face cache goes under `data/raw/huggingface`.
 
-If a Hugging Face source fails with an `HTTPSConnectionPool` or read-timeout error, it is usually a transient network issue rather than a bad config. The loader has retry/backoff settings in the `data:` section, and `wangrui6/Zhihu-KOL` has extra retries because it is a common long download. After retries are exhausted, the full-data configs skip that source, write the error under `failed_sources` in the manifest, and continue with the next dataset.
+If a Hugging Face source fails with an `HTTPSConnectionPool` or read-timeout error, it is usually a transient network issue rather than a bad config. The downloader has retry/backoff settings in the `data:` section, and `wangrui6/Zhihu-KOL` has extra retries because it is a common long download. After retries are exhausted, the full-data configs skip that source, write the error in the download manifest, and continue with the next dataset.
 
-If a run is interrupted, you may see `data/processed/chatlm_public_sources_0p2b.jsonl.tmp`. That file is only the in-progress write target. It is not used by training or tokenizer scripts, and it can be deleted before a clean rebuild:
+If the download stage is interrupted, rerun the same command. Hugging Face cache snapshots resume/reuse files under `data/raw/huggingface`, so you do not need to start from zero. Use `--force-download` only when you intentionally want fresh remote copies.
+
+If the normalization stage is interrupted, you may see `data/processed/chatlm_public_sources_0p2b.jsonl.tmp`. That file is only the in-progress write target. It is not used by training or tokenizer scripts, and it can be deleted before a clean rebuild:
 
 ```bash
 rm -f data/processed/chatlm_public_sources_0p2b.jsonl.tmp
 ```
 
-Re-run with `--force-prepare` after the connection stabilizes:
+Re-run normalization from the downloaded cache after the connection stabilizes:
 
 ```bash
 HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
@@ -95,12 +104,14 @@ HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
   --force-prepare
 ```
 
+`--force-prepare` rebuilds the normalized JSONL. It does not force a full re-download. Add `--force-download` only when you want to refresh the cached dataset snapshots too.
+
 On networks where Hugging Face is slow or blocked, try a mirror endpoint:
 
 ```bash
-HF_ENDPOINT=https://hf-mirror.com HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
+HF_ENDPOINT=https://hf-mirror.com HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/download_data.py \
   --config configs/h20_8gpu_llama_0p2b.yaml \
-  --force-prepare
+  --force-download
 ```
 
 You can also raise `data.hf_download_timeout`, `data.hf_etag_timeout`, or per-source `retries` in the YAML if one dataset is especially flaky.
@@ -147,7 +158,7 @@ HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
   --config configs/h20_8gpu_llama_0p2b.yaml
 ```
 
-That command also prepares `data/processed/chatlm_public_sources_0p2b.jsonl` if it does not already exist. Use `--force-prepare` to rebuild it, or `--skip-prepare` to train the tokenizer directly from the raw configured sources.
+That command also downloads source snapshots and prepares `data/processed/chatlm_public_sources_0p2b.jsonl` if it does not already exist. Use `--force-prepare` to rebuild normalized data from the cache, `--force-download` to refresh remote snapshots, or `--skip-prepare` to train the tokenizer directly from the raw configured sources.
 
 Then launch the 0.2B Llama-style run:
 
@@ -193,7 +204,7 @@ data:
       response_fields: [response]
 ```
 
-For public Hugging Face datasets, add another `type: hf` entry with the dataset `path`, `split`, and `format`. The preprocessing step will download it through `datasets.load_dataset(...)` and append normalized rows to the same merged JSONL.
+For public Hugging Face datasets, add another `type: hf` entry with the dataset `path`, `split`, and `format`. The download step stores a local dataset snapshot first, and the preprocessing step appends normalized rows from that local/cache-backed source to the merged JSONL.
 
 For a different local dataset blend, make a new config or change `preprocess.output_path` so you do not overwrite the current merged file:
 
