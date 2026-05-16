@@ -200,6 +200,20 @@ This training script supports two multi-GPU backends:
 - `configs/h20_7gpu_llama_0p2b_fast.yaml` uses plain PyTorch DDP.
 - `configs/h20_7gpu_llama_0p2b_deepspeed.yaml` uses DeepSpeed with BF16, FusedAdam when available, and ZeRO-1 optimizer partitioning.
 
+It also supports Accelerate as the process launcher. The checked-in Accelerate config launches 7 local BF16 processes; `CUDA_VISIBLE_DEVICES` still controls the physical GPU list, so GPU 1 stays unused:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_7gpu.yaml scripts/train.py --config configs/h20_7gpu_llama_0p2b_fast.yaml
+```
+
+For the DeepSpeed training config, use the same Accelerate launcher and switch only the training YAML:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_7gpu.yaml scripts/train.py --config configs/h20_7gpu_llama_0p2b_deepspeed.yaml
+```
+
+In this repo, Accelerate is used as the launcher while `scripts/train.py` keeps ownership of DDP, DeepSpeed initialization, loss averaging, metrics logging, and checkpoint saving. That keeps the DDP, DeepSpeed, and Accelerate launch commands comparable.
+
 The conda environment installs DeepSpeed. If you are managing packages manually on the H20 machine, install the optional extra with `pip install -e ".[deepspeed]"`.
 
 Use this one-line DeepSpeed launch when physical GPU 1 is occupied:

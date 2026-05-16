@@ -377,10 +377,14 @@ def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
 
 
 def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool) -> None:
-    launcher = (
+    primary_launcher = (
         f"deepspeed --num_gpus=7 scripts/train.py --config {config_path}"
         if use_deepspeed
         else f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}"
+    )
+    accelerate_launcher = (
+        "accelerate launch --config_file configs/accelerate_h20_7gpu.yaml "
+        f"scripts/train.py --config {config_path}"
     )
     maybe_print(
         rank,
@@ -389,8 +393,46 @@ def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool) 
         "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
         "NCCL_DEBUG=WARN \\\n"
         "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
-        f"{launcher}",
+        f"{primary_launcher}\n\n"
+        "Accelerate launcher for the same visible GPUs:\n"
+        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \\\n"
+        "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
+        "NCCL_DEBUG=WARN \\\n"
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
+        f"{accelerate_launcher}",
     )
+
+
+def launched_with_accelerate() -> bool:
+    return any(
+        key in os.environ
+        for key in (
+            "ACCELERATE_CONFIG_FILE",
+            "ACCELERATE_DYNAMO_BACKEND",
+            "ACCELERATE_MIXED_PRECISION",
+            "ACCELERATE_USE_CPU",
+            "ACCELERATE_USE_DEEPSPEED",
+            "ACCELERATE_USE_FSDP",
+        )
+    )
+
+
+def warn_if_accelerate_precision_differs(train_config: dict[str, Any], rank: int) -> None:
+    accelerate_precision = os.environ.get("ACCELERATE_MIXED_PRECISION")
+    if not accelerate_precision:
+        return
+
+    train_precision = str(train_config["precision"]).lower()
+    accelerate_precision = accelerate_precision.lower()
+    if accelerate_precision in {"no", "none"}:
+        return
+    if accelerate_precision != train_precision:
+        maybe_print(
+            rank,
+            "[warning] Accelerate mixed precision is "
+            f"{accelerate_precision}, but train.precision is {train_precision}. "
+            "The training script uses train.precision for autocast/DeepSpeed config.",
+        )
 
 
 def print_first_batch_debug(
@@ -474,6 +516,7 @@ def main() -> None:
         deepspeed_module=deepspeed_module,
     )
     configure_torch_backends(train_config, rank)
+    warn_if_accelerate_precision_differs(train_config, rank)
     print_startup_launch_hint(rank, args.config, use_deepspeed=use_deepspeed)
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
@@ -527,7 +570,9 @@ def main() -> None:
     )
 
     maybe_print(rank, f"Device: {device} | world_size: {world_size}")
-    maybe_print(rank, f"Training backend: {'DeepSpeed ZeRO' if use_deepspeed else 'PyTorch DDP' if world_size > 1 else 'single process'}")
+    training_backend = "DeepSpeed ZeRO" if use_deepspeed else "PyTorch DDP" if world_size > 1 else "single process"
+    launcher = "Accelerate" if launched_with_accelerate() else "DeepSpeed CLI" if use_deepspeed else "torchrun/Python"
+    maybe_print(rank, f"Training backend: {training_backend} | launcher: {launcher}")
     maybe_print(rank, f"Parameters: {count_parameters(unwrap_model(model)):,}")
     maybe_print(rank, f"Tokenizer size: {len(tokenizer):,}")
     maybe_print(rank, f"Output: {output_dir}")
