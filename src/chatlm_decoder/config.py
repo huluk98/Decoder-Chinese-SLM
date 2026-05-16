@@ -59,6 +59,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["preprocess"].setdefault("min_chars", 8)
     config["preprocess"].setdefault("max_chars", None)
     config["preprocess"].setdefault("min_rows", None)
+    config["preprocess"].setdefault("strict_min_rows", True)
+    config["preprocess"].setdefault("continue_on_source_error", False)
     config["preprocess"].setdefault("shuffle_before_write", False)
 
     config["train"].setdefault("batch_size", 1)
