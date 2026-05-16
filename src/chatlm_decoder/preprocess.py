@@ -15,7 +15,7 @@ except ImportError:
     def tqdm(iterable, **_: Any):
         return iterable
 
-from chatlm_decoder.data import EOS_TOKEN, format_record, iter_records
+from chatlm_decoder.data import EOS_TOKEN, download_hf_sources, format_record, iter_records
 
 
 def normalize_text(text: str) -> str:
@@ -56,6 +56,9 @@ def _preprocess_config(config: dict[str, Any]) -> dict[str, Any]:
     preprocess_config.setdefault("min_rows", None)
     preprocess_config.setdefault("strict_min_rows", True)
     preprocess_config.setdefault("continue_on_source_error", False)
+    preprocess_config.setdefault("download_first", False)
+    preprocess_config.setdefault("download_manifest_path", f"{preprocess_config['output_path']}.download_manifest.json")
+    preprocess_config.setdefault("continue_on_download_error", None)
     preprocess_config.setdefault("shuffle_before_write", False)
     return preprocess_config
 
@@ -81,7 +84,11 @@ def preprocessed_data_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str, Any]:
+def preprocess_datasets(
+    config: dict[str, Any],
+    force: bool = False,
+    force_download: bool = False,
+) -> dict[str, Any]:
     preprocess_config = _preprocess_config(config)
     if not preprocess_config["enabled"]:
         return {"enabled": False, "output_path": None, "written": 0}
@@ -94,6 +101,10 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
     min_rows = int(min_rows) if min_rows is not None else None
     strict_min_rows = bool(preprocess_config["strict_min_rows"])
     continue_on_source_error = bool(preprocess_config["continue_on_source_error"])
+    continue_on_download_error = preprocess_config["continue_on_download_error"]
+    if continue_on_download_error is None:
+        continue_on_download_error = continue_on_source_error
+    continue_on_download_error = bool(continue_on_download_error)
 
     if output_path.exists() and not overwrite:
         manifest = {
@@ -129,6 +140,20 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
         data_config.pop("shuffle_buffer", None)
         for source in data_config.get("sources", []):
             source.pop("shuffle_buffer", None)
+
+    download_manifest: dict[str, Any] | None = None
+    if preprocess_config["download_first"]:
+        data_config, download_manifest = download_hf_sources(
+            data_config,
+            force_download=force_download,
+            continue_on_error=continue_on_download_error,
+        )
+        download_manifest_path = Path(preprocess_config["download_manifest_path"]).expanduser()
+        download_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        download_manifest["manifest_path"] = str(download_manifest_path)
+        with download_manifest_path.open("w", encoding="utf-8") as handle:
+            json.dump(download_manifest, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
 
     min_chars = int(preprocess_config["min_chars"] or 0)
     max_chars = preprocess_config["max_chars"]
@@ -203,6 +228,9 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
         "min_rows": min_rows,
         "strict_min_rows": strict_min_rows,
         "continue_on_source_error": continue_on_source_error,
+        "download_first": bool(preprocess_config["download_first"]),
+        "download_manifest_path": preprocess_config["download_manifest_path"],
+        "download_manifest": download_manifest,
         "below_min_rows": bool(below_min_rows),
         "failed_sources": failed_sources,
         "sources": counts,
@@ -224,10 +252,14 @@ def preprocess_datasets(config: dict[str, Any], force: bool = False) -> dict[str
     return manifest
 
 
-def ensure_preprocessed_data(config: dict[str, Any], force: bool = False) -> dict[str, Any]:
+def ensure_preprocessed_data(
+    config: dict[str, Any],
+    force: bool = False,
+    force_download: bool = False,
+) -> dict[str, Any]:
     preprocess_config = _preprocess_config(config)
     if not preprocess_config["enabled"]:
         return config["data"]
 
-    preprocess_datasets(config, force=force)
+    preprocess_datasets(config, force=force, force_download=force_download)
     return preprocessed_data_config(config)
