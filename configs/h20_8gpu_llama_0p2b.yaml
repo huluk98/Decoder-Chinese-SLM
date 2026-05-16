@@ -75,6 +75,7 @@ data:
       max_samples: null
     - type: hf
       path: ticoAg/Chinese-medical-dialogue
+      data_files: data/train_0001_of_0001.json
       split: train
       format: prompt_response
       prompt_fields: [instruction, input, question, title]
@@ -82,6 +83,7 @@ data:
       max_samples: null
     - type: hf
       path: wangrui6/Zhihu-KOL
+      data_files: data/*.parquet
       split: train
       format: prompt_response
       prompt_fields: [INSTRUCTION]
@@ -91,6 +93,7 @@ data:
       max_samples: null
     - type: hf
       path: BelleGroup/train_1M_CN
+      data_files: Belle_open_source_1M.json
       split: train
       format: prompt_response
       prompt_fields: [instruction, input]
@@ -98,6 +101,7 @@ data:
       max_samples: null
     - type: hf
       path: BelleGroup/train_2M_CN
+      data_files: train_2M_CN.json
       split: train
       format: prompt_response
       prompt_fields: [instruction, input]
@@ -105,6 +109,7 @@ data:
       max_samples: null
     - type: hf
       path: BelleGroup/train_3.5M_CN
+      data_files: train_3.5M_CN.json
       split: train
       format: chat_conversations
       max_samples: null
