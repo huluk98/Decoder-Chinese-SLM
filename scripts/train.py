@@ -6,6 +6,7 @@ import math
 import os
 import shutil
 import sys
+import time
 from contextlib import nullcontext
 from itertools import islice
 from pathlib import Path
@@ -284,6 +285,9 @@ def main() -> None:
         block_size=block_size,
         batch_size=per_gpu_batch_size,
         num_workers=int(train_config.get("num_workers", 0)),
+        pin_memory=bool(train_config.get("pin_memory", False)),
+        persistent_workers=bool(train_config.get("persistent_workers", False)),
+        prefetch_factor=train_config.get("prefetch_factor"),
         rank=rank,
         world_size=world_size,
     )
@@ -303,6 +307,14 @@ def main() -> None:
     maybe_print(rank, f"Output: {output_dir}")
     maybe_print(rank, f"Effective global batch: {effective_global_batch}")
     maybe_print(rank, f"Effective tokens per optimizer step: {effective_global_batch * block_size}")
+    maybe_print(
+        rank,
+        "DataLoader: "
+        f"num_workers={int(train_config.get('num_workers', 0))} "
+        f"pin_memory={bool(train_config.get('pin_memory', False))} "
+        f"persistent_workers={bool(train_config.get('persistent_workers', False))} "
+        f"prefetch_factor={train_config.get('prefetch_factor')}",
+    )
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -310,6 +322,9 @@ def main() -> None:
     warned_high_first_loss = False
 
     progress = trange(1, int(train_config["max_steps"]) + 1, desc="training", disable=not is_main_process(rank))
+    last_log_time = time.perf_counter()
+    tokens_since_log = 0
+    steps_since_log = 0
     for step in progress:
         lr = learning_rate_for_step(step - 1, train_config)
         set_optimizer_lr(optimizer, lr)
@@ -322,7 +337,7 @@ def main() -> None:
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
 
-            batch = {key: value.to(device) for key, value in batch.items()}
+            batch = {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
             sync_context = (
                 model.no_sync()
                 if world_size > 1 and hasattr(model, "no_sync") and micro_step < grad_accum_steps - 1
@@ -374,13 +389,25 @@ def main() -> None:
                 )
             warned_high_first_loss = True
 
+        tokens_since_log += effective_global_batch * block_size
+        steps_since_log += 1
+
         if step % int(train_config["log_every"]) == 0 and is_main_process(rank):
+            now = time.perf_counter()
+            elapsed = max(1e-6, now - last_log_time)
+            tokens_per_second = tokens_since_log / elapsed
+            seconds_per_step = elapsed / max(1, steps_since_log)
             progress.set_postfix(
                 loss=f"{logged_loss:.4f}",
                 lr=f"{lr:.2e}",
                 world_size=world_size,
                 egb=effective_global_batch,
+                tok_s=f"{tokens_per_second / 1000.0:.1f}k",
+                step_s=f"{seconds_per_step:.2f}",
             )
+            last_log_time = now
+            tokens_since_log = 0
+            steps_since_log = 0
 
         should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
         if should_save and is_main_process(rank):
