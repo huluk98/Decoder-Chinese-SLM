@@ -1,0 +1,144 @@
+run:
+  seed: 42
+  output_dir: runs/h20-7gpu-llama-0p2b-fast
+
+tokenizer:
+  path: artifacts/tokenizer-chatlm-bpe-29298
+  vocab_size: 29298
+  min_frequency: 2
+  max_samples: null
+  train_if_missing: false
+
+preprocess:
+  enabled: true
+  output_path: data/processed/chatlm_public_sources_0p2b.jsonl
+  manifest_path: data/processed/chatlm_public_sources_0p2b.manifest.json
+  overwrite: false
+  dedupe: true
+  min_chars: 8
+  max_chars: null
+  min_rows: 9000000
+  strict_min_rows: false
+  continue_on_source_error: true
+  download_first: true
+  download_manifest_path: data/raw/chatlm_public_sources_0p2b.download_manifest.json
+  continue_on_download_error: true
+  shuffle_before_write: false
+
+model:
+  architecture: llama
+  vocab_size: 29298
+  block_size: 2048
+  num_hidden_layers: 24
+  num_attention_heads: 12
+  num_key_value_heads: 4
+  hidden_size: 768
+  intermediate_size: 2048
+  hidden_act: silu
+  rms_norm_eps: 0.000001
+  rope_theta: 10000.0
+  attention_dropout: 0.0
+  attention_bias: false
+  mlp_bias: false
+  tie_word_embeddings: false
+  attn_implementation: sdpa
+  gradient_checkpointing: true
+
+data:
+  streaming: true
+  hf_cache_dir: data/raw/huggingface
+  hf_retries: 5
+  hf_retry_sleep_seconds: 20
+  hf_retry_backoff: 1.8
+  hf_download_timeout: 120
+  hf_etag_timeout: 60
+  hf_endpoint: null
+  shuffle_buffer: 50000
+  drop_last: true
+  add_eos: true
+  sources:
+    - type: hf
+      path: YeungNLP/firefly-pretrain-dataset
+      data_files: webText2019zh.jsonl
+      split: train
+      format: prompt_response
+      prompt_fields: [title, desc]
+      response_fields: [content]
+      max_samples: null
+    - type: hf
+      path: ZhouLV/Chinese-Train-Datasets
+      data_files: baike2018qa/baike_qa_train.json
+      split: train
+      format: prompt_response
+      prompt_fields: [title, desc]
+      response_fields: [answer]
+      max_samples: null
+    - type: hf
+      path: ticoAg/Chinese-medical-dialogue
+      data_files: data/train_0001_of_0001.json
+      split: train
+      format: prompt_response
+      prompt_fields: [instruction, input, question, title]
+      response_fields: [output, answer, response]
+      max_samples: null
+    - type: hf
+      path: wangrui6/Zhihu-KOL
+      data_files:
+        - data/train-00000-of-00005-a1278ede4e8c5cdb.parquet
+        - data/train-00001-of-00005-1fc2da944397e9c2.parquet
+        - data/train-00002-of-00005-68ced004a1458143.parquet
+        - data/train-00003-of-00005-1dae36b67c12169f.parquet
+        - data/train-00004-of-00005-c374cc9fbda9fda7.parquet
+      split: train
+      format: prompt_response
+      prompt_fields: [INSTRUCTION]
+      response_fields: [RESPONSE]
+      retries: 10
+      retry_sleep_seconds: 30
+      max_samples: null
+    - type: hf
+      path: BelleGroup/train_1M_CN
+      data_files: Belle_open_source_1M.json
+      split: train
+      format: prompt_response
+      prompt_fields: [instruction, input]
+      response_fields: [output]
+      max_samples: null
+    - type: hf
+      path: BelleGroup/train_2M_CN
+      data_files: train_2M_CN.json
+      split: train
+      format: prompt_response
+      prompt_fields: [instruction, input]
+      response_fields: [output]
+      max_samples: null
+    - type: hf
+      path: BelleGroup/train_3.5M_CN
+      data_files: train_3.5M_CN.json
+      split: train
+      format: chat_conversations
+      max_samples: null
+    - type: hf
+      path: YeungNLP/firefly-pretrain-dataset
+      data_files: wiki_zh.jsonl
+      split: train
+      format: text_fields
+      text_fields: [title, text, content]
+      max_samples: null
+
+train:
+  batch_size: 16
+  grad_accum_steps: 5
+  max_steps: 100000
+  learning_rate: 0.0003
+  min_learning_rate: 0.00003
+  warmup_steps: 1000
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  max_grad_norm: 1.0
+  precision: bf16
+  num_workers: 4
+  log_every: 10
+  save_every: 1000
+  compile: true

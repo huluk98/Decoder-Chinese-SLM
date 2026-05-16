@@ -65,6 +65,11 @@ def maybe_print(rank: int, message: str) -> None:
         print(message)
 
 
+def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
+    unwrapped = model.module if hasattr(model, "module") else model
+    return unwrapped._orig_mod if hasattr(unwrapped, "_orig_mod") else unwrapped
+
+
 def autocast_for(device: torch.device, precision: str):
     if device.type == "cuda" and precision in {"fp16", "bf16"}:
         dtype = torch.float16 if precision == "fp16" else torch.bfloat16
@@ -103,8 +108,7 @@ def save_checkpoint(
     checkpoint_dir = output_dir / f"step-{step:06d}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    unwrapped = model.module if hasattr(model, "module") else model
-    unwrapped = unwrapped._orig_mod if hasattr(unwrapped, "_orig_mod") else unwrapped
+    unwrapped = unwrap_model(model)
     unwrapped.save_pretrained(checkpoint_dir)
     tokenizer.save_pretrained(checkpoint_dir)
     torch.save({"step": step, "optimizer": optimizer.state_dict(), "config": config}, checkpoint_dir / "trainer_state.pt")
@@ -147,6 +151,72 @@ def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
     return load_tokenizer(tokenizer_path)
 
 
+def print_startup_launch_hint(rank: int, config_path: str) -> None:
+    maybe_print(
+        rank,
+        "Recommended 7-GPU H20 launch when physical GPU 1 is occupied:\n"
+        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \\\n"
+        "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
+        "NCCL_DEBUG=WARN \\\n"
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
+        f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}",
+    )
+
+
+def print_first_batch_debug(
+    rank: int,
+    local_rank: int,
+    world_size: int,
+    train_config: dict[str, Any],
+    model: torch.nn.Module,
+    tokenizer: Any,
+    batch: dict[str, torch.Tensor],
+    block_size: int,
+    effective_global_batch: int,
+) -> None:
+    if not is_main_process(rank):
+        return
+
+    input_ids = batch["input_ids"]
+    labels = batch["labels"]
+    valid_labels = labels[labels != -100]
+    model_vocab_size = int(getattr(unwrap_model(model).config, "vocab_size"))
+
+    labels_valid_min = int(valid_labels.min().detach().cpu()) if valid_labels.numel() else "none"
+    labels_valid_max = int(valid_labels.max().detach().cpu()) if valid_labels.numel() else "none"
+    effective_tokens = effective_global_batch * int(block_size)
+
+    print(
+        "[debug:first_batch]\n"
+        f"  CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '<not set>')}\n"
+        f"  world_size={world_size}\n"
+        f"  rank={rank} local_rank={local_rank}\n"
+        f"  per_gpu_batch_size={int(train_config['batch_size'])}\n"
+        f"  grad_accum_steps={int(train_config['grad_accum_steps'])}\n"
+        f"  effective_global_batch={effective_global_batch}\n"
+        f"  block_size={int(block_size)}\n"
+        f"  effective_tokens_per_optimizer_step={effective_tokens}\n"
+        f"  tokenizer_size={len(tokenizer)}\n"
+        f"  model.config.vocab_size={model_vocab_size}\n"
+        f"  input_ids min/max={int(input_ids.min().detach().cpu())}/{int(input_ids.max().detach().cpu())}\n"
+        f"  labels min/max={int(labels.min().detach().cpu())}/{int(labels.max().detach().cpu())}\n"
+        f"  labels excluding -100 min/max={labels_valid_min}/{labels_valid_max}"
+    )
+
+    if int(input_ids.max().detach().cpu()) >= model_vocab_size:
+        print(
+            f"[warning] input_ids.max()={int(input_ids.max().detach().cpu())} "
+            f">= model.config.vocab_size={model_vocab_size}"
+        )
+    if valid_labels.numel() and int(valid_labels.max().detach().cpu()) >= model_vocab_size:
+        print(
+            f"[warning] labels excluding -100 max={int(valid_labels.max().detach().cpu())} "
+            f">= model.config.vocab_size={model_vocab_size}"
+        )
+    if bool((labels < -100).any().detach().cpu()):
+        print("[warning] labels contain values less than -100")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a decoder-only Chinese causal language model.")
     parser.add_argument("--config", default="configs/model_0p2b.yaml", help="Path to a YAML config.")
@@ -156,6 +226,7 @@ def main() -> None:
     config = load_config(args.config)
     set_seed(int(config["run"]["seed"]))
     device, rank, local_rank, world_size = setup_distributed()
+    print_startup_launch_hint(rank, args.config)
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
     data_config = preprocessed_data_config(config)
@@ -171,6 +242,10 @@ def main() -> None:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
     train_config = config["train"]
+    grad_accum_steps = int(train_config["grad_accum_steps"])
+    per_gpu_batch_size = int(train_config["batch_size"])
+    block_size = int(config["model"]["block_size"])
+    effective_global_batch = world_size * per_gpu_batch_size * grad_accum_steps
     output_dir = Path(config["run"]["output_dir"]).expanduser()
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -180,8 +255,8 @@ def main() -> None:
     dataloader = build_dataloader(
         data_config=data_config,
         tokenizer=tokenizer,
-        block_size=int(config["model"]["block_size"]),
-        batch_size=int(train_config["batch_size"]),
+        block_size=block_size,
+        batch_size=per_gpu_batch_size,
         num_workers=int(train_config.get("num_workers", 0)),
         rank=rank,
         world_size=world_size,
@@ -200,17 +275,20 @@ def main() -> None:
     maybe_print(rank, f"Parameters: {count_parameters(model):,}")
     maybe_print(rank, f"Tokenizer size: {len(tokenizer):,}")
     maybe_print(rank, f"Output: {output_dir}")
+    maybe_print(rank, f"Effective global batch: {effective_global_batch}")
+    maybe_print(rank, f"Effective tokens per optimizer step: {effective_global_batch * block_size}")
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    printed_first_batch_debug = False
+    warned_high_first_loss = False
 
     progress = trange(1, int(train_config["max_steps"]) + 1, desc="training", disable=not is_main_process(rank))
     for step in progress:
         lr = learning_rate_for_step(step - 1, train_config)
         set_optimizer_lr(optimizer, lr)
-        accumulated_loss = 0.0
+        accumulated_raw_loss = 0.0
 
-        grad_accum_steps = int(train_config["grad_accum_steps"])
         for micro_step in range(grad_accum_steps):
             try:
                 batch = next(data_iter)
@@ -227,9 +305,24 @@ def main() -> None:
             with sync_context:
                 with autocast_for(device, str(train_config["precision"])):
                     outputs = model(**batch)
-                    loss = outputs.loss / grad_accum_steps
+                    raw_loss = outputs.loss
+                    loss = raw_loss / grad_accum_steps
 
-                accumulated_loss += float(loss.detach().cpu()) * grad_accum_steps
+                if not printed_first_batch_debug:
+                    print_first_batch_debug(
+                        rank=rank,
+                        local_rank=local_rank,
+                        world_size=world_size,
+                        train_config=train_config,
+                        model=model,
+                        tokenizer=tokenizer,
+                        batch=batch,
+                        block_size=block_size,
+                        effective_global_batch=effective_global_batch,
+                    )
+                    printed_first_batch_debug = True
+
+                accumulated_raw_loss += float(raw_loss.detach().cpu())
                 scaler.scale(loss).backward()
 
         if float(train_config["max_grad_norm"]) > 0:
@@ -240,15 +333,28 @@ def main() -> None:
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
 
+        logged_loss = accumulated_raw_loss / grad_accum_steps
         if world_size > 1:
-            loss_tensor = torch.tensor(accumulated_loss, device=device)
+            loss_tensor = torch.tensor(logged_loss, device=device)
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
             logged_loss = float(loss_tensor.detach().cpu())
-        else:
-            logged_loss = accumulated_loss
+
+        if step == 1 and not warned_high_first_loss:
+            if is_main_process(rank) and logged_loss > 30:
+                expected_random_loss = math.log(float(getattr(unwrap_model(model).config, "vocab_size")))
+                print(
+                    f"[warning] first logged loss {logged_loss:.4f} is much larger than "
+                    f"log(vocab_size) ~= {expected_random_loss:.2f}. Check labels/token ids."
+                )
+            warned_high_first_loss = True
 
         if step % int(train_config["log_every"]) == 0 and is_main_process(rank):
-            progress.set_postfix(loss=f"{logged_loss:.4f}", lr=f"{lr:.2e}")
+            progress.set_postfix(
+                loss=f"{logged_loss:.4f}",
+                lr=f"{lr:.2e}",
+                world_size=world_size,
+                egb=effective_global_batch,
+            )
 
         should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
         if should_save and is_main_process(rank):
