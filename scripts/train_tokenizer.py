@@ -22,11 +22,16 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=None, help="Override tokenizer max sample count.")
     parser.add_argument("--skip-prepare", action="store_true", help="Train directly from configured raw sources.")
     parser.add_argument("--force-prepare", action="store_true", help="Rebuild the normalized JSONL before training.")
+    parser.add_argument("--force-download", action="store_true", help="Re-download Hugging Face snapshots before preprocessing.")
     args = parser.parse_args()
 
     config = load_config(args.config)
     tokenizer_config = config["tokenizer"]
-    data_config = config["data"] if args.skip_prepare else ensure_preprocessed_data(config, force=args.force_prepare)
+    data_config = (
+        config["data"]
+        if args.skip_prepare
+        else ensure_preprocessed_data(config, force=args.force_prepare, force_download=args.force_download)
+    )
 
     max_samples = args.max_samples if args.max_samples is not None else tokenizer_config.get("max_samples")
     texts = iter_texts(data_config)
