@@ -141,6 +141,9 @@ train:
   tf32: true
   float32_matmul_precision: high
   num_workers: 0
+  pin_memory: true
+  persistent_workers: false
+  prefetch_factor: null
   log_every: 10
   save_every: 1000
   compile: false

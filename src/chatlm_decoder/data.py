@@ -561,6 +561,9 @@ def build_dataloader(
     block_size: int,
     batch_size: int,
     num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
     rank: int = 0,
     world_size: int = 1,
 ) -> DataLoader:
@@ -577,9 +580,14 @@ def build_dataloader(
         world_size=world_size,
     )
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    return DataLoader(
-        dataset,
-        batch_size=int(batch_size),
-        num_workers=int(num_workers),
-        collate_fn=lambda batch: causal_lm_collate(batch, int(pad_token_id)),
-    )
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": int(batch_size),
+        "num_workers": int(num_workers),
+        "pin_memory": bool(pin_memory),
+        "collate_fn": lambda batch: causal_lm_collate(batch, int(pad_token_id)),
+    }
+    if int(num_workers) > 0:
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+    return DataLoader(dataset, **loader_kwargs)
