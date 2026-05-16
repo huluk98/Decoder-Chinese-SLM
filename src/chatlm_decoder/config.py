@@ -44,6 +44,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["data"].setdefault("add_eos", True)
     config["data"].setdefault("seed", config["run"]["seed"])
     config["data"].setdefault("hf_cache_dir", "data/raw/huggingface")
+    config["data"].setdefault("hf_retries", 3)
+    config["data"].setdefault("hf_retry_sleep_seconds", 10)
+    config["data"].setdefault("hf_retry_backoff", 2.0)
+    config["data"].setdefault("hf_download_timeout", 120)
+    config["data"].setdefault("hf_etag_timeout", 60)
+    config["data"].setdefault("hf_endpoint", None)
 
     config["preprocess"].setdefault("enabled", False)
     config["preprocess"].setdefault("output_path", "data/processed/normalized.jsonl")
