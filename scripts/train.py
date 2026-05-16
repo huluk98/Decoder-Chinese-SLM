@@ -77,6 +77,27 @@ def autocast_for(device: torch.device, precision: str):
     return nullcontext()
 
 
+def configure_torch_backends(train_config: dict[str, Any], rank: int) -> None:
+    if not torch.cuda.is_available():
+        return
+
+    tf32_enabled = bool(train_config.get("tf32", False))
+    matmul_precision = str(train_config.get("float32_matmul_precision", "highest"))
+
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision(matmul_precision)
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = tf32_enabled
+
+    maybe_print(
+        rank,
+        f"TF32: {'enabled' if tf32_enabled else 'disabled'} | "
+        f"float32_matmul_precision: {matmul_precision}",
+    )
+
+
 def learning_rate_for_step(step: int, train_config: dict[str, Any]) -> float:
     max_lr = float(train_config["learning_rate"])
     min_lr = float(train_config["min_learning_rate"])
@@ -155,10 +176,14 @@ def print_startup_launch_hint(rank: int, config_path: str) -> None:
     maybe_print(
         rank,
         "Recommended 7-GPU H20 launch when physical GPU 1 is occupied:\n"
-        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \\\n"
-        "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
-        "NCCL_DEBUG=WARN \\\n"
-        "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
+        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \
+"
+        "HF_HUB_ENABLE_HF_TRANSFER=1 \
+"
+        "NCCL_DEBUG=WARN \
+"
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+"
         f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}",
     )
 
@@ -226,6 +251,8 @@ def main() -> None:
     config = load_config(args.config)
     set_seed(int(config["run"]["seed"]))
     device, rank, local_rank, world_size = setup_distributed()
+    train_config = config["train"]
+    configure_torch_backends(train_config, rank)
     print_startup_launch_hint(rank, args.config)
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
@@ -241,7 +268,6 @@ def main() -> None:
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
-    train_config = config["train"]
     grad_accum_steps = int(train_config["grad_accum_steps"])
     per_gpu_batch_size = int(train_config["batch_size"])
     block_size = int(config["model"]["block_size"])
