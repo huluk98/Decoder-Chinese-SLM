@@ -22,6 +22,7 @@ The size also keeps the experiment legible: training runs finish faster, ablatio
 - Llama-style decoder definition backed by `transformers.LlamaForCausalLM`.
 - RoPE positions, RMSNorm, SwiGLU, grouped-query attention, bias-free projections, and SDPA attention.
 - Plain PyTorch training loop with checkpointing, BF16 mixed precision, gradient accumulation, and `torchrun` distributed data parallel support.
+- Rank-0 metrics logging plus loss-curve generation for model-card comparisons.
 - Tiny local smoke config and sample data so the skeleton can run before downloading full corpora.
 
 ## Upstream Data Notes
@@ -210,6 +211,25 @@ CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN T
 DeepSpeed is not required for this 0.2B model to fit in 96 GB+ H20 memory, so ZeRO-1 is the first recommended DeepSpeed mode. ZeRO-2 or ZeRO-3 can save more optimizer/parameter memory, but they add extra communication and are usually slower for a model this small unless memory pressure is the real bottleneck. For throughput, compare `tok_s` and `step_s` between the DDP and DeepSpeed commands, and then tune `train.batch_size`, `train.grad_accum_steps`, `train.num_workers`, `train.pin_memory`, and whether `model.gradient_checkpointing` is worth the recompute overhead on your GPUs.
 
 You do not need exactly 24 layers to stay near 0.2B parameters. The current model is roughly 196M parameters with 24 layers, `hidden_size: 768`, and `intermediate_size: 2048`. Other Llama-style shapes in the same class include about 197M parameters at 20 layers with hidden size 832 and MLP 2240, about 206M at 18 layers with hidden size 896 and MLP 2368, or about 195M at 12 layers with hidden size 1024 and MLP 2752. Fewer wider layers can improve hardware utilization, but they change the model shape and you should treat that as a new run, not a resume of the 24-layer checkpoints.
+
+## Loss Curves For Comparison
+
+The trainer writes rank-0 metrics to:
+
+```text
+runs/<run-name>/metrics/training_metrics.csv
+```
+
+Use the plotting script to generate ChatLM-mini-Chinese-style loss images for a README or model card:
+
+```bash
+python scripts/plot_loss.py \
+  --metrics runs/h20-7gpu-llama-0p2b-deepspeed/metrics/training_metrics.csv \
+  --stage pretrain \
+  --title "Decoder-Chinese-SLM 0.2B Pretraining Loss"
+```
+
+This writes `pretrain_loss.png`, `loss.png`, and `pretrain_loss_lr.png` beside the metrics CSV. Use `--output-dir img` if you want the PNGs in a model-card image folder. The CSV stores `step`, averaged causal-LM `loss`, `lr`, `tokens_per_second`, `seconds_per_step`, `world_size`, and effective batch details so the decoder-only run can be compared against the same-size ChatLM-mini-Chinese reference transparently.
 
 ## Add More Public Sources
 
