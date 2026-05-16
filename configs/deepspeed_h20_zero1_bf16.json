@@ -1,0 +1,18 @@
+{
+  "train_micro_batch_size_per_gpu": 16,
+  "gradient_accumulation_steps": 5,
+  "train_batch_size": 560,
+  "gradient_clipping": 1.0,
+  "bf16": {
+    "enabled": true
+  },
+  "fp16": {
+    "enabled": false
+  },
+  "zero_optimization": {
+    "stage": 1,
+    "contiguous_gradients": true,
+    "overlap_comm": true
+  },
+  "wall_clock_breakdown": false
+}
