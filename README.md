@@ -180,6 +180,16 @@ The H20 config is about the 0.2B class:
 
 For a first full-data run, watch memory with `nvidia-smi` and tune `train.batch_size`, `train.grad_accum_steps`, and `model.block_size`. Keep the tokenizer step single-process unless you intentionally add a shared tokenizer artifact first.
 
+## 7x H20 When GPU 1 Is Busy
+
+Use this one-line launch command when physical GPU 1 is occupied and training should use only GPUs 0, 2, 3, 4, 5, 6, and 7:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 torchrun --standalone --nproc_per_node=7 scripts/train.py --config configs/h20_7gpu_llama_0p2b_fast.yaml
+```
+
+The 7-GPU fast config keeps the same 0.2B Llama-style model shape, but uses `train.batch_size: 16` and `train.grad_accum_steps: 5`, giving `7 * 16 * 5 = 560` samples per optimizer update.
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:
