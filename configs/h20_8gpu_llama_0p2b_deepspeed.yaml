@@ -1,6 +1,6 @@
 run:
   seed: 42
-  output_dir: runs/h20-7gpu-llama-0p2b-deepspeed
+  output_dir: runs/h20-8gpu-llama-0p2b-deepspeed
 
 tokenizer:
   path: artifacts/tokenizer-chatlm-bpe-29298
@@ -130,8 +130,8 @@ data:
       max_samples: null
 
 train:
-  batch_size: 24
-  grad_accum_steps: 3
+  batch_size: 32
+  grad_accum_steps: 2
   max_steps: 100000
   learning_rate: 0.0003
   min_learning_rate: 0.00003

@@ -95,8 +95,15 @@ def maybe_print(rank: int, message: str) -> None:
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    unwrapped = model.module if hasattr(model, "module") else model
-    return unwrapped._orig_mod if hasattr(unwrapped, "_orig_mod") else unwrapped
+    unwrapped = model
+    while True:
+        if hasattr(unwrapped, "module"):
+            unwrapped = unwrapped.module
+            continue
+        if hasattr(unwrapped, "_orig_mod"):
+            unwrapped = unwrapped._orig_mod
+            continue
+        return unwrapped
 
 
 def autocast_for(device: torch.device, precision: str):
@@ -112,18 +119,42 @@ def configure_torch_backends(train_config: dict[str, Any], rank: int) -> None:
 
     tf32_enabled = bool(train_config.get("tf32", False))
     matmul_precision = str(train_config.get("float32_matmul_precision", "highest"))
+    cudnn_benchmark = bool(train_config.get("cudnn_benchmark", False))
+    sdp_flash = bool(train_config.get("sdp_flash", True))
+    sdp_mem_efficient = bool(train_config.get("sdp_mem_efficient", True))
+    sdp_math = bool(train_config.get("sdp_math", True))
 
-    if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision(matmul_precision)
-    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
-        torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
+    fp32_backend_precision = "tf32" if tf32_enabled else "ieee"
+    if hasattr(torch.backends, "fp32_precision") and hasattr(torch.backends, "cuda"):
+        torch.backends.fp32_precision = fp32_backend_precision
+        if hasattr(torch.backends.cuda, "matmul") and hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+            torch.backends.cuda.matmul.fp32_precision = fp32_backend_precision
+        if hasattr(torch.backends, "cudnn") and hasattr(torch.backends.cudnn, "fp32_precision"):
+            torch.backends.cudnn.fp32_precision = fp32_backend_precision
+    else:
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision(matmul_precision)
+        if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+            torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.allow_tf32 = tf32_enabled
     if hasattr(torch.backends, "cudnn"):
-        torch.backends.cudnn.allow_tf32 = tf32_enabled
+        torch.backends.cudnn.benchmark = cudnn_benchmark
+    if hasattr(torch.backends, "cuda"):
+        if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+            torch.backends.cuda.enable_flash_sdp(sdp_flash)
+        if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+            torch.backends.cuda.enable_mem_efficient_sdp(sdp_mem_efficient)
+        if hasattr(torch.backends.cuda, "enable_math_sdp"):
+            torch.backends.cuda.enable_math_sdp(sdp_math)
 
     maybe_print(
         rank,
         f"TF32: {'enabled' if tf32_enabled else 'disabled'} | "
-        f"float32_matmul_precision: {matmul_precision}",
+        f"float32_matmul_precision: {matmul_precision} | "
+        f"backend_fp32_precision: {fp32_backend_precision} | "
+        f"SDPA flash/mem_efficient/math: {sdp_flash}/{sdp_mem_efficient}/{sdp_math} | "
+        f"cudnn_benchmark: {cudnn_benchmark}",
     )
 
 
@@ -376,26 +407,40 @@ def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
     return load_tokenizer(tokenizer_path)
 
 
-def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool) -> None:
+def _h20_launch_profile(config_path: str, world_size: int) -> tuple[int, str, str]:
+    if "8gpu" in config_path or world_size == 8:
+        return 8, "0,1,2,3,4,5,6,7", "configs/accelerate_h20_8gpu.yaml"
+    if "7gpu" in config_path or world_size == 7:
+        return 7, "0,2,3,4,5,6,7", "configs/accelerate_h20_7gpu.yaml"
+    return max(1, world_size), "0,1,2,3,4,5,6,7", "configs/accelerate_h20_8gpu.yaml"
+
+
+def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool, world_size: int) -> None:
+    launch_gpus, visible_devices, accelerate_config = _h20_launch_profile(config_path, world_size)
     primary_launcher = (
-        f"deepspeed --num_gpus=7 scripts/train.py --config {config_path}"
+        f"deepspeed --num_gpus={launch_gpus} scripts/train.py --config {config_path}"
         if use_deepspeed
-        else f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}"
+        else f"torchrun --standalone --nproc_per_node={launch_gpus} scripts/train.py --config {config_path}"
     )
     accelerate_launcher = (
-        "accelerate launch --config_file configs/accelerate_h20_7gpu.yaml "
+        f"accelerate launch --config_file {accelerate_config} "
         f"scripts/train.py --config {config_path}"
+    )
+    occupancy_note = (
+        " when physical GPU 1 is occupied"
+        if launch_gpus == 7
+        else " using all 8 visible H20 GPUs"
     )
     maybe_print(
         rank,
-        "Recommended 7-GPU H20 launch when physical GPU 1 is occupied:\n"
-        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \\\n"
+        f"Recommended {launch_gpus}-GPU H20 launch{occupancy_note}:\n"
+        f"CUDA_VISIBLE_DEVICES={visible_devices} \\\n"
         "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
         "NCCL_DEBUG=WARN \\\n"
         "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
         f"{primary_launcher}\n\n"
         "Accelerate launcher for the same visible GPUs:\n"
-        "CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 \\\n"
+        f"CUDA_VISIBLE_DEVICES={visible_devices} \\\n"
         "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
         "NCCL_DEBUG=WARN \\\n"
         "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
@@ -432,6 +477,38 @@ def warn_if_accelerate_precision_differs(train_config: dict[str, Any], rank: int
             "[warning] Accelerate mixed precision is "
             f"{accelerate_precision}, but train.precision is {train_precision}. "
             "The training script uses train.precision for autocast/DeepSpeed config.",
+        )
+
+
+def print_speed_sanity_notes(
+    rank: int,
+    device: torch.device,
+    model_config: dict[str, Any],
+    train_config: dict[str, Any],
+) -> None:
+    if not is_main_process(rank):
+        return
+
+    if device.type == "cuda":
+        props = torch.cuda.get_device_properties(device)
+        memory_gib = props.total_memory / float(1024**3)
+        print(f"CUDA device memory: {memory_gib:.1f} GiB")
+
+        if memory_gib >= 80 and bool(model_config.get("gradient_checkpointing", False)):
+            print(
+                "[speed note] gradient_checkpointing is enabled on a large-memory GPU. "
+                "That saves memory but adds recompute, so it can slow a 0.2B model on H20."
+            )
+
+    if int(train_config["batch_size"]) < 16:
+        print(
+            "[speed note] train.batch_size is below 16. On 143711 MiB H20s, a larger "
+            "microbatch is usually the first throughput knob to test."
+        )
+    if int(train_config.get("num_workers", 0)) == 0:
+        print(
+            "[speed note] train.num_workers is 0. If GPU utilization dips between steps, "
+            "try 4-8 workers per rank with persistent_workers=true."
         )
 
 
@@ -517,7 +594,7 @@ def main() -> None:
     )
     configure_torch_backends(train_config, rank)
     warn_if_accelerate_precision_differs(train_config, rank)
-    print_startup_launch_hint(rank, args.config, use_deepspeed=use_deepspeed)
+    print_startup_launch_hint(rank, args.config, use_deepspeed=use_deepspeed, world_size=world_size)
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
     data_config = preprocessed_data_config(config)
@@ -527,12 +604,22 @@ def main() -> None:
         model = create_model(config["model"], tokenizer)
 
     model.to(device)
+    if world_size > 1 and not use_deepspeed:
+        ddp_kwargs: dict[str, Any] = {
+            "device_ids": [local_rank],
+            "output_device": local_rank,
+            "find_unused_parameters": False,
+            "static_graph": bool(train_config.get("ddp_static_graph", True)),
+            "gradient_as_bucket_view": bool(train_config.get("ddp_gradient_as_bucket_view", True)),
+        }
+        bucket_cap_mb = train_config.get("ddp_bucket_cap_mb")
+        if bucket_cap_mb is not None:
+            ddp_kwargs["bucket_cap_mb"] = int(bucket_cap_mb)
+        model = DistributedDataParallel(model, **ddp_kwargs)
     if bool(config["train"].get("compile", False)) and use_deepspeed:
         maybe_print(rank, "[warning] train.compile=true is ignored in DeepSpeed mode for stability.")
     elif bool(config["train"].get("compile", False)) and hasattr(torch, "compile"):
         model = torch.compile(model)
-    if world_size > 1 and not use_deepspeed:
-        model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
     grad_accum_steps = int(train_config["grad_accum_steps"])
     per_gpu_batch_size = int(train_config["batch_size"])
@@ -580,12 +667,21 @@ def main() -> None:
     maybe_print(rank, f"Effective tokens per optimizer step: {effective_global_batch * block_size}")
     maybe_print(
         rank,
+        "Speed knobs: "
+        f"gradient_checkpointing={bool(config['model'].get('gradient_checkpointing', False))} "
+        f"compile={bool(train_config.get('compile', False))} "
+        f"ddp_static_graph={bool(train_config.get('ddp_static_graph', True))} "
+        f"ddp_gradient_as_bucket_view={bool(train_config.get('ddp_gradient_as_bucket_view', True))}",
+    )
+    maybe_print(
+        rank,
         "DataLoader: "
         f"num_workers={int(train_config.get('num_workers', 0))} "
         f"pin_memory={bool(train_config.get('pin_memory', False))} "
         f"persistent_workers={bool(train_config.get('persistent_workers', False))} "
         f"prefetch_factor={train_config.get('prefetch_factor')}",
     )
+    print_speed_sanity_notes(rank, device, config["model"], train_config)
 
     model.train()
     if use_deepspeed:
@@ -679,6 +775,8 @@ def main() -> None:
             steps_since_log += 1
 
             if (step == 1 or step % int(train_config["log_every"]) == 0) and is_main_process(rank):
+                if device.type == "cuda" and bool(train_config.get("sync_cuda_for_timing", False)):
+                    torch.cuda.synchronize(device)
                 now = time.perf_counter()
                 elapsed = max(1e-6, now - last_log_time)
                 tokens_per_second = tokens_since_log / elapsed

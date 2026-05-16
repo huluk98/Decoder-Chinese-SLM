@@ -18,6 +18,7 @@ The size also keeps the experiment legible: training runs finish faster, ablatio
 - Hugging Face tokenizer training with Chinese-friendly BPE special tokens.
 - Dataset staging that downloads all configured Hugging Face sources locally before normalization.
 - Dataset preprocessing that normalizes cached/local sources and writes one merged JSONL before tokenizer training.
+- Optional packed-token pretraining path that stores token IDs once and streams fixed-length blocks from disk.
 - Streaming dataset pipeline for public Hugging Face datasets and local JSONL files.
 - Llama-style decoder definition backed by `transformers.LlamaForCausalLM`.
 - RoPE positions, RMSNorm, SwiGLU, grouped-query attention, bias-free projections, and SDPA attention.
@@ -152,77 +153,102 @@ This lands near the 0.2B parameter class while using a Llama-like decoder stack.
 
 ## 8x H20 Training Recipe
 
-NVIDIA's MIG documentation lists H20 as a Hopper/GH100 GPU with compute capability 9.0 and 96 GB memory. The provided H20 config keeps the model at the same 0.2B target, but uses BF16 training, SDPA attention, DDP over 8 GPUs, and a larger effective batch.
+Your H20 machine reports about 143711 MiB per GPU, so the H20 configs now spend memory to improve throughput instead of saving memory too aggressively. They keep the same 0.2B Llama-style model shape, but use BF16, TF32 for any FP32 matmul paths, SDPA flash kernels when PyTorch can dispatch them, larger per-GPU microbatches, fewer accumulation steps, persistent DataLoader workers, and gradient checkpointing off by default.
 
 Train the tokenizer once:
 
 ```bash
 HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
-  --config configs/h20_8gpu_llama_0p2b.yaml
+  --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
 ```
 
 That command also downloads source snapshots and prepares `data/processed/chatlm_public_sources_0p2b.jsonl` if it does not already exist. Use `--force-prepare` to rebuild normalized data from the cache, `--force-download` to refresh remote snapshots, or `--skip-prepare` to train the tokenizer directly from the raw configured sources.
 
-Then launch the 0.2B Llama-style run:
+For the fastest H20 pretraining path, pack the normalized text into token IDs once before the GPU run:
 
 ```bash
-HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --standalone --nproc_per_node=8 scripts/train.py \
-  --config configs/h20_8gpu_llama_0p2b.yaml
+python scripts/pack_tokens.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
 ```
 
-The H20 config is about the 0.2B class:
+This writes `data/processed/chatlm_public_sources_0p2b.tokens.uint16.bin` plus a manifest. The H20 configs automatically train from that packed file when it exists, avoiding repeated tokenizer work in every DataLoader worker. If the packed file is missing, training falls back to on-the-fly tokenization and prints a warning.
+
+Then launch the 8-GPU run:
+
+```bash
+./scripts/launch_h20_8gpu.sh
+```
+
+That script defaults to Accelerate as the process launcher and DeepSpeed ZeRO-1 as the training backend. It uses physical GPUs 0-7:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_8gpu.yaml scripts/train.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+```
+
+The 8-GPU speed config stays in the 0.2B class:
 
 - 24 decoder blocks
 - hidden size 768
 - 12 query heads and 4 key/value heads
 - MLP size 2048
 - sequence length 2048
-- per-GPU microbatch 8, gradient accumulation 8
+- per-GPU microbatch 32, gradient accumulation 2
+- effective batch `8 * 32 * 2 = 512` sequences per optimizer update
 
-For a first full-data run, watch memory with `nvidia-smi` and tune `train.batch_size`, `train.grad_accum_steps`, and `model.block_size`. Keep the tokenizer step single-process unless you intentionally add a shared tokenizer artifact first.
+If you want plain DDP instead of DeepSpeed, use:
+
+```bash
+LAUNCHER=torchrun CONFIG=configs/h20_8gpu_llama_0p2b.yaml ./scripts/launch_h20_8gpu.sh
+```
 
 ## 7x H20 When GPU 1 Is Busy
 
-Use this one-line launch command when physical GPU 1 is occupied and training should use only GPUs 0, 2, 3, 4, 5, 6, and 7:
+Use this script when physical GPU 1 is occupied and training should use only GPUs 0, 2, 3, 4, 5, 6, and 7:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 torchrun --standalone --nproc_per_node=7 scripts/train.py --config configs/h20_7gpu_llama_0p2b_fast.yaml
+./scripts/launch_h20_7gpu_no_gpu1.sh
 ```
 
-The 7-GPU fast config keeps the same 0.2B Llama-style model shape, but uses `train.batch_size: 16` and `train.grad_accum_steps: 5`, giving `7 * 16 * 5 = 560` samples per optimizer update.
+It expands to:
 
-The H20 configs also set `train.tf32: true` and `train.float32_matmul_precision: high`, which enables TensorFloat-32 Tensor Cores for any FP32 matrix multiplication paths while keeping the main training precision at BF16.
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_7gpu.yaml scripts/train.py --config configs/h20_7gpu_llama_0p2b_deepspeed.yaml
+```
 
-If the 7-GPU ETA looks higher than the old 8-GPU ETA, compare token throughput rather than only wall-clock ETA. The 8-GPU config runs `8 * 8 * 8 = 512` sequences per optimizer step, while the 7-GPU fast config runs `7 * 16 * 5 = 560`; that is 9.4% more tokens per step on 12.5% fewer GPUs, so a fixed `max_steps: 100000` run naturally has a longer ETA. The progress bar reports `tok_s` and `step_s` so you can check real throughput.
+The 7-GPU speed config keeps the same 0.2B model shape, but uses `train.batch_size: 24` and `train.grad_accum_steps: 3`, giving `7 * 24 * 3 = 504` sequences per optimizer update. That is close to the 8-GPU effective batch of 512 while giving each H20 a much larger microbatch than the earlier `16 * 5` setup.
 
 This training script supports two multi-GPU backends:
 
 - `configs/h20_7gpu_llama_0p2b_fast.yaml` uses plain PyTorch DDP.
-- `configs/h20_7gpu_llama_0p2b_deepspeed.yaml` uses DeepSpeed with BF16, FusedAdam when available, and ZeRO-1 optimizer partitioning.
+- `configs/h20_7gpu_llama_0p2b_deepspeed.yaml` and `configs/h20_8gpu_llama_0p2b_deepspeed.yaml` use DeepSpeed with BF16, FusedAdam when available, and ZeRO-1 optimizer partitioning.
 
-It also supports Accelerate as the process launcher. The checked-in Accelerate config launches 7 local BF16 processes; `CUDA_VISIBLE_DEVICES` still controls the physical GPU list, so GPU 1 stays unused:
+It also supports Accelerate as the process launcher. The checked-in Accelerate configs launch 7 or 8 local BF16 processes; `CUDA_VISIBLE_DEVICES` controls the physical GPU list, so GPU 1 stays unused in the 7-GPU script.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_7gpu.yaml scripts/train.py --config configs/h20_7gpu_llama_0p2b_fast.yaml
 ```
 
-For the DeepSpeed training config, use the same Accelerate launcher and switch only the training YAML:
+For plain DDP on the 7-GPU set:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_7gpu.yaml scripts/train.py --config configs/h20_7gpu_llama_0p2b_deepspeed.yaml
+LAUNCHER=torchrun CONFIG=configs/h20_7gpu_llama_0p2b_fast.yaml ./scripts/launch_h20_7gpu_no_gpu1.sh
 ```
 
 In this repo, Accelerate is used as the launcher while `scripts/train.py` keeps ownership of DDP, DeepSpeed initialization, loss averaging, metrics logging, and checkpoint saving. That keeps the DDP, DeepSpeed, and Accelerate launch commands comparable.
 
 The conda environment installs DeepSpeed. If you are managing packages manually on the H20 machine, install the optional extra with `pip install -e ".[deepspeed]"`.
 
-Use this one-line DeepSpeed launch when physical GPU 1 is occupied:
+DeepSpeed is not required for this 0.2B model to fit in 143711 MiB H20 memory, so ZeRO-1 is the first recommended DeepSpeed mode. ZeRO-2 or ZeRO-3 can save more optimizer/parameter memory, but they add extra communication and are usually slower for a model this small unless memory pressure is the real bottleneck.
 
-```bash
-CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 deepspeed --num_gpus=7 scripts/train.py --config configs/h20_7gpu_llama_0p2b_deepspeed.yaml
-```
+For throughput, compare `tok_s` and `step_s`, not only ETA. The trainer now prints the visible GPUs, world size, effective global batch, effective tokens per optimizer step, tokenizer/model vocab sanity checks, SDPA/TF32 settings, DataLoader settings, and whether gradient checkpointing is enabled.
 
-DeepSpeed is not required for this 0.2B model to fit in 96 GB+ H20 memory, so ZeRO-1 is the first recommended DeepSpeed mode. ZeRO-2 or ZeRO-3 can save more optimizer/parameter memory, but they add extra communication and are usually slower for a model this small unless memory pressure is the real bottleneck. For throughput, compare `tok_s` and `step_s` between the DDP and DeepSpeed commands, and then tune `train.batch_size`, `train.grad_accum_steps`, `train.num_workers`, `train.pin_memory`, and whether `model.gradient_checkpointing` is worth the recompute overhead on your GPUs.
+Speed knobs to test in order:
+
+- Increase `train.batch_size` until memory is comfortably high but not close to OOM, then lower `train.grad_accum_steps` to keep the effective batch near 512.
+- Keep `model.gradient_checkpointing: false` on 143711 MiB H20s unless memory forces it back on.
+- Run `scripts/pack_tokens.py` before training so the GPUs read packed token IDs instead of waiting on repeated JSONL parsing and tokenizer calls.
+- Compare `LAUNCHER=accelerate` plus DeepSpeed ZeRO-1 against `LAUNCHER=torchrun` plus DDP. For this size, DDP can be faster if optimizer memory is not a problem.
+- If GPU utilization dips between steps, raise `train.num_workers` from 4 to 6 or 8 and keep `persistent_workers: true`.
+- If `tok_s` is good but the total ETA still looks high, check whether `max_steps` now represents more total tokens. The 8-GPU config is `512 * 2048` tokens per optimizer step; the 7-GPU config is `504 * 2048`.
 
 You do not need exactly 24 layers to stay near 0.2B parameters. The current model is roughly 196M parameters with 24 layers, `hidden_size: 768`, and `intermediate_size: 2048`. Other Llama-style shapes in the same class include about 197M parameters at 20 layers with hidden size 832 and MLP 2240, about 206M at 18 layers with hidden size 896 and MLP 2368, or about 195M at 12 layers with hidden size 1024 and MLP 2752. Fewer wider layers can improve hardware utilization, but they change the model shape and you should treat that as a new run, not a resume of the 24-layer checkpoints.
 
