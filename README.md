@@ -36,7 +36,7 @@ This repo now configures public Hugging Face mirrors/equivalents for those sourc
 - [`BelleGroup/train_1M_CN`](https://huggingface.co/datasets/BelleGroup/train_1M_CN), [`BelleGroup/train_2M_CN`](https://huggingface.co/datasets/BelleGroup/train_2M_CN), and [`BelleGroup/train_3.5M_CN`](https://huggingface.co/datasets/BelleGroup/train_3.5M_CN), BELLE instruction/chat data.
 - [`YeungNLP/firefly-pretrain-dataset`](https://huggingface.co/datasets/YeungNLP/firefly-pretrain-dataset), `wiki_zh.jsonl`, Chinese Wikipedia-like text.
 
-The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The preprocessing config has `min_rows: 9000000`; if the merged dataset falls below that floor, the script raises an error instead of silently training on a small corpus.
+The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The full-data configs keep `min_rows: 9000000` as a target-size warning. They also set `continue_on_source_error: true`, so a flaky source is logged in the manifest and the preprocessor moves on to the next source instead of discarding hours of completed work.
 
 ## Conda Setup
 
@@ -79,7 +79,15 @@ python scripts/prepare_data.py --config configs/model_0p2b.yaml
 
 The merged dataset is written to `data/processed/chatlm_public_sources_0p2b.jsonl`, with counts in `data/processed/chatlm_public_sources_0p2b.manifest.json`. The raw Hugging Face cache goes under `data/raw/huggingface`.
 
-If a Hugging Face source fails with an `HTTPSConnectionPool` or read-timeout error, it is usually a transient network issue rather than a bad config. The loader has retry/backoff settings in the `data:` section, and `wangrui6/Zhihu-KOL` has extra retries because it is a common long download. Re-run with `--force-prepare` after the connection stabilizes:
+If a Hugging Face source fails with an `HTTPSConnectionPool` or read-timeout error, it is usually a transient network issue rather than a bad config. The loader has retry/backoff settings in the `data:` section, and `wangrui6/Zhihu-KOL` has extra retries because it is a common long download. After retries are exhausted, the full-data configs skip that source, write the error under `failed_sources` in the manifest, and continue with the next dataset.
+
+If a run is interrupted, you may see `data/processed/chatlm_public_sources_0p2b.jsonl.tmp`. That file is only the in-progress write target. It is not used by training or tokenizer scripts, and it can be deleted before a clean rebuild:
+
+```bash
+rm -f data/processed/chatlm_public_sources_0p2b.jsonl.tmp
+```
+
+Re-run with `--force-prepare` after the connection stabilizes:
 
 ```bash
 HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
@@ -96,6 +104,12 @@ HF_ENDPOINT=https://hf-mirror.com HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/tra
 ```
 
 You can also raise `data.hf_download_timeout`, `data.hf_etag_timeout`, or per-source `retries` in the YAML if one dataset is especially flaky.
+
+If you already have a completed `data/processed/chatlm_public_sources_0p2b.jsonl`, the tokenizer and training scripts use that final JSONL file and do not need the `.tmp` file. Check the row count with:
+
+```bash
+wc -l data/processed/chatlm_public_sources_0p2b.jsonl
+```
 
 Then launch training on one GPU:
 
@@ -180,6 +194,40 @@ data:
 ```
 
 For public Hugging Face datasets, add another `type: hf` entry with the dataset `path`, `split`, and `format`. The preprocessing step will download it through `datasets.load_dataset(...)` and append normalized rows to the same merged JSONL.
+
+For a different local dataset blend, make a new config or change `preprocess.output_path` so you do not overwrite the current merged file:
+
+```yaml
+preprocess:
+  output_path: data/processed/my_domain_mix.jsonl
+  manifest_path: data/processed/my_domain_mix.manifest.json
+
+data:
+  sources:
+    - type: local_jsonl
+      path: /absolute/path/to/my_domain_data.jsonl
+      format: prompt_response
+      prompt_fields: [prompt]
+      response_fields: [response]
+```
+
+Then rebuild that blend:
+
+```bash
+python scripts/prepare_data.py --config configs/my_domain_mix.yaml --force
+```
+
+To pull the latest code onto another desktop, clone once:
+
+```bash
+git clone https://github.com/huluk98/Decoder-Chinese-SLM.git
+```
+
+Inside an existing clone, update it with:
+
+```bash
+git pull origin main
+```
 
 ## Checkpoints
 
