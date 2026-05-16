@@ -29,6 +29,11 @@ def main() -> None:
     print(f"Rows read: {manifest.get('read', 0):,}")
     print(f"Rows written: {manifest.get('written', 0):,}")
     print(f"Rows skipped: {manifest.get('skipped', 0):,}")
+    if manifest.get("below_min_rows"):
+        print("Warning: processed row count is below preprocess.min_rows; inspect the manifest before a full run.")
+    if manifest.get("failed_sources"):
+        print(f"Skipped failed sources: {len(manifest['failed_sources'])}")
+        print(f"Manifest: {manifest.get('manifest_path')}")
 
 
 if __name__ == "__main__":
