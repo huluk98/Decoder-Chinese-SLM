@@ -79,6 +79,24 @@ python scripts/prepare_data.py --config configs/model_0p2b.yaml
 
 The merged dataset is written to `data/processed/chatlm_public_sources_0p2b.jsonl`, with counts in `data/processed/chatlm_public_sources_0p2b.manifest.json`. The raw Hugging Face cache goes under `data/raw/huggingface`.
 
+If a Hugging Face source fails with an `HTTPSConnectionPool` or read-timeout error, it is usually a transient network issue rather than a bad config. The loader has retry/backoff settings in the `data:` section, and `wangrui6/Zhihu-KOL` has extra retries because it is a common long download. Re-run with `--force-prepare` after the connection stabilizes:
+
+```bash
+HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
+  --config configs/h20_8gpu_llama_0p2b.yaml \
+  --force-prepare
+```
+
+On networks where Hugging Face is slow or blocked, try a mirror endpoint:
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/train_tokenizer.py \
+  --config configs/h20_8gpu_llama_0p2b.yaml \
+  --force-prepare
+```
+
+You can also raise `data.hf_download_timeout`, `data.hf_etag_timeout`, or per-source `retries` in the YAML if one dataset is especially flaky.
+
 Then launch training on one GPU:
 
 ```bash

@@ -42,6 +42,12 @@ model:
 data:
   streaming: true
   hf_cache_dir: data/raw/huggingface
+  hf_retries: 5
+  hf_retry_sleep_seconds: 20
+  hf_retry_backoff: 1.8
+  hf_download_timeout: 120
+  hf_etag_timeout: 60
+  hf_endpoint: null
   shuffle_buffer: 50000
   drop_last: true
   add_eos: true
@@ -75,6 +81,8 @@ data:
       format: prompt_response
       prompt_fields: [INSTRUCTION]
       response_fields: [RESPONSE]
+      retries: 10
+      retry_sleep_seconds: 30
       max_samples: null
     - type: hf
       path: BelleGroup/train_1M_CN
