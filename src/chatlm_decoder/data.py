@@ -6,7 +6,7 @@ import sys
 import time
 from itertools import islice
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 try:
     import torch
@@ -143,16 +143,12 @@ def _iter_local_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
                 yield json.loads(line)
 
 
-def _iter_hf_dataset(
+def _apply_hf_env(
     source: dict[str, Any],
-    default_streaming: bool,
-    default_shuffle_buffer: int | None,
-    default_seed: int,
-    default_cache_dir: str | None = None,
     default_download_timeout: int | None = None,
     default_etag_timeout: int | None = None,
     default_endpoint: str | None = None,
-) -> Iterator[dict[str, Any]]:
+) -> None:
     endpoint = source.get("endpoint", default_endpoint)
     download_timeout = source.get("download_timeout", default_download_timeout)
     etag_timeout = source.get("etag_timeout", default_etag_timeout)
@@ -163,16 +159,185 @@ def _iter_hf_dataset(
     if etag_timeout is not None:
         os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", str(etag_timeout))
 
+
+def _retry_hf_call(
+    label: str,
+    source: dict[str, Any],
+    data_config: dict[str, Any],
+    call: Callable[[], Any],
+) -> Any:
+    retries = int(source.get("retries", data_config.get("hf_retries", 3)))
+    sleep_seconds = float(source.get("retry_sleep_seconds", data_config.get("hf_retry_sleep_seconds", 10)))
+    backoff = float(source.get("retry_backoff", data_config.get("hf_retry_backoff", 2.0)))
+    attempt = 0
+
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            attempt += 1
+            if attempt > retries:
+                raise RuntimeError(
+                    f"Failed to {label} Hugging Face source {source.get('path')} "
+                    f"after {retries} retries. Last error: {exc}"
+                ) from exc
+
+            wait = sleep_seconds * (backoff ** (attempt - 1))
+            print(
+                f"[data] {source.get('path')} failed during {label} on attempt {attempt}/{retries}: {exc}. "
+                f"Retrying in {wait:.1f}s...",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+
+
+def _as_pattern_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        patterns: list[str] = []
+        for item in value.values():
+            nested = _as_pattern_list(item)
+            if nested:
+                patterns.extend(nested)
+        return patterns
+    return [str(item) for item in value]
+
+
+def _resolve_local_data_files(value: Any, base_path: Path) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if "://" in value or Path(value).is_absolute():
+            return value
+        return str(base_path / value)
+    if isinstance(value, dict):
+        return {key: _resolve_local_data_files(item, base_path) for key, item in value.items()}
+    return [_resolve_local_data_files(item, base_path) for item in value]
+
+
+def download_hf_sources(
+    data_config: dict[str, Any],
+    force_download: bool = False,
+    continue_on_error: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Download HF dataset repos to the local cache and return a cache-backed config."""
+    downloaded_config = dict(data_config)
+    downloaded_config["streaming"] = False
+    downloaded_config.pop("shuffle_buffer", None)
+
+    default_cache_dir = data_config.get("hf_cache_dir")
+    downloaded_sources: list[dict[str, Any]] = []
+    manifest_sources: list[dict[str, Any]] = []
+    snapshot_download: Callable[..., Any] | None = None
+
+    for source in data_config.get("sources", []):
+        source_type = source.get("type", "hf")
+        name = source.get("path", source_type)
+
+        if source_type != "hf":
+            downloaded_sources.append(dict(source))
+            manifest_sources.append({"source": name, "type": source_type, "status": "local"})
+            continue
+
+        if snapshot_download is None:
+            try:
+                from huggingface_hub import snapshot_download as hf_snapshot_download
+            except ImportError as exc:
+                raise RuntimeError("Install `huggingface_hub` to download Hugging Face datasets first.") from exc
+            snapshot_download = hf_snapshot_download
+
+        _apply_hf_env(
+            source,
+            data_config.get("hf_download_timeout"),
+            data_config.get("hf_etag_timeout"),
+            data_config.get("hf_endpoint"),
+        )
+
+        cache_dir = source.get("cache_dir", default_cache_dir)
+        allow_patterns = _as_pattern_list(source.get("download_allow_patterns"))
+        if allow_patterns is None:
+            allow_patterns = _as_pattern_list(source.get("data_files"))
+        ignore_patterns = _as_pattern_list(source.get("download_ignore_patterns"))
+        revision = source.get("revision")
+
+        def _download() -> str:
+            kwargs: dict[str, Any] = {
+                "repo_id": source["path"],
+                "repo_type": "dataset",
+                "force_download": bool(force_download),
+            }
+            if cache_dir:
+                kwargs["cache_dir"] = cache_dir
+            if revision:
+                kwargs["revision"] = revision
+            if allow_patterns:
+                kwargs["allow_patterns"] = allow_patterns
+            if ignore_patterns:
+                kwargs["ignore_patterns"] = ignore_patterns
+            return str(snapshot_download(**kwargs))
+
+        try:
+            snapshot_path = _retry_hf_call("download", source, data_config, _download)
+        except Exception as exc:
+            manifest_sources.append({"source": name, "type": source_type, "status": "failed", "error": str(exc)})
+            if not continue_on_error:
+                raise
+            print(f"[download] Skipping failed source {name}: {exc}", file=sys.stderr)
+            continue
+
+        downloaded_source = dict(source)
+        downloaded_source["local_path"] = snapshot_path
+        downloaded_source["streaming"] = False
+        downloaded_sources.append(downloaded_source)
+        manifest_sources.append(
+            {
+                "source": name,
+                "type": source_type,
+                "status": "downloaded",
+                "snapshot_path": snapshot_path,
+                "allow_patterns": allow_patterns,
+            }
+        )
+
+    downloaded_config["sources"] = downloaded_sources
+    manifest = {
+        "downloaded": sum(1 for item in manifest_sources if item["status"] == "downloaded"),
+        "failed": sum(1 for item in manifest_sources if item["status"] == "failed"),
+        "local": sum(1 for item in manifest_sources if item["status"] == "local"),
+        "force_download": bool(force_download),
+        "sources": manifest_sources,
+    }
+    return downloaded_config, manifest
+
+
+def _iter_hf_dataset(
+    source: dict[str, Any],
+    default_streaming: bool,
+    default_shuffle_buffer: int | None,
+    default_seed: int,
+    default_cache_dir: str | None = None,
+    default_download_timeout: int | None = None,
+    default_etag_timeout: int | None = None,
+    default_endpoint: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    _apply_hf_env(source, default_download_timeout, default_etag_timeout, default_endpoint)
+
     try:
         from datasets import load_dataset
     except ImportError as exc:
         raise RuntimeError("Install `datasets` to stream Hugging Face datasets.") from exc
 
-    path = source["path"]
+    load_from_local_snapshot = "local_path" in source
+    path = source.get("local_path", source["path"])
     split = source.get("split", "train")
     streaming = bool(source.get("streaming", default_streaming))
     name = source.get("name")
     data_files = source.get("data_files")
+    if data_files and load_from_local_snapshot:
+        data_files = _resolve_local_data_files(data_files, Path(path))
     cache_dir = source.get("cache_dir", default_cache_dir)
     revision = source.get("revision")
     kwargs = {"split": split, "streaming": streaming}
@@ -180,7 +345,7 @@ def _iter_hf_dataset(
         kwargs["data_files"] = data_files
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
-    if revision:
+    if revision and not load_from_local_snapshot:
         kwargs["revision"] = revision
 
     dataset = load_dataset(path, name, **kwargs) if name else load_dataset(path, **kwargs)
@@ -235,7 +400,7 @@ def _iter_with_retries(
 
             wait = sleep_seconds * (backoff ** (attempt - 1))
             print(
-                f"[data] {source.get('path')} failed on attempt {attempt}/{retries}: {exc}. "
+                f"[data] {source.get('path')} failed during load on attempt {attempt}/{retries}: {exc}. "
                 f"Retrying in {wait:.1f}s...",
                 file=sys.stderr,
             )
