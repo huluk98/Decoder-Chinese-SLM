@@ -194,7 +194,22 @@ The H20 configs also set `train.tf32: true` and `train.float32_matmul_precision:
 
 If the 7-GPU ETA looks higher than the old 8-GPU ETA, compare token throughput rather than only wall-clock ETA. The 8-GPU config runs `8 * 8 * 8 = 512` sequences per optimizer step, while the 7-GPU fast config runs `7 * 16 * 5 = 560`; that is 9.4% more tokens per step on 12.5% fewer GPUs, so a fixed `max_steps: 100000` run naturally has a longer ETA. The progress bar reports `tok_s` and `step_s` so you can check real throughput.
 
-This training script uses PyTorch DDP, which is already data-parallel multi-GPU training. DeepSpeed is not required for this 0.2B model to fit in 96 GB+ H20 memory; for speed, the first knobs to test are `train.batch_size`, `train.grad_accum_steps`, `train.num_workers`, `train.pin_memory`, and whether `model.gradient_checkpointing` is worth the recompute overhead on your GPUs.
+This training script supports two multi-GPU backends:
+
+- `configs/h20_7gpu_llama_0p2b_fast.yaml` uses plain PyTorch DDP.
+- `configs/h20_7gpu_llama_0p2b_deepspeed.yaml` uses DeepSpeed with BF16, FusedAdam when available, and ZeRO-1 optimizer partitioning.
+
+The conda environment installs DeepSpeed. If you are managing packages manually on the H20 machine, install the optional extra with `pip install -e ".[deepspeed]"`.
+
+Use this one-line DeepSpeed launch when physical GPU 1 is occupied:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 deepspeed --num_gpus=7 scripts/train.py --config configs/h20_7gpu_llama_0p2b_deepspeed.yaml
+```
+
+DeepSpeed is not required for this 0.2B model to fit in 96 GB+ H20 memory, so ZeRO-1 is the first recommended DeepSpeed mode. ZeRO-2 or ZeRO-3 can save more optimizer/parameter memory, but they add extra communication and are usually slower for a model this small unless memory pressure is the real bottleneck. For throughput, compare `tok_s` and `step_s` between the DDP and DeepSpeed commands, and then tune `train.batch_size`, `train.grad_accum_steps`, `train.num_workers`, `train.pin_memory`, and whether `model.gradient_checkpointing` is worth the recompute overhead on your GPUs.
+
+You do not need exactly 24 layers to stay near 0.2B parameters. The current model is roughly 196M parameters with 24 layers, `hidden_size: 768`, and `intermediate_size: 2048`. Other Llama-style shapes in the same class include about 197M parameters at 20 layers with hidden size 832 and MLP 2240, about 206M at 18 layers with hidden size 896 and MLP 2368, or about 195M at 12 layers with hidden size 1024 and MLP 2752. Fewer wider layers can improve hardware utilization, but they change the model shape and you should treat that as a new run, not a resume of the 24-layer checkpoints.
 
 ## Add More Public Sources
 

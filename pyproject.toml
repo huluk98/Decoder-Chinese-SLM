@@ -23,5 +23,10 @@ dependencies = [
   "hf-xet>=1.1.0",
 ]
 
+[project.optional-dependencies]
+deepspeed = [
+  "deepspeed>=0.14.5",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

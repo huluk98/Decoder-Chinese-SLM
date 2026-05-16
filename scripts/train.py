@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import math
 import os
 import shutil
@@ -42,7 +44,27 @@ def select_device() -> torch.device:
     return torch.device("cpu")
 
 
-def setup_distributed() -> tuple[torch.device, int, int, int]:
+def import_deepspeed():
+    try:
+        import deepspeed
+    except ImportError as exc:
+        raise RuntimeError(
+            "DeepSpeed training was requested, but `deepspeed` is not installed. "
+            "Install it with `pip install deepspeed` or recreate the conda env from environment.yml."
+        ) from exc
+    return deepspeed
+
+
+def distributed_is_initialized() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def maybe_barrier(world_size: int) -> None:
+    if world_size > 1 and distributed_is_initialized():
+        dist.barrier()
+
+
+def setup_distributed(use_deepspeed: bool = False, deepspeed_module: Any | None = None) -> tuple[torch.device, int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -51,7 +73,12 @@ def setup_distributed() -> tuple[torch.device, int, int, int]:
         if not torch.cuda.is_available():
             raise RuntimeError("Distributed training requires CUDA devices.")
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl")
+        if use_deepspeed:
+            if deepspeed_module is None:
+                raise RuntimeError("DeepSpeed module must be imported before distributed setup.")
+            deepspeed_module.init_distributed(dist_backend="nccl")
+        else:
+            dist.init_process_group(backend="nccl")
         return torch.device("cuda", local_rank), rank, local_rank, world_size
 
     return select_device(), rank, local_rank, world_size
@@ -119,6 +146,110 @@ def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
+def deepspeed_settings(train_config: dict[str, Any]) -> dict[str, Any]:
+    settings = train_config.get("deepspeed", {})
+    if settings is None:
+        return {}
+    if isinstance(settings, bool):
+        return {"enabled": settings}
+    if not isinstance(settings, dict):
+        raise TypeError("train.deepspeed must be a mapping or boolean.")
+    return settings
+
+
+def resolve_project_path(path: str | Path, config: dict[str, Any]) -> Path:
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+
+    config_dir = Path(config.get("_config_dir", PROJECT_ROOT))
+    for base in (config_dir, PROJECT_ROOT):
+        resolved = base / candidate
+        if resolved.exists():
+            return resolved
+    return PROJECT_ROOT / candidate
+
+
+def load_deepspeed_config(
+    config: dict[str, Any],
+    deepspeed_config_path: str | None,
+    world_size: int,
+) -> dict[str, Any]:
+    train_config = config["train"]
+    settings = deepspeed_settings(train_config)
+    config_path = deepspeed_config_path or settings.get("config_path")
+    deepspeed_config: dict[str, Any] = {}
+
+    if config_path:
+        resolved_path = resolve_project_path(str(config_path), config)
+        with resolved_path.open("r", encoding="utf-8") as handle:
+            deepspeed_config = json.load(handle)
+    deepspeed_config = copy.deepcopy(deepspeed_config)
+
+    precision = str(train_config["precision"]).lower()
+    batch_size = int(train_config["batch_size"])
+    grad_accum_steps = int(train_config["grad_accum_steps"])
+    effective_global_batch = int(world_size) * batch_size * grad_accum_steps
+
+    deepspeed_config["train_micro_batch_size_per_gpu"] = batch_size
+    deepspeed_config["gradient_accumulation_steps"] = grad_accum_steps
+    deepspeed_config["train_batch_size"] = effective_global_batch
+    if float(train_config["max_grad_norm"]) > 0:
+        deepspeed_config["gradient_clipping"] = float(train_config["max_grad_norm"])
+
+    if precision == "bf16":
+        deepspeed_config["bf16"] = {"enabled": True}
+        deepspeed_config["fp16"] = {"enabled": False}
+    elif precision == "fp16":
+        deepspeed_config["bf16"] = {"enabled": False}
+        deepspeed_config["fp16"] = {"enabled": True}
+    else:
+        deepspeed_config["bf16"] = {"enabled": False}
+        deepspeed_config["fp16"] = {"enabled": False}
+
+    deepspeed_config.setdefault(
+        "zero_optimization",
+        {
+            "stage": 1,
+            "contiguous_gradients": True,
+            "overlap_comm": True,
+        },
+    )
+    deepspeed_config.setdefault("wall_clock_breakdown", False)
+    return deepspeed_config
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    train_config: dict[str, Any],
+    use_deepspeed: bool,
+    rank: int,
+) -> torch.optim.Optimizer:
+    settings = deepspeed_settings(train_config)
+    learning_rate = float(train_config["learning_rate"])
+    betas = (float(train_config["beta1"]), float(train_config["beta2"]))
+    weight_decay = float(train_config["weight_decay"])
+    eps = float(train_config.get("adam_eps", 1e-8))
+
+    if use_deepspeed and bool(settings.get("fused_adam", True)):
+        try:
+            from deepspeed.ops.adam import FusedAdam
+
+            maybe_print(rank, "Optimizer: DeepSpeed FusedAdam")
+            return FusedAdam(model.parameters(), lr=learning_rate, betas=betas, eps=eps, weight_decay=weight_decay)
+        except Exception as exc:
+            maybe_print(rank, f"[warning] DeepSpeed FusedAdam unavailable ({exc}); falling back to torch.optim.AdamW.")
+
+    maybe_print(rank, "Optimizer: torch.optim.AdamW")
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        betas=betas,
+        eps=eps,
+        weight_decay=weight_decay,
+    )
+
+
 def save_checkpoint(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -126,9 +257,37 @@ def save_checkpoint(
     step: int,
     optimizer: torch.optim.Optimizer,
     config: dict[str, Any],
+    rank: int,
+    world_size: int,
+    use_deepspeed: bool = False,
 ) -> None:
     checkpoint_dir = output_dir / f"step-{step:06d}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    if use_deepspeed:
+        if not hasattr(model, "save_checkpoint"):
+            raise RuntimeError("DeepSpeed checkpoint requested, but the model is not a DeepSpeed engine.")
+
+        deepspeed_dir = checkpoint_dir / "deepspeed"
+        model.save_checkpoint(str(deepspeed_dir), client_state={"step": step, "config": config})
+        maybe_barrier(world_size)
+
+        if is_main_process(rank):
+            unwrapped = unwrap_model(model)
+            unwrapped.save_pretrained(checkpoint_dir)
+            tokenizer.save_pretrained(checkpoint_dir)
+            torch.save({"step": step, "config": config}, checkpoint_dir / "trainer_state.pt")
+
+            latest_dir = output_dir / "latest"
+            if latest_dir.exists():
+                shutil.rmtree(latest_dir)
+            shutil.copytree(checkpoint_dir, latest_dir)
+        maybe_barrier(world_size)
+        return
+
+    if not is_main_process(rank):
+        maybe_barrier(world_size)
+        return
 
     unwrapped = unwrap_model(model)
     unwrapped.save_pretrained(checkpoint_dir)
@@ -139,6 +298,7 @@ def save_checkpoint(
     if latest_dir.exists():
         shutil.rmtree(latest_dir)
     shutil.copytree(checkpoint_dir, latest_dir)
+    maybe_barrier(world_size)
 
 
 def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
@@ -167,13 +327,17 @@ def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
             model_max_length=int(config["model"].get("block_size", 512)),
         )
 
-    if world_size > 1:
-        dist.barrier()
+    maybe_barrier(world_size)
 
     return load_tokenizer(tokenizer_path)
 
 
-def print_startup_launch_hint(rank: int, config_path: str) -> None:
+def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool) -> None:
+    launcher = (
+        f"deepspeed --num_gpus=7 scripts/train.py --config {config_path}"
+        if use_deepspeed
+        else f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}"
+    )
     maybe_print(
         rank,
         "Recommended 7-GPU H20 launch when physical GPU 1 is occupied:\n"
@@ -181,7 +345,7 @@ def print_startup_launch_hint(rank: int, config_path: str) -> None:
         "HF_HUB_ENABLE_HF_TRANSFER=1 \\\n"
         "NCCL_DEBUG=WARN \\\n"
         "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \\\n"
-        f"torchrun --standalone --nproc_per_node=7 scripts/train.py --config {config_path}",
+        f"{launcher}",
     )
 
 
@@ -243,14 +407,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Train a decoder-only Chinese causal language model.")
     parser.add_argument("--config", default="configs/model_0p2b.yaml", help="Path to a YAML config.")
     parser.add_argument("--resume", default=None, help="Optional checkpoint directory to resume model weights from.")
+    parser.add_argument("--deepspeed", action="store_true", help="Enable DeepSpeed using train.deepspeed config.")
+    parser.add_argument("--deepspeed-config", default=None, help="Optional DeepSpeed JSON config path.")
+    parser.add_argument("--local_rank", "--local-rank", type=int, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.local_rank is not None and "LOCAL_RANK" not in os.environ:
+        os.environ["LOCAL_RANK"] = str(args.local_rank)
+
     config = load_config(args.config)
-    set_seed(int(config["run"]["seed"]))
-    device, rank, local_rank, world_size = setup_distributed()
     train_config = config["train"]
+    use_deepspeed = bool(
+        args.deepspeed
+        or args.deepspeed_config
+        or bool(deepspeed_settings(train_config).get("enabled", False))
+    )
+    deepspeed_module = import_deepspeed() if use_deepspeed else None
+
+    set_seed(int(config["run"]["seed"]))
+    device, rank, local_rank, world_size = setup_distributed(
+        use_deepspeed=use_deepspeed,
+        deepspeed_module=deepspeed_module,
+    )
     configure_torch_backends(train_config, rank)
-    print_startup_launch_hint(rank, args.config)
+    print_startup_launch_hint(rank, args.config, use_deepspeed=use_deepspeed)
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
     data_config = preprocessed_data_config(config)
@@ -260,9 +440,11 @@ def main() -> None:
         model = create_model(config["model"], tokenizer)
 
     model.to(device)
-    if bool(config["train"].get("compile", False)) and hasattr(torch, "compile"):
+    if bool(config["train"].get("compile", False)) and use_deepspeed:
+        maybe_print(rank, "[warning] train.compile=true is ignored in DeepSpeed mode for stability.")
+    elif bool(config["train"].get("compile", False)) and hasattr(torch, "compile"):
         model = torch.compile(model)
-    if world_size > 1:
+    if world_size > 1 and not use_deepspeed:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
     grad_accum_steps = int(train_config["grad_accum_steps"])
@@ -272,8 +454,7 @@ def main() -> None:
     output_dir = Path(config["run"]["output_dir"]).expanduser()
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
-    if world_size > 1:
-        dist.barrier()
+    maybe_barrier(world_size)
 
     dataloader = build_dataloader(
         data_config=data_config,
@@ -289,16 +470,21 @@ def main() -> None:
     )
     data_iter = iter(dataloader)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(train_config["learning_rate"]),
-        betas=(float(train_config["beta1"]), float(train_config["beta2"])),
-        weight_decay=float(train_config["weight_decay"]),
+    optimizer = build_optimizer(model, train_config, use_deepspeed=use_deepspeed, rank=rank)
+    if use_deepspeed:
+        deepspeed_config = load_deepspeed_config(config, args.deepspeed_config, world_size=world_size)
+        model, optimizer, _, _ = deepspeed_module.initialize(
+            model=model,
+            optimizer=optimizer,
+            config=deepspeed_config,
+        )
+    scaler = torch.cuda.amp.GradScaler(
+        enabled=(not use_deepspeed and device.type == "cuda" and train_config["precision"] == "fp16")
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and train_config["precision"] == "fp16"))
 
     maybe_print(rank, f"Device: {device} | world_size: {world_size}")
-    maybe_print(rank, f"Parameters: {count_parameters(model):,}")
+    maybe_print(rank, f"Training backend: {'DeepSpeed ZeRO' if use_deepspeed else 'PyTorch DDP' if world_size > 1 else 'single process'}")
+    maybe_print(rank, f"Parameters: {count_parameters(unwrap_model(model)):,}")
     maybe_print(rank, f"Tokenizer size: {len(tokenizer):,}")
     maybe_print(rank, f"Output: {output_dir}")
     maybe_print(rank, f"Effective global batch: {effective_global_batch}")
@@ -313,7 +499,10 @@ def main() -> None:
     )
 
     model.train()
-    optimizer.zero_grad(set_to_none=True)
+    if use_deepspeed:
+        model.zero_grad()
+    else:
+        optimizer.zero_grad(set_to_none=True)
     printed_first_batch_debug = False
     warned_high_first_loss = False
 
@@ -336,14 +525,17 @@ def main() -> None:
             batch = {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
             sync_context = (
                 model.no_sync()
-                if world_size > 1 and hasattr(model, "no_sync") and micro_step < grad_accum_steps - 1
+                if not use_deepspeed
+                and world_size > 1
+                and hasattr(model, "no_sync")
+                and micro_step < grad_accum_steps - 1
                 else nullcontext()
             )
             with sync_context:
-                with autocast_for(device, str(train_config["precision"])):
+                precision_context = nullcontext() if use_deepspeed else autocast_for(device, str(train_config["precision"]))
+                with precision_context:
                     outputs = model(**batch)
                     raw_loss = outputs.loss
-                    loss = raw_loss / grad_accum_steps
 
                 if not printed_first_batch_debug:
                     print_first_batch_debug(
@@ -360,18 +552,24 @@ def main() -> None:
                     printed_first_batch_debug = True
 
                 accumulated_raw_loss += float(raw_loss.detach().cpu())
-                scaler.scale(loss).backward()
+                if use_deepspeed:
+                    model.backward(raw_loss)
+                    model.step()
+                else:
+                    loss = raw_loss / grad_accum_steps
+                    scaler.scale(loss).backward()
 
-        if float(train_config["max_grad_norm"]) > 0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_config["max_grad_norm"]))
+        if not use_deepspeed:
+            if float(train_config["max_grad_norm"]) > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_config["max_grad_norm"]))
 
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad(set_to_none=True)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
 
         logged_loss = accumulated_raw_loss / grad_accum_steps
-        if world_size > 1:
+        if world_size > 1 and distributed_is_initialized():
             loss_tensor = torch.tensor(logged_loss, device=device)
             dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
             logged_loss = float(loss_tensor.detach().cpu())
@@ -406,12 +604,20 @@ def main() -> None:
             steps_since_log = 0
 
         should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
-        if should_save and is_main_process(rank):
-            save_checkpoint(model, tokenizer, output_dir, step, optimizer, config)
-        if should_save and world_size > 1:
-            dist.barrier()
+        if should_save:
+            save_checkpoint(
+                model=model,
+                tokenizer=tokenizer,
+                output_dir=output_dir,
+                step=step,
+                optimizer=optimizer,
+                config=config,
+                rank=rank,
+                world_size=world_size,
+                use_deepspeed=use_deepspeed,
+            )
 
-    if world_size > 1:
+    if distributed_is_initialized():
         dist.destroy_process_group()
 
 

@@ -10,3 +10,4 @@ safetensors>=0.4.5
 sentencepiece>=0.2
 hf-transfer>=0.1.8
 hf-xet>=1.1.0
+deepspeed>=0.14.5
