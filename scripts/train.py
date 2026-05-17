@@ -448,6 +448,56 @@ def print_startup_launch_hint(rank: int, config_path: str, use_deepspeed: bool, 
     )
 
 
+def expected_h20_world_size(config_path: str) -> int | None:
+    name = Path(config_path).name.lower()
+    if "h20" not in name:
+        return None
+    if "8gpu" in name:
+        return 8
+    if "7gpu" in name:
+        return 7
+    return None
+
+
+def visible_cuda_device_count() -> int | None:
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if not visible_devices:
+        return None
+    return len([item for item in (part.strip() for part in visible_devices.split(",")) if item])
+
+
+def validate_h20_launch(rank: int, config_path: str, world_size: int) -> None:
+    expected_world_size = expected_h20_world_size(config_path)
+    if expected_world_size is None:
+        return
+
+    allow_mismatch = os.environ.get("ALLOW_H20_WORLD_SIZE_MISMATCH", "").lower() in {"1", "true", "yes"}
+    problems: list[str] = []
+    if world_size != expected_world_size:
+        problems.append(f"world_size={world_size}, expected {expected_world_size}")
+
+    visible_count = visible_cuda_device_count()
+    if visible_count is not None and visible_count != expected_world_size:
+        problems.append(
+            f"CUDA_VISIBLE_DEVICES has {visible_count} entries, expected {expected_world_size}: "
+            f"{os.environ.get('CUDA_VISIBLE_DEVICES')}"
+        )
+
+    if not problems:
+        return
+
+    message = (
+        "H20 launch mismatch for this config: "
+        + "; ".join(problems)
+        + ". Use the matching scripts/launch_h20_* launcher, or set "
+        "ALLOW_H20_WORLD_SIZE_MISMATCH=1 for a deliberate debug run."
+    )
+    if allow_mismatch:
+        maybe_print(rank, f"[warning] {message}")
+        return
+    raise RuntimeError(message)
+
+
 def launched_with_accelerate() -> bool:
     return any(
         key in os.environ
@@ -592,6 +642,7 @@ def main() -> None:
         use_deepspeed=use_deepspeed,
         deepspeed_module=deepspeed_module,
     )
+    validate_h20_launch(rank, args.config, world_size)
     configure_torch_backends(train_config, rank)
     warn_if_accelerate_precision_differs(train_config, rank)
     print_startup_launch_hint(rank, args.config, use_deepspeed=use_deepspeed, world_size=world_size)
