@@ -170,7 +170,7 @@ For the fastest H20 pretraining path, pack the normalized text into token IDs on
 python scripts/pack_tokens.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
 ```
 
-This writes `data/processed/chatlm_public_sources_0p2b.tokens.uint16.bin` plus a manifest. The H20 configs automatically train from that packed file when it exists, avoiding repeated tokenizer work in every DataLoader worker. If the packed file is missing, training falls back to on-the-fly tokenization and prints a warning.
+This writes `data/processed/chatlm_public_sources_0p2b.tokens.uint16.bin` plus a manifest. The H20 configs automatically train from that packed file when it exists, avoiding repeated tokenizer work in every DataLoader worker. The H20 launch scripts also run this packing preflight before starting GPU training; it is idempotent and returns immediately when the packed file already exists. Set `PACK_TOKENS=0` only for a deliberate debug run where you want to skip this check.
 
 Then launch the 8-GPU run:
 
@@ -178,7 +178,7 @@ Then launch the 8-GPU run:
 ./scripts/launch_h20_8gpu.sh
 ```
 
-That script defaults to Accelerate as the process launcher and DeepSpeed ZeRO-1 as the training backend. It uses physical GPUs 0-7:
+That script defaults to Accelerate as the process launcher and DeepSpeed ZeRO-1 as the training backend. It verifies that exactly 8 CUDA devices are visible, then uses physical GPUs 0-7:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_8gpu.yaml scripts/train.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
@@ -193,6 +193,8 @@ The 8-GPU speed config stays in the 0.2B class:
 - sequence length 2048
 - per-GPU microbatch 32, gradient accumulation 2
 - effective batch `8 * 32 * 2 = 512` sequences per optimizer update
+
+The trainer also checks H20 config names against the launched world size. If an 8-GPU H20 config is accidentally started with fewer than 8 workers, it exits with a clear error instead of silently underusing the machine.
 
 If you want plain DDP instead of DeepSpeed, use:
 
