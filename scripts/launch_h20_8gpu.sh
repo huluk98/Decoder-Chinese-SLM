@@ -35,6 +35,14 @@ if [[ "${VISIBLE_GPU_COUNT}" -ne "${NPROC}" ]]; then
   exit 2
 fi
 
+if [[ "${LAUNCHER}" == "accelerate" ]]; then
+  ACCELERATE_NPROC="$(awk -F: '/^num_processes:/ {gsub(/[[:space:]]/, "", $2); print $2}' "${ACCELERATE_CONFIG}")"
+  if [[ "${ACCELERATE_NPROC}" != "${NPROC}" ]]; then
+    echo "Expected ${ACCELERATE_CONFIG} to set num_processes: ${NPROC}, got ${ACCELERATE_NPROC:-unset}" >&2
+    exit 2
+  fi
+fi
+
 echo "[launch] 8-GPU H20 run | launcher=${LAUNCHER} | config=${CONFIG} | CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
 if [[ "${PACK_TOKENS}" != "0" && "${PACK_TOKENS}" != "false" ]]; then
