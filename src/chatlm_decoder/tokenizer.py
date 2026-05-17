@@ -74,7 +74,8 @@ def load_tokenizer(path: str | Path) -> PreTrainedTokenizerFast:
     if tokenizer.eos_token is None:
         additions["eos_token"] = EOS_TOKEN
 
-    existing = list(tokenizer.additional_special_tokens or [])
+    special_tokens_map = getattr(tokenizer, "special_tokens_map", {}) or {}
+    existing = list(special_tokens_map.get("additional_special_tokens") or [])
     existing_set = set(existing)
     extra = [token for token in [USER_TOKEN, ASSISTANT_TOKEN, SYSTEM_TOKEN] if token not in existing_set]
     if extra:
