@@ -534,6 +534,43 @@ class TokenBlockDataset(IterableDataset):
             yield {"input_ids": buffer}
 
 
+class PackedTokenDataset(IterableDataset):
+    def __init__(
+        self,
+        token_ids_path: str | Path,
+        token_ids_dtype: str,
+        block_size: int,
+        rank: int = 0,
+        world_size: int = 1,
+    ) -> None:
+        self.token_ids_path = Path(token_ids_path).expanduser()
+        self.token_ids_dtype = str(token_ids_dtype)
+        self.block_size = int(block_size)
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+
+    def __iter__(self) -> Iterator[dict[str, list[int]]]:
+        try:
+            import numpy as np
+        except ImportError as exc:
+            raise RuntimeError("Install `numpy` to train from packed token ids.") from exc
+
+        worker = get_worker_info()
+        if worker is None:
+            worker_rank = self.rank
+            worker_world_size = self.world_size
+        else:
+            worker_rank = self.rank * worker.num_workers + worker.id
+            worker_world_size = self.world_size * worker.num_workers
+
+        token_ids = np.memmap(self.token_ids_path, dtype=np.dtype(self.token_ids_dtype), mode="r")
+        total_blocks = int(token_ids.shape[0]) // self.block_size
+        for block_index in range(worker_rank, total_blocks, worker_world_size):
+            start = block_index * self.block_size
+            end = start + self.block_size
+            yield {"input_ids": token_ids[start:end].astype(np.int64, copy=False).tolist()}
+
+
 def causal_lm_collate(features: list[dict[str, list[int]]], pad_token_id: int) -> dict[str, torch.Tensor]:
     if torch is None:
         raise RuntimeError("Install `torch` to build training batches.")
@@ -570,15 +607,33 @@ def build_dataloader(
     if torch is None or DataLoader is None:
         raise RuntimeError("Install `torch` to build a training dataloader.")
 
-    dataset = TokenBlockDataset(
-        data_config=data_config,
-        tokenizer=tokenizer,
-        block_size=block_size,
-        drop_last=bool(data_config.get("drop_last", True)),
-        add_eos=bool(data_config.get("add_eos", True)),
-        rank=rank,
-        world_size=world_size,
-    )
+    token_ids_path = data_config.get("token_ids_path")
+    if token_ids_path and Path(token_ids_path).expanduser().exists():
+        dataset = PackedTokenDataset(
+            token_ids_path=token_ids_path,
+            token_ids_dtype=str(data_config.get("token_ids_dtype", "uint16")),
+            block_size=block_size,
+            rank=rank,
+            world_size=world_size,
+        )
+        if rank == 0:
+            print(f"[data] Training from packed token ids: {Path(token_ids_path).expanduser()}")
+    else:
+        if token_ids_path and rank == 0:
+            print(
+                f"[data] Packed token ids not found at {Path(token_ids_path).expanduser()}; "
+                "falling back to on-the-fly tokenization.",
+                file=sys.stderr,
+            )
+        dataset = TokenBlockDataset(
+            data_config=data_config,
+            tokenizer=tokenizer,
+            block_size=block_size,
+            drop_last=bool(data_config.get("drop_last", True)),
+            add_eos=bool(data_config.get("add_eos", True)),
+            rank=rank,
+            world_size=world_size,
+        )
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     loader_kwargs: dict[str, Any] = {
         "batch_size": int(batch_size),
