@@ -273,6 +273,33 @@ python scripts/plot_loss.py \
 
 This writes `pretrain_loss.png`, `loss.png`, and `pretrain_loss_lr.png` beside the metrics CSV. Use `--output-dir img` if you want the PNGs in a model-card image folder. The CSV stores `step`, averaged causal-LM `loss`, `lr`, `tokens_per_second`, `seconds_per_step`, `world_size`, and effective batch details so the decoder-only run can be compared against the same-size ChatLM-mini-Chinese reference transparently.
 
+## C-Eval Evaluation
+
+C-Eval is a Chinese multiple-choice benchmark with 52 subjects and `dev`, `val`, and `test` splits. This repo evaluates your decoder-only checkpoint by scoring the conditional log probability of answer choices `A`, `B`, `C`, and `D`, which is more stable for a base/pretraining checkpoint than asking it to generate free-form answers.
+
+Run a quick two-subject smoke check:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest \
+  --subjects computer_network,operating_system \
+  --split val \
+  --n-shot 5 \
+  --limit 20
+```
+
+Run the full validation set:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest \
+  --subjects all \
+  --split val \
+  --n-shot 5
+```
+
+The script writes `ceval_summary.json` and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:
@@ -339,9 +366,39 @@ git pull origin main
 
 Checkpoints are written under `run.output_dir` as `step-000000/` directories, plus a copied `latest/` directory for convenient generation and resume experiments.
 
+## Push Model Tensors To GitHub
+
+GitHub rejects normal Git blobs above 100 MB, so model tensors should be pushed with Git LFS. This repo tracks common tensor extensions in `.gitattributes`, but you still need Git LFS installed on the machine that pushes the checkpoint.
+
+One-time setup on the training machine:
+
+```bash
+git lfs install
+git pull origin main
+```
+
+Keep `runs/` ignored for active training. After training, copy the final checkpoint into a versioned artifact directory:
+
+```bash
+mkdir -p model-artifacts/decoder-chinese-slm-0p2b
+cp -R runs/h20-8gpu-llama-0p2b-deepspeed/latest/* model-artifacts/decoder-chinese-slm-0p2b/
+```
+
+Then commit and push the tensor files through LFS:
+
+```bash
+git status
+git add .gitattributes model-artifacts/decoder-chinese-slm-0p2b
+git commit -m "Add 0.2B checkpoint tensors"
+git push origin main
+```
+
+For large public model distribution, Hugging Face Hub is usually a better home for checkpoints than GitHub LFS because it is built for model files, safetensors, model cards, and downloads.
+
 ## References
 
 - ChatLM-mini-Chinese model card and config: [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), [`config.json`](https://huggingface.co/charent/ChatLM-mini-Chinese/blob/main/config.json).
+- C-Eval dataset and benchmark: [`ceval/ceval-exam`](https://huggingface.co/datasets/ceval/ceval-exam), [`hkust-nlp/ceval`](https://github.com/hkust-nlp/ceval).
 - Llama architecture fields are mapped to Hugging Face [`LlamaConfig`](https://huggingface.co/docs/transformers/model_doc/llama).
 - H20 memory and compute capability reference: NVIDIA [`Supported GPUs`](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html).
 - Multi-GPU launch uses PyTorch [`DistributedDataParallel`](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html); for larger-than-memory variants, PyTorch [`FSDP`](https://docs.pytorch.org/docs/stable/fsdp.html) is the natural next step.
