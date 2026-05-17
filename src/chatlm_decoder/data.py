@@ -542,12 +542,14 @@ class PackedTokenDataset(IterableDataset):
         block_size: int,
         rank: int = 0,
         world_size: int = 1,
+        start_block_offset: int = 0,
     ) -> None:
         self.token_ids_path = Path(token_ids_path).expanduser()
         self.token_ids_dtype = str(token_ids_dtype)
         self.block_size = int(block_size)
         self.rank = int(rank)
         self.world_size = int(world_size)
+        self.start_block_offset = int(start_block_offset)
 
     def __iter__(self) -> Iterator[dict[str, list[int]]]:
         try:
@@ -565,7 +567,12 @@ class PackedTokenDataset(IterableDataset):
 
         token_ids = np.memmap(self.token_ids_path, dtype=np.dtype(self.token_ids_dtype), mode="r")
         total_blocks = int(token_ids.shape[0]) // self.block_size
-        for block_index in range(worker_rank, total_blocks, worker_world_size):
+        if total_blocks <= 0:
+            return
+
+        start_offset = self.start_block_offset % total_blocks
+        for local_block_index in range(worker_rank, total_blocks, worker_world_size):
+            block_index = (start_offset + local_block_index) % total_blocks
             start = block_index * self.block_size
             end = start + self.block_size
             yield {"input_ids": token_ids[start:end].astype(np.int64, copy=False).tolist()}
@@ -615,9 +622,12 @@ def build_dataloader(
             block_size=block_size,
             rank=rank,
             world_size=world_size,
+            start_block_offset=int(data_config.get("start_block_offset", 0)),
         )
         if rank == 0:
             print(f"[data] Training from packed token ids: {Path(token_ids_path).expanduser()}")
+            if int(data_config.get("start_block_offset", 0)) > 0:
+                print(f"[data] Packed-token resume offset: {int(data_config['start_block_offset']):,} blocks")
     else:
         if token_ids_path and rank == 0:
             print(

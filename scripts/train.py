@@ -7,7 +7,9 @@ import csv
 import json
 import math
 import os
+import re
 import shutil
+import signal
 import sys
 import time
 from contextlib import nullcontext
@@ -92,6 +94,26 @@ def is_main_process(rank: int) -> bool:
 def maybe_print(rank: int, message: str) -> None:
     if is_main_process(rank):
         print(message)
+
+
+class GracefulStopper:
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+        self.stop_requested = False
+
+    def install(self) -> None:
+        signal.signal(signal.SIGINT, self._handle)
+        signal.signal(signal.SIGTERM, self._handle)
+
+    def _handle(self, signum: int, _frame: Any) -> None:
+        signal_name = signal.Signals(signum).name
+        if self.stop_requested:
+            raise KeyboardInterrupt(f"received {signal_name} twice")
+        self.stop_requested = True
+        maybe_print(
+            self.rank,
+            f"[checkpoint] received {signal_name}; will save after the current optimizer step and stop.",
+        )
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -325,6 +347,56 @@ def build_optimizer(
     )
 
 
+def checkpoint_step(path: Path) -> int:
+    match = re.search(r"step-(\d+)", path.name)
+    if match:
+        return int(match.group(1))
+    return -1
+
+
+def checkpoint_dirs(output_dir: Path) -> list[Path]:
+    return [
+        path
+        for path in output_dir.iterdir()
+        if path.is_dir()
+        and not path.is_symlink()
+        and (path.name.startswith("step-") or path.name.startswith("crash-step-") or path.name.startswith("stop-step-"))
+    ]
+
+
+def prune_old_checkpoints(output_dir: Path, keep_last: int, rank: int) -> None:
+    if not is_main_process(rank) or keep_last <= 0 or not output_dir.exists():
+        return
+
+    checkpoints = sorted(
+        checkpoint_dirs(output_dir),
+        key=lambda path: (checkpoint_step(path), path.stat().st_mtime),
+    )
+    stale_checkpoints = checkpoints[:-keep_last]
+    for checkpoint in stale_checkpoints:
+        shutil.rmtree(checkpoint, ignore_errors=True)
+        print(f"[checkpoint] removed old checkpoint: {checkpoint}")
+
+
+def update_latest_pointer(output_dir: Path, checkpoint_dir: Path, rank: int) -> None:
+    if not is_main_process(rank):
+        return
+
+    latest_dir = output_dir / "latest"
+    if latest_dir.is_symlink() or latest_dir.exists():
+        if latest_dir.is_dir() and not latest_dir.is_symlink():
+            shutil.rmtree(latest_dir)
+        else:
+            latest_dir.unlink()
+
+    try:
+        relative_target = os.path.relpath(checkpoint_dir, start=output_dir)
+        latest_dir.symlink_to(relative_target, target_is_directory=True)
+    except OSError as exc:
+        print(f"[warning] could not create latest symlink ({exc}); copying latest checkpoint instead.")
+        shutil.copytree(checkpoint_dir, latest_dir)
+
+
 def save_checkpoint(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -335,45 +407,179 @@ def save_checkpoint(
     rank: int,
     world_size: int,
     use_deepspeed: bool = False,
+    checkpoint_name: str | None = None,
+    keep_last: int = 3,
+    save_deepspeed_engine: bool = False,
+    save_optimizer_state: bool = False,
+    save_safetensors: bool = True,
+    use_barrier: bool = True,
+    reason: str = "scheduled",
 ) -> None:
-    checkpoint_dir = output_dir / f"step-{step:06d}"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = output_dir / (checkpoint_name or f"step-{step:06d}")
 
-    if use_deepspeed:
+    if use_deepspeed and save_deepspeed_engine:
         if not hasattr(model, "save_checkpoint"):
             raise RuntimeError("DeepSpeed checkpoint requested, but the model is not a DeepSpeed engine.")
 
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         deepspeed_dir = checkpoint_dir / "deepspeed"
         model.save_checkpoint(str(deepspeed_dir), client_state={"step": step, "config": config})
-        maybe_barrier(world_size)
+        if use_barrier:
+            maybe_barrier(world_size)
 
         if is_main_process(rank):
             unwrapped = unwrap_model(model)
-            unwrapped.save_pretrained(checkpoint_dir)
+            unwrapped.save_pretrained(checkpoint_dir, safe_serialization=save_safetensors)
             tokenizer.save_pretrained(checkpoint_dir)
-            torch.save({"step": step, "config": config}, checkpoint_dir / "trainer_state.pt")
+            torch.save({"step": step, "config": config, "reason": reason}, checkpoint_dir / "trainer_state.pt")
 
-            latest_dir = output_dir / "latest"
-            if latest_dir.exists():
-                shutil.rmtree(latest_dir)
-            shutil.copytree(checkpoint_dir, latest_dir)
-        maybe_barrier(world_size)
+            update_latest_pointer(output_dir, checkpoint_dir, rank)
+            prune_old_checkpoints(output_dir, keep_last=keep_last, rank=rank)
+        if use_barrier:
+            maybe_barrier(world_size)
         return
 
     if not is_main_process(rank):
-        maybe_barrier(world_size)
+        if use_barrier:
+            maybe_barrier(world_size)
         return
 
-    unwrapped = unwrap_model(model)
-    unwrapped.save_pretrained(checkpoint_dir)
-    tokenizer.save_pretrained(checkpoint_dir)
-    torch.save({"step": step, "optimizer": optimizer.state_dict(), "config": config}, checkpoint_dir / "trainer_state.pt")
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    latest_dir = output_dir / "latest"
-    if latest_dir.exists():
-        shutil.rmtree(latest_dir)
-    shutil.copytree(checkpoint_dir, latest_dir)
-    maybe_barrier(world_size)
+    unwrapped = unwrap_model(model)
+    unwrapped.save_pretrained(checkpoint_dir, safe_serialization=save_safetensors)
+    tokenizer.save_pretrained(checkpoint_dir)
+    state = {"step": step, "config": config, "reason": reason}
+    if save_optimizer_state:
+        state["optimizer"] = optimizer.state_dict()
+    torch.save(state, checkpoint_dir / "trainer_state.pt")
+
+    update_latest_pointer(output_dir, checkpoint_dir, rank)
+    prune_old_checkpoints(output_dir, keep_last=keep_last, rank=rank)
+    print(f"[checkpoint] saved {reason} checkpoint: {checkpoint_dir}")
+    if use_barrier:
+        maybe_barrier(world_size)
+
+
+def maybe_save_exception_checkpoint(
+    exc: BaseException,
+    model: torch.nn.Module,
+    tokenizer: Any,
+    output_dir: Path,
+    last_completed_step: int,
+    optimizer: torch.optim.Optimizer,
+    config: dict[str, Any],
+    rank: int,
+    world_size: int,
+    use_deepspeed: bool,
+) -> None:
+    train_config = config["train"]
+    if not bool(train_config.get("save_on_exception", True)):
+        return
+    if last_completed_step <= 0:
+        maybe_print(rank, "[checkpoint] skipping exception checkpoint because no optimizer step completed yet.")
+        return
+
+    if isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    checkpoint_name = f"crash-step-{last_completed_step:06d}"
+    try:
+        maybe_print(rank, f"[checkpoint] attempting best-effort exception checkpoint at step {last_completed_step}.")
+        save_checkpoint(
+            model=model,
+            tokenizer=tokenizer,
+            output_dir=output_dir,
+            step=last_completed_step,
+            optimizer=optimizer,
+            config=config,
+            rank=rank,
+            world_size=world_size,
+            use_deepspeed=use_deepspeed,
+            checkpoint_name=checkpoint_name,
+            keep_last=int(train_config.get("save_total_limit", 3)),
+            save_deepspeed_engine=False,
+            save_optimizer_state=False,
+            save_safetensors=bool(train_config.get("save_safetensors", True)),
+            use_barrier=False,
+            reason=f"exception:{type(exc).__name__}",
+        )
+    except Exception as save_exc:
+        maybe_print(rank, f"[checkpoint] exception checkpoint failed: {save_exc}")
+
+
+def load_resume_step(resume_path: str | None) -> int:
+    if not resume_path:
+        return 1
+    state_path = Path(resume_path).expanduser() / "trainer_state.pt"
+    if not state_path.exists():
+        return 1
+    try:
+        state = torch.load(state_path, map_location="cpu")
+    except Exception:
+        return 1
+    step = int(state.get("step", 0))
+    return max(1, step + 1)
+
+
+def token_manifest_tokens(data_config: dict[str, Any]) -> int | None:
+    manifest_path = data_config.get("token_ids_manifest_path")
+    if not manifest_path:
+        return None
+    path = Path(manifest_path).expanduser()
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except Exception:
+        return None
+    tokens = manifest.get("tokens")
+    if tokens is None:
+        return None
+    try:
+        return int(tokens)
+    except (TypeError, ValueError):
+        return None
+
+
+def print_training_schedule(
+    rank: int,
+    train_config: dict[str, Any],
+    data_config: dict[str, Any],
+    effective_global_batch: int,
+    block_size: int,
+    start_step: int,
+) -> None:
+    if not is_main_process(rank):
+        return
+
+    max_steps = int(train_config["max_steps"])
+    total_tokens = max_steps * effective_global_batch * block_size
+    remaining_steps = max(0, max_steps - start_step + 1)
+    remaining_tokens = remaining_steps * effective_global_batch * block_size
+    token_count = token_manifest_tokens(data_config)
+
+    print(
+        "Training schedule: "
+        f"step-based pretraining, max_steps={max_steps:,}, start_step={start_step:,}, "
+        f"planned_tokens={total_tokens:,}, remaining_tokens={remaining_tokens:,}"
+    )
+    if token_count:
+        print(
+            "Packed-data coverage: "
+            f"{token_count:,} tokens in corpus, "
+            f"planned_passes~{total_tokens / token_count:.2f}, "
+            f"remaining_passes~{remaining_tokens / token_count:.2f}"
+        )
+    else:
+        print(
+            "Packed-data coverage: token manifest not found yet; run scripts/pack_tokens.py "
+            "to report approximate corpus passes before training."
+        )
 
 
 def ensure_tokenizer(config: dict[str, Any], rank: int, world_size: int):
@@ -642,6 +848,8 @@ def main() -> None:
         use_deepspeed=use_deepspeed,
         deepspeed_module=deepspeed_module,
     )
+    stopper = GracefulStopper(rank)
+    stopper.install()
     validate_h20_launch(rank, args.config, world_size)
     configure_torch_backends(train_config, rank)
     warn_if_accelerate_precision_differs(train_config, rank)
@@ -649,6 +857,26 @@ def main() -> None:
 
     tokenizer = ensure_tokenizer(config, rank=rank, world_size=world_size)
     data_config = preprocessed_data_config(config)
+    grad_accum_steps = int(train_config["grad_accum_steps"])
+    per_gpu_batch_size = int(train_config["batch_size"])
+    block_size = int(config["model"]["block_size"])
+    effective_global_batch = world_size * per_gpu_batch_size * grad_accum_steps
+    output_dir = Path(config["run"]["output_dir"]).expanduser()
+    max_steps = int(train_config["max_steps"])
+    start_step = load_resume_step(args.resume)
+    completed_resume_steps = max(0, start_step - 1)
+    if completed_resume_steps > 0:
+        maybe_print(rank, f"Resume: {args.resume} | starting at optimizer step {start_step:,}.")
+        data_config = dict(data_config)
+        data_config["start_block_offset"] = completed_resume_steps * effective_global_batch
+    if start_step > max_steps:
+        maybe_print(
+            rank,
+            f"Resume checkpoint is already past max_steps={max_steps:,}; nothing to train.",
+        )
+        if distributed_is_initialized():
+            dist.destroy_process_group()
+        return
     if args.resume:
         model = AutoModelForCausalLM.from_pretrained(args.resume)
     else:
@@ -671,12 +899,6 @@ def main() -> None:
         maybe_print(rank, "[warning] train.compile=true is ignored in DeepSpeed mode for stability.")
     elif bool(config["train"].get("compile", False)) and hasattr(torch, "compile"):
         model = torch.compile(model)
-
-    grad_accum_steps = int(train_config["grad_accum_steps"])
-    per_gpu_batch_size = int(train_config["batch_size"])
-    block_size = int(config["model"]["block_size"])
-    effective_global_batch = world_size * per_gpu_batch_size * grad_accum_steps
-    output_dir = Path(config["run"]["output_dir"]).expanduser()
     if is_main_process(rank):
         output_dir.mkdir(parents=True, exist_ok=True)
     maybe_barrier(world_size)
@@ -716,6 +938,14 @@ def main() -> None:
     maybe_print(rank, f"Output: {output_dir}")
     maybe_print(rank, f"Effective global batch: {effective_global_batch}")
     maybe_print(rank, f"Effective tokens per optimizer step: {effective_global_batch * block_size}")
+    print_training_schedule(
+        rank=rank,
+        train_config=train_config,
+        data_config=data_config,
+        effective_global_batch=effective_global_batch,
+        block_size=block_size,
+        start_step=start_step,
+    )
     maybe_print(
         rank,
         "Speed knobs: "
@@ -742,14 +972,18 @@ def main() -> None:
     printed_first_batch_debug = False
     warned_high_first_loss = False
 
-    progress = trange(1, int(train_config["max_steps"]) + 1, desc="training", disable=not is_main_process(rank))
+    progress = trange(start_step, max_steps + 1, desc="training", disable=not is_main_process(rank))
     run_start_time = time.perf_counter()
     last_log_time = time.perf_counter()
     tokens_since_log = 0
     steps_since_log = 0
+    last_completed_step = start_step - 1
     metrics_logger = MetricsLogger(output_dir, enabled=is_main_process(rank))
     try:
         for step in progress:
+            if stopper.stop_requested:
+                break
+
             lr = learning_rate_for_step(step - 1, train_config)
             set_optimizer_lr(optimizer, lr)
             accumulated_raw_loss = 0.0
@@ -807,6 +1041,7 @@ def main() -> None:
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
+            last_completed_step = step
             logged_loss = accumulated_raw_loss / grad_accum_steps
             if world_size > 1 and distributed_is_initialized():
                 loss_tensor = torch.tensor(logged_loss, device=device)
@@ -858,7 +1093,7 @@ def main() -> None:
                 tokens_since_log = 0
                 steps_since_log = 0
 
-            should_save = step % int(train_config["save_every"]) == 0 or step == int(train_config["max_steps"])
+            should_save = step % int(train_config["save_every"]) == 0 or step == max_steps
             if should_save:
                 save_checkpoint(
                     model=model,
@@ -870,7 +1105,61 @@ def main() -> None:
                     rank=rank,
                     world_size=world_size,
                     use_deepspeed=use_deepspeed,
+                    keep_last=int(train_config.get("save_total_limit", 3)),
+                    save_deepspeed_engine=bool(train_config.get("save_deepspeed_engine", False)),
+                    save_optimizer_state=bool(train_config.get("save_optimizer_state", False)),
+                    save_safetensors=bool(train_config.get("save_safetensors", True)),
+                    reason="final" if step == max_steps else "scheduled",
                 )
+            if stopper.stop_requested:
+                if not should_save:
+                    save_checkpoint(
+                        model=model,
+                        tokenizer=tokenizer,
+                        output_dir=output_dir,
+                        step=step,
+                        optimizer=optimizer,
+                        config=config,
+                        rank=rank,
+                        world_size=world_size,
+                        use_deepspeed=use_deepspeed,
+                        checkpoint_name=f"stop-step-{step:06d}",
+                        keep_last=int(train_config.get("save_total_limit", 3)),
+                        save_deepspeed_engine=bool(train_config.get("save_deepspeed_engine", False)),
+                        save_optimizer_state=bool(train_config.get("save_optimizer_state", False)),
+                        save_safetensors=bool(train_config.get("save_safetensors", True)),
+                        reason="graceful_stop",
+                    )
+                maybe_print(rank, f"[checkpoint] graceful stop completed at step {step:,}.")
+                break
+    except KeyboardInterrupt as exc:
+        maybe_save_exception_checkpoint(
+            exc=exc,
+            model=model,
+            tokenizer=tokenizer,
+            output_dir=output_dir,
+            last_completed_step=last_completed_step,
+            optimizer=optimizer,
+            config=config,
+            rank=rank,
+            world_size=world_size,
+            use_deepspeed=use_deepspeed,
+        )
+        raise
+    except Exception as exc:
+        maybe_save_exception_checkpoint(
+            exc=exc,
+            model=model,
+            tokenizer=tokenizer,
+            output_dir=output_dir,
+            last_completed_step=last_completed_step,
+            optimizer=optimizer,
+            config=config,
+            rank=rank,
+            world_size=world_size,
+            use_deepspeed=use_deepspeed,
+        )
+        raise
     finally:
         metrics_logger.close()
 

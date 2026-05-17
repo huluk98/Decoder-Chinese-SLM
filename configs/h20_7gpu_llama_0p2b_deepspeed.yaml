@@ -157,6 +157,11 @@ train:
   ddp_bucket_cap_mb: 100
   log_every: 10
   save_every: 1000
+  save_total_limit: 3
+  save_on_exception: true
+  save_safetensors: true
+  save_optimizer_state: false
+  save_deepspeed_engine: false
   compile: false
   deepspeed:
     enabled: true

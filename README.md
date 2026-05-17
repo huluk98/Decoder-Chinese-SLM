@@ -43,6 +43,19 @@ The config pins actual remote file names for the sources that need them: `data/t
 
 The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The full-data configs keep `min_rows: 9000000` as a target-size warning. They also set `download_first: true` and `continue_on_source_error: true`, so the pipeline first downloads dataset snapshots into the local Hugging Face cache, then normalizes from local/cache-backed files. A flaky source is logged in the manifest and the preprocessor moves on to the next source instead of discarding hours of completed work.
 
+## Training Method Focus
+
+The goal is to follow the useful parts of ChatLM-mini-Chinese's training method while keeping this project decoder-only. ChatLM-mini-Chinese uses cleaned public Chinese single-turn dialogue data, tokenizer-first preparation, streaming/shuffled loading, training logs, Accelerate, and arbitrary stop/resume support. This repo mirrors those ideas for causal LM pretraining:
+
+- Normalize public Chinese prompt/response, QA, BELLE, Zhihu, medical, web, and wiki-like sources into one cleaned corpus.
+- Train or load the 29,298-token tokenizer before pretraining so model vocab and token IDs stay fixed.
+- Prefer the packed-token path for H20 runs so each GPU reads fixed 2048-token causal-LM blocks instead of repeatedly tokenizing JSONL rows.
+- Log true mean causal-LM loss, learning rate, throughput, world size, effective global batch, and tokens per step.
+- Save bounded Hugging Face safetensors checkpoints and support resuming from `latest`.
+- Catch graceful stop signals and save at the next optimizer-step boundary.
+
+Unlike the upstream T5-style model, this project does not use text-to-text encoder-decoder pretraining or masked prediction. Each normalized dialogue/text record is concatenated into decoder-only causal-LM text, then the model learns next-token prediction over 2048-token packed blocks.
+
 ## Conda Setup
 
 Python 3.11 plus CUDA 12.4 PyTorch is defined in `environment.yml`.
@@ -364,7 +377,29 @@ git pull origin main
 
 ## Checkpoints
 
-Checkpoints are written under `run.output_dir` as `step-000000/` directories, plus a copied `latest/` directory for convenient generation and resume experiments.
+Checkpoints are written under `run.output_dir` as `step-000000/` directories. The trainer keeps only the newest `train.save_total_limit` checkpoint directories, which is set to `3` in the checked-in configs. Each retained checkpoint contains the model safetensors, tokenizer files, config, and `trainer_state.pt`.
+
+`latest` is updated to point at the newest checkpoint for convenient generation and resume experiments. On normal Linux training machines this is a symlink, so it does not duplicate another full `model.safetensors` file.
+
+The trainer also handles stoppage:
+
+- Scheduled saves happen every `train.save_every` optimizer steps and at the final step.
+- Pressing `Ctrl+C` or sending `SIGTERM` requests a graceful stop; the trainer finishes the current optimizer step, saves `stop-step-000000/`, updates `latest`, prunes old checkpoints, and exits cleanly.
+- If an exception or CUDA OOM happens after at least one optimizer step, the trainer attempts a best-effort `crash-step-000000/` checkpoint before re-raising the error.
+
+Resume with:
+
+```bash
+./scripts/launch_h20_8gpu.sh --resume runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+or, if GPU 1 must stay unused:
+
+```bash
+./scripts/launch_h20_7gpu_no_gpu1.sh --resume runs/h20-7gpu-llama-0p2b-deepspeed/latest
+```
+
+Training is step-based rather than epoch-based. The 8-H20 config uses `max_steps: 100000`, effective batch `8 * 32 * 2 = 512` sequences/update, and block size `2048`, so the planned run is about `100000 * 512 * 2048 = 104,857,600,000` training tokens. When a packed-token manifest exists, startup logs also print the approximate number of corpus passes.
 
 ## Push Model Tensors To GitHub
 
