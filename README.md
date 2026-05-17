@@ -178,7 +178,7 @@ Then launch the 8-GPU run:
 ./scripts/launch_h20_8gpu.sh
 ```
 
-That script defaults to Accelerate as the process launcher and DeepSpeed ZeRO-1 as the training backend. It verifies that exactly 8 CUDA devices are visible, then uses physical GPUs 0-7:
+That script defaults to Accelerate as the process launcher and DeepSpeed ZeRO-1 as the training backend. It verifies that exactly 8 CUDA devices are visible and that the Accelerate config launches 8 processes, then uses physical GPUs 0-7:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 HF_HUB_ENABLE_HF_TRANSFER=1 NCCL_DEBUG=WARN TORCH_NCCL_ASYNC_ERROR_HANDLING=1 accelerate launch --config_file configs/accelerate_h20_8gpu.yaml scripts/train.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
@@ -194,7 +194,7 @@ The 8-GPU speed config stays in the 0.2B class:
 - per-GPU microbatch 32, gradient accumulation 2
 - effective batch `8 * 32 * 2 = 512` sequences per optimizer update
 
-The trainer also checks H20 config names against the launched world size. If an 8-GPU H20 config is accidentally started with fewer than 8 workers, it exits with a clear error instead of silently underusing the machine.
+The launcher exits with a clear error if the 8-GPU run is started with fewer than 8 visible devices or an Accelerate config that launches fewer than 8 workers.
 
 If you want plain DDP instead of DeepSpeed, use:
 
