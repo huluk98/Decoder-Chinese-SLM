@@ -1,6 +1,6 @@
 run:
   seed: 42
-  output_dir: runs/h20-8gpu-llama-0p2b
+  output_dir: runs/h20-8gpu-llama-0p2b-fast
 
 tokenizer:
   path: artifacts/tokenizer-chatlm-bpe-29298
@@ -42,7 +42,7 @@ model:
   mlp_bias: false
   tie_word_embeddings: false
   attn_implementation: sdpa
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
 data:
   streaming: true
@@ -56,6 +56,9 @@ data:
   shuffle_buffer: 50000
   drop_last: true
   add_eos: true
+  token_ids_path: data/processed/chatlm_public_sources_0p2b.tokens.uint16.bin
+  token_ids_dtype: uint16
+  token_ids_manifest_path: data/processed/chatlm_public_sources_0p2b.tokens.manifest.json
   sources:
     - type: hf
       path: YeungNLP/firefly-pretrain-dataset
@@ -127,8 +130,8 @@ data:
       max_samples: null
 
 train:
-  batch_size: 8
-  grad_accum_steps: 8
+  batch_size: 32
+  grad_accum_steps: 2
   max_steps: 100000
   learning_rate: 0.0003
   min_learning_rate: 0.00003
@@ -140,10 +143,18 @@ train:
   precision: bf16
   tf32: true
   float32_matmul_precision: high
-  num_workers: 0
+  sdp_flash: true
+  sdp_mem_efficient: true
+  sdp_math: true
+  cudnn_benchmark: true
+  num_workers: 4
   pin_memory: true
-  persistent_workers: false
-  prefetch_factor: null
+  persistent_workers: true
+  prefetch_factor: 4
+  sync_cuda_for_timing: true
+  ddp_static_graph: true
+  ddp_gradient_as_bucket_view: true
+  ddp_bucket_cap_mb: 100
   log_every: 10
   save_every: 1000
   compile: true
