@@ -69,7 +69,7 @@ def preprocessed_data_config(config: dict[str, Any]) -> dict[str, Any]:
     if not preprocess_config["enabled"] or not output_path.exists():
         return config["data"]
 
-    return {
+    data_config = {
         "streaming": False,
         "drop_last": config["data"].get("drop_last", True),
         "add_eos": config["data"].get("add_eos", True),
@@ -82,6 +82,10 @@ def preprocessed_data_config(config: dict[str, Any]) -> dict[str, Any]:
             }
         ],
     }
+    for key in ("token_ids_path", "token_ids_dtype", "token_ids_manifest_path"):
+        if key in config["data"]:
+            data_config[key] = config["data"][key]
+    return data_config
 
 
 def preprocess_datasets(
