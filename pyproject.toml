@@ -16,11 +16,13 @@ dependencies = [
   "tokenizers>=0.19",
   "PyYAML>=6.0",
   "tqdm>=4.66",
+  "numpy>=1.26",
   "accelerate>=1.0",
   "safetensors>=0.4.5",
   "sentencepiece>=0.2",
   "hf-transfer>=0.1.8",
   "hf-xet>=1.1.0",
+  "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
