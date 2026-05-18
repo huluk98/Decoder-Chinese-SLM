@@ -65,4 +65,9 @@ train:
   num_workers: 0
   log_every: 1
   save_every: 5
+  save_total_limit: 3
+  save_on_exception: true
+  save_safetensors: true
+  save_optimizer_state: false
+  save_deepspeed_engine: false
   compile: false

@@ -17,6 +17,8 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config.setdefault("data", {})
     config.setdefault("train", {})
     config.setdefault("preprocess", {})
+    config.setdefault("sft", {})
+    config.setdefault("prune", {})
 
     config["run"].setdefault("seed", 42)
     config["run"].setdefault("output_dir", "runs/default")
@@ -97,6 +99,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     config["train"].setdefault("log_every", 10)
     config["train"].setdefault("save_every", 1000)
     config["train"].setdefault("compile", False)
+    config["train"].setdefault("save_total_limit", 3)
     config["train"].setdefault("deepspeed", {})
     if config["train"]["deepspeed"] is None:
         config["train"]["deepspeed"] = {}
@@ -104,6 +107,25 @@ def load_config(path: str | Path) -> dict[str, Any]:
         config["train"]["deepspeed"].setdefault("enabled", False)
         config["train"]["deepspeed"].setdefault("config_path", None)
         config["train"]["deepspeed"].setdefault("fused_adam", True)
+
+    config["sft"].setdefault("mode", "sft")
+    config["sft"].setdefault("base_model", None)
+    config["sft"].setdefault("data_path", None)
+    config["sft"].setdefault("max_length", config["model"]["block_size"])
+    config["sft"].setdefault("alignment_weight", 0.1)
+    config["sft"].setdefault("margin", 0.5)
+    config["sft"].setdefault("max_samples", None)
+
+    config["prune"].setdefault("base_model", None)
+    config["prune"].setdefault("output_dir", "runs/pruned-0p2b")
+    config["prune"].setdefault("method", "magnitude")
+    config["prune"].setdefault("sparsity", 0.5)
+    config["prune"].setdefault("include_lm_head", False)
+    config["prune"].setdefault("calibration_data_path", None)
+    config["prune"].setdefault("calibration_batches", 128)
+    config["prune"].setdefault("recovery_steps", 0)
+    config["prune"].setdefault("recovery_learning_rate", 5e-6)
+    config["prune"].setdefault("overwrite", False)
 
     config["_config_path"] = str(config_path)
     config["_config_dir"] = str(config_path.parent)

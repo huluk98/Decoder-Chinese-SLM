@@ -43,6 +43,19 @@ The config pins actual remote file names for the sources that need them: `data/t
 
 The exact cleaned upstream parquet blend is not exposed as one canonical artifact, so this project reconstructs the public recipe from downloadable sources and normalizes everything into one JSONL. The full-data configs keep `min_rows: 9000000` as a target-size warning. They also set `download_first: true` and `continue_on_source_error: true`, so the pipeline first downloads dataset snapshots into the local Hugging Face cache, then normalizes from local/cache-backed files. A flaky source is logged in the manifest and the preprocessor moves on to the next source instead of discarding hours of completed work.
 
+## Training Method Focus
+
+The goal is to follow the useful parts of ChatLM-mini-Chinese's training method while keeping this project decoder-only. ChatLM-mini-Chinese uses cleaned public Chinese single-turn dialogue data, tokenizer-first preparation, streaming/shuffled loading, training logs, Accelerate, and arbitrary stop/resume support. This repo mirrors those ideas for causal LM pretraining:
+
+- Normalize public Chinese prompt/response, QA, BELLE, Zhihu, medical, web, and wiki-like sources into one cleaned corpus.
+- Train or load the 29,298-token tokenizer before pretraining so model vocab and token IDs stay fixed.
+- Prefer the packed-token path for H20 runs so each GPU reads fixed 2048-token causal-LM blocks instead of repeatedly tokenizing JSONL rows.
+- Log true mean causal-LM loss, learning rate, throughput, world size, effective global batch, and tokens per step.
+- Save bounded Hugging Face safetensors checkpoints and support resuming from `latest`.
+- Catch graceful stop signals and save at the next optimizer-step boundary.
+
+Unlike the upstream T5-style model, this project does not use text-to-text encoder-decoder pretraining or masked prediction. Each normalized dialogue/text record is concatenated into decoder-only causal-LM text, then the model learns next-token prediction over 2048-token packed blocks.
+
 ## Conda Setup
 
 Python 3.11 plus CUDA 12.4 PyTorch is defined in `environment.yml`.
@@ -50,6 +63,65 @@ Python 3.11 plus CUDA 12.4 PyTorch is defined in `environment.yml`.
 ```bash
 conda env create -f environment.yml
 conda activate chatlm-decoder
+```
+
+For an existing environment:
+
+```bash
+conda env update -f environment.yml --prune
+conda activate chatlm-decoder
+pip install -e ".[deepspeed]"
+```
+
+## Start-To-Finish Workflow
+
+For a fresh 8x H20 training run:
+
+```bash
+git clone https://github.com/huluk98/Decoder-Chinese-SLM.git
+cd Decoder-Chinese-SLM
+conda env create -f environment.yml
+conda activate chatlm-decoder
+pip install -e ".[deepspeed]"
+HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/download_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/prepare_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/train_tokenizer.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/pack_tokens.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+./scripts/launch_h20_8gpu.sh
+```
+
+For the 7-GPU run that skips physical GPU 1:
+
+```bash
+./scripts/launch_h20_7gpu_no_gpu1.sh
+```
+
+Resume after stopping or crashing:
+
+```bash
+./scripts/launch_h20_8gpu.sh --resume runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+Monitor loss, throughput, GPU-hours, and estimated tokens:
+
+```bash
+tail -f runs/h20-8gpu-llama-0p2b-deepspeed/metrics/training_metrics.csv
+python scripts/summarize_training_run.py runs/h20-8gpu-llama-0p2b-deepspeed
+```
+
+After training:
+
+```bash
+python scripts/plot_loss.py --metrics runs/h20-8gpu-llama-0p2b-deepspeed/metrics/training_metrics.csv
+python scripts/eval_ceval.py --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest --subjects all --split val --n-shot 5
+```
+
+Optional post-pretraining alignment and pruning:
+
+```bash
+python scripts/sft.py --config configs/sft.yaml --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
+python scripts/sft.py --config configs/contrastive_sft.yaml --mode contrastive --checkpoint runs/sft-0p2b/latest
+CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
 ```
 
 ## Smoke Run
@@ -273,6 +345,127 @@ python scripts/plot_loss.py \
 
 This writes `pretrain_loss.png`, `loss.png`, and `pretrain_loss_lr.png` beside the metrics CSV. Use `--output-dir img` if you want the PNGs in a model-card image folder. The CSV stores `step`, averaged causal-LM `loss`, `lr`, `tokens_per_second`, `seconds_per_step`, `world_size`, and effective batch details so the decoder-only run can be compared against the same-size ChatLM-mini-Chinese reference transparently.
 
+## GPU-Hour Accounting
+
+New training runs write cumulative cost columns into `runs/<run-name>/metrics/training_metrics.csv`:
+
+- `wall_hours`
+- `gpu_hours`
+- `estimated_total_tokens`
+- `estimated_billion_tokens`
+- `gpu_hours_per_billion_tokens`
+
+The progress bar also shows `gpuh`. For old logs that only have `time_seconds`, `world_size`, and throughput columns, use the summarizer:
+
+```bash
+python scripts/summarize_training_run.py runs/h20-8gpu-llama-0p2b-deepspeed
+```
+
+If an older CSV does not include `world_size`, pass the GPU count:
+
+```bash
+python scripts/summarize_training_run.py runs/old-run/metrics/training_metrics.csv --gpus 8
+```
+
+The estimate detects appended resume segments by watching `time_seconds` reset. For a single uninterrupted run, GPU-hours are simply `last time_seconds / 3600 * world_size`.
+
+## C-Eval Evaluation
+
+C-Eval is a Chinese multiple-choice benchmark with 52 subjects and `dev`, `val`, and `test` splits. This repo evaluates your decoder-only checkpoint by scoring the conditional log probability of answer choices `A`, `B`, `C`, and `D`, which is more stable for a base/pretraining checkpoint than asking it to generate free-form answers.
+
+Run a quick two-subject smoke check:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest \
+  --subjects computer_network,operating_system \
+  --split val \
+  --n-shot 5 \
+  --limit 20
+```
+
+Run the full validation set:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest \
+  --subjects all \
+  --split val \
+  --n-shot 5
+```
+
+The script writes `ceval_summary.json` and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+
+## SFT And Contrastive SFT
+
+After pretraining, run standard supervised fine-tuning on instruction/answer rows:
+
+```bash
+python scripts/sft.py \
+  --config configs/sft.yaml \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+SFT JSONL rows can use `prompt`/`response`, `instruction`/`response`, `question`/`answer`, or similar fields:
+
+```json
+{"prompt": "什么是边缘端中文小模型？", "response": "..."}
+```
+
+For contrastive SFT, each row also includes a positive semantic example and a negative example:
+
+```json
+{"prompt": "...", "response": "...", "positive": "...", "negative": "..."}
+```
+
+Run it with:
+
+```bash
+python scripts/sft.py \
+  --config configs/contrastive_sft.yaml \
+  --mode contrastive \
+  --checkpoint runs/sft-0p2b/latest
+```
+
+The contrastive objective follows the pictured semantic-alignment idea:
+
+```text
+loss = generation_loss + lambda * (distance(prompt, positive) + relu(margin - distance(prompt, negative)))
+```
+
+The implementation uses mean-pooled last hidden states and cosine distance. `configs/contrastive_sft.yaml` controls `alignment_weight` and `margin`.
+
+## 50% Pruning
+
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model.
+
+Run one pruning method:
+
+```bash
+python scripts/prune.py \
+  --config configs/prune_50.yaml \
+  --method magnitude \
+  --checkpoint runs/contrastive-sft-0p2b/latest \
+  --output-dir runs/pruned-magnitude-50
+```
+
+Available methods:
+
+- `magnitude`: global unstructured 50% magnitude pruning.
+- `2of4`: NVIDIA-style semi-structured 2:4 pruning, two zeros in each group of four linear weights.
+- `wanda`: activation-aware 50% pruning using calibration data.
+- `gradient`: gradient-score pruning using `abs(weight * grad)` on calibration batches.
+
+Run all four:
+
+```bash
+CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
+```
+
+Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. To do sparse recovery tuning after any pruning method, set `prune.recovery_steps` above `0`. The script reapplies masks after each optimizer step so pruned weights stay zero.
+
+Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:
@@ -337,11 +530,63 @@ git pull origin main
 
 ## Checkpoints
 
-Checkpoints are written under `run.output_dir` as `step-000000/` directories, plus a copied `latest/` directory for convenient generation and resume experiments.
+Checkpoints are written under `run.output_dir` as `step-000000/` directories. The trainer keeps only the newest `train.save_total_limit` checkpoint directories, which is set to `3` in the checked-in configs. Each retained checkpoint contains the model safetensors, tokenizer files, config, and `trainer_state.pt`.
+
+`latest` is updated to point at the newest checkpoint for convenient generation and resume experiments. On normal Linux training machines this is a symlink, so it does not duplicate another full `model.safetensors` file.
+
+The trainer also handles stoppage:
+
+- Scheduled saves happen every `train.save_every` optimizer steps and at the final step.
+- Pressing `Ctrl+C` or sending `SIGTERM` requests a graceful stop; the trainer finishes the current optimizer step, saves `stop-step-000000/`, updates `latest`, prunes old checkpoints, and exits cleanly.
+- If an exception or CUDA OOM happens after at least one optimizer step, the trainer attempts a best-effort `crash-step-000000/` checkpoint before re-raising the error.
+
+Resume with:
+
+```bash
+./scripts/launch_h20_8gpu.sh --resume runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+or, if GPU 1 must stay unused:
+
+```bash
+./scripts/launch_h20_7gpu_no_gpu1.sh --resume runs/h20-7gpu-llama-0p2b-deepspeed/latest
+```
+
+Training is step-based rather than epoch-based. The 8-H20 config uses `max_steps: 100000`, effective batch `8 * 32 * 2 = 512` sequences/update, and block size `2048`, so the planned run is about `100000 * 512 * 2048 = 104,857,600,000` training tokens. When a packed-token manifest exists, startup logs also print the approximate number of corpus passes.
+
+## Push Model Tensors To GitHub
+
+GitHub rejects normal Git blobs above 100 MB, so model tensors should be pushed with Git LFS. This repo tracks common tensor extensions in `.gitattributes`, but you still need Git LFS installed on the machine that pushes the checkpoint.
+
+One-time setup on the training machine:
+
+```bash
+git lfs install
+git pull origin main
+```
+
+Keep `runs/` ignored for active training. After training, copy the final checkpoint into a versioned artifact directory:
+
+```bash
+mkdir -p model-artifacts/decoder-chinese-slm-0p2b
+cp -R runs/h20-8gpu-llama-0p2b-deepspeed/latest/* model-artifacts/decoder-chinese-slm-0p2b/
+```
+
+Then commit and push the tensor files through LFS:
+
+```bash
+git status
+git add .gitattributes model-artifacts/decoder-chinese-slm-0p2b
+git commit -m "Add 0.2B checkpoint tensors"
+git push origin main
+```
+
+For large public model distribution, Hugging Face Hub is usually a better home for checkpoints than GitHub LFS because it is built for model files, safetensors, model cards, and downloads.
 
 ## References
 
 - ChatLM-mini-Chinese model card and config: [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), [`config.json`](https://huggingface.co/charent/ChatLM-mini-Chinese/blob/main/config.json).
+- C-Eval dataset and benchmark: [`ceval/ceval-exam`](https://huggingface.co/datasets/ceval/ceval-exam), [`hkust-nlp/ceval`](https://github.com/hkust-nlp/ceval).
 - Llama architecture fields are mapped to Hugging Face [`LlamaConfig`](https://huggingface.co/docs/transformers/model_doc/llama).
 - H20 memory and compute capability reference: NVIDIA [`Supported GPUs`](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html).
 - Multi-GPU launch uses PyTorch [`DistributedDataParallel`](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html); for larger-than-memory variants, PyTorch [`FSDP`](https://docs.pytorch.org/docs/stable/fsdp.html) is the natural next step.
