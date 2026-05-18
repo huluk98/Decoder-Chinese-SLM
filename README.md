@@ -65,6 +65,57 @@ conda env create -f environment.yml
 conda activate chatlm-decoder
 ```
 
+For an existing environment:
+
+```bash
+conda env update -f environment.yml --prune
+conda activate chatlm-decoder
+pip install -e ".[deepspeed]"
+```
+
+## Start-To-Finish Workflow
+
+For a fresh 8x H20 training run:
+
+```bash
+git clone https://github.com/huluk98/Decoder-Chinese-SLM.git
+cd Decoder-Chinese-SLM
+conda env create -f environment.yml
+conda activate chatlm-decoder
+pip install -e ".[deepspeed]"
+HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/download_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/prepare_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/train_tokenizer.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+python scripts/pack_tokens.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
+./scripts/launch_h20_8gpu.sh
+```
+
+For the 7-GPU run that skips physical GPU 1:
+
+```bash
+./scripts/launch_h20_7gpu_no_gpu1.sh
+```
+
+Resume after stopping or crashing:
+
+```bash
+./scripts/launch_h20_8gpu.sh --resume runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+Monitor loss, throughput, GPU-hours, and estimated tokens:
+
+```bash
+tail -f runs/h20-8gpu-llama-0p2b-deepspeed/metrics/training_metrics.csv
+python scripts/summarize_training_run.py runs/h20-8gpu-llama-0p2b-deepspeed
+```
+
+After training:
+
+```bash
+python scripts/plot_loss.py --metrics runs/h20-8gpu-llama-0p2b-deepspeed/metrics/training_metrics.csv
+python scripts/eval_ceval.py --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest --subjects all --split val --n-shot 5
+```
+
 ## Smoke Run
 
 The smoke config first normalizes `data/sample_zh_dialog.jsonl` into `data/processed/smoke_normalized.jsonl`, then trains a tiny tokenizer and tiny model.
@@ -285,6 +336,30 @@ python scripts/plot_loss.py \
 ```
 
 This writes `pretrain_loss.png`, `loss.png`, and `pretrain_loss_lr.png` beside the metrics CSV. Use `--output-dir img` if you want the PNGs in a model-card image folder. The CSV stores `step`, averaged causal-LM `loss`, `lr`, `tokens_per_second`, `seconds_per_step`, `world_size`, and effective batch details so the decoder-only run can be compared against the same-size ChatLM-mini-Chinese reference transparently.
+
+## GPU-Hour Accounting
+
+New training runs write cumulative cost columns into `runs/<run-name>/metrics/training_metrics.csv`:
+
+- `wall_hours`
+- `gpu_hours`
+- `estimated_total_tokens`
+- `estimated_billion_tokens`
+- `gpu_hours_per_billion_tokens`
+
+The progress bar also shows `gpuh`. For old logs that only have `time_seconds`, `world_size`, and throughput columns, use the summarizer:
+
+```bash
+python scripts/summarize_training_run.py runs/h20-8gpu-llama-0p2b-deepspeed
+```
+
+If an older CSV does not include `world_size`, pass the GPU count:
+
+```bash
+python scripts/summarize_training_run.py runs/old-run/metrics/training_metrics.csv --gpus 8
+```
+
+The estimate detects appended resume segments by watching `time_seconds` reset. For a single uninterrupted run, GPU-hours are simply `last time_seconds / 3600 * world_size`.
 
 ## C-Eval Evaluation
 

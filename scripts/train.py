@@ -28,6 +28,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
 from chatlm_decoder.data import build_dataloader, iter_texts
+from chatlm_decoder.metrics import (
+    TRAINING_METRIC_FIELDNAMES,
+    summarize_training_metrics,
+    upgrade_training_metrics_file,
+)
 from chatlm_decoder.model import count_parameters, create_model
 from chatlm_decoder.preprocess import ensure_preprocessed_data, preprocessed_data_config
 from chatlm_decoder.tokenizer import load_tokenizer, train_tokenizer_from_iterator
@@ -201,10 +206,17 @@ def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
 
 
 class MetricsLogger:
-    def __init__(self, output_dir: Path, enabled: bool = True) -> None:
+    def __init__(self, output_dir: Path, enabled: bool = True, default_world_size: int | None = None) -> None:
         self.enabled = enabled
         self.handle = None
         self.writer = None
+        self.path = output_dir / "metrics" / "training_metrics.csv"
+        self.previous_summary: dict[str, Any] = {
+            "wall_seconds": 0.0,
+            "gpu_seconds": 0.0,
+            "estimated_total_tokens": 0,
+            "gpu_hours": 0.0,
+        }
         if not enabled:
             return
 
@@ -212,25 +224,29 @@ class MetricsLogger:
         metrics_dir.mkdir(parents=True, exist_ok=True)
         self.path = metrics_dir / "training_metrics.csv"
         is_new_file = not self.path.exists() or self.path.stat().st_size == 0
+        if not is_new_file:
+            upgrade_training_metrics_file(self.path, default_world_size=default_world_size)
+            self.previous_summary = summarize_training_metrics(self.path, default_world_size=default_world_size)
         self.handle = self.path.open("a", encoding="utf-8", newline="")
         self.writer = csv.DictWriter(
             self.handle,
-            fieldnames=[
-                "time_seconds",
-                "step",
-                "loss",
-                "lr",
-                "world_size",
-                "effective_global_batch",
-                "block_size",
-                "tokens_per_step",
-                "tokens_per_second",
-                "seconds_per_step",
-            ],
+            fieldnames=TRAINING_METRIC_FIELDNAMES,
         )
         if is_new_file:
             self.writer.writeheader()
             self.handle.flush()
+
+    @property
+    def previous_wall_seconds(self) -> float:
+        return float(self.previous_summary.get("wall_seconds", 0.0))
+
+    @property
+    def previous_gpu_seconds(self) -> float:
+        return float(self.previous_summary.get("gpu_seconds", 0.0))
+
+    @property
+    def previous_tokens(self) -> int:
+        return int(self.previous_summary.get("estimated_total_tokens", 0))
 
     def log(self, row: dict[str, Any]) -> None:
         if not self.enabled or self.writer is None or self.handle is None:
@@ -976,9 +992,16 @@ def main() -> None:
     run_start_time = time.perf_counter()
     last_log_time = time.perf_counter()
     tokens_since_log = 0
+    run_tokens_seen = 0
     steps_since_log = 0
     last_completed_step = start_step - 1
-    metrics_logger = MetricsLogger(output_dir, enabled=is_main_process(rank))
+    metrics_logger = MetricsLogger(output_dir, enabled=is_main_process(rank), default_world_size=world_size)
+    if is_main_process(rank):
+        print(
+            "Metrics logging: "
+            f"{metrics_logger.path} | prior_gpu_hours={metrics_logger.previous_gpu_seconds / 3600.0:.2f} | "
+            "new rows include wall_hours, gpu_hours, estimated_total_tokens, and gpu_hours_per_billion_tokens"
+        )
     try:
         for step in progress:
             if stopper.stop_requested:
@@ -1057,13 +1080,24 @@ def main() -> None:
                     )
                 warned_high_first_loss = True
 
-            tokens_since_log += effective_global_batch * block_size
+            tokens_this_step = effective_global_batch * block_size
+            tokens_since_log += tokens_this_step
+            run_tokens_seen += tokens_this_step
             steps_since_log += 1
 
             if (step == 1 or step % int(train_config["log_every"]) == 0) and is_main_process(rank):
                 if device.type == "cuda" and bool(train_config.get("sync_cuda_for_timing", False)):
                     torch.cuda.synchronize(device)
                 now = time.perf_counter()
+                run_wall_seconds = now - run_start_time
+                total_wall_seconds = metrics_logger.previous_wall_seconds + run_wall_seconds
+                total_gpu_seconds = metrics_logger.previous_gpu_seconds + (run_wall_seconds * world_size)
+                total_tokens = metrics_logger.previous_tokens + run_tokens_seen
+                total_billion_tokens = total_tokens / 1_000_000_000.0
+                gpu_hours = total_gpu_seconds / 3600.0
+                gpu_hours_per_billion_tokens = (
+                    gpu_hours / total_billion_tokens if total_billion_tokens > 0 else None
+                )
                 elapsed = max(1e-6, now - last_log_time)
                 tokens_per_second = tokens_since_log / elapsed
                 seconds_per_step = elapsed / max(1, steps_since_log)
@@ -1074,10 +1108,11 @@ def main() -> None:
                     egb=effective_global_batch,
                     tok_s=f"{tokens_per_second / 1000.0:.1f}k",
                     step_s=f"{seconds_per_step:.2f}",
+                    gpuh=f"{gpu_hours:.1f}",
                 )
                 metrics_logger.log(
                     {
-                        "time_seconds": f"{now - run_start_time:.3f}",
+                        "time_seconds": f"{run_wall_seconds:.3f}",
                         "step": step,
                         "loss": f"{logged_loss:.8f}",
                         "lr": f"{lr:.12g}",
@@ -1087,6 +1122,15 @@ def main() -> None:
                         "tokens_per_step": effective_global_batch * block_size,
                         "tokens_per_second": f"{tokens_per_second:.6f}",
                         "seconds_per_step": f"{seconds_per_step:.6f}",
+                        "wall_hours": f"{total_wall_seconds / 3600.0:.6f}",
+                        "gpu_hours": f"{gpu_hours:.6f}",
+                        "estimated_total_tokens": total_tokens,
+                        "estimated_billion_tokens": f"{total_billion_tokens:.6f}",
+                        "gpu_hours_per_billion_tokens": (
+                            f"{gpu_hours_per_billion_tokens:.6f}"
+                            if gpu_hours_per_billion_tokens is not None
+                            else ""
+                        ),
                     }
                 )
                 last_log_time = now
