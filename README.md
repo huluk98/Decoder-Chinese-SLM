@@ -116,6 +116,14 @@ python scripts/plot_loss.py --metrics runs/h20-8gpu-llama-0p2b-deepspeed/metrics
 python scripts/eval_ceval.py --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest --subjects all --split val --n-shot 5
 ```
 
+Optional post-pretraining alignment and pruning:
+
+```bash
+python scripts/sft.py --config configs/sft.yaml --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
+python scripts/sft.py --config configs/contrastive_sft.yaml --mode contrastive --checkpoint runs/sft-0p2b/latest
+CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
+```
+
 ## Smoke Run
 
 The smoke config first normalizes `data/sample_zh_dialog.jsonl` into `data/processed/smoke_normalized.jsonl`, then trains a tiny tokenizer and tiny model.
@@ -387,6 +395,76 @@ python scripts/eval_ceval.py \
 ```
 
 The script writes `ceval_summary.json` and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+
+## SFT And Contrastive SFT
+
+After pretraining, run standard supervised fine-tuning on instruction/answer rows:
+
+```bash
+python scripts/sft.py \
+  --config configs/sft.yaml \
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
+```
+
+SFT JSONL rows can use `prompt`/`response`, `instruction`/`response`, `question`/`answer`, or similar fields:
+
+```json
+{"prompt": "什么是边缘端中文小模型？", "response": "..."}
+```
+
+For contrastive SFT, each row also includes a positive semantic example and a negative example:
+
+```json
+{"prompt": "...", "response": "...", "positive": "...", "negative": "..."}
+```
+
+Run it with:
+
+```bash
+python scripts/sft.py \
+  --config configs/contrastive_sft.yaml \
+  --mode contrastive \
+  --checkpoint runs/sft-0p2b/latest
+```
+
+The contrastive objective follows the pictured semantic-alignment idea:
+
+```text
+loss = generation_loss + lambda * (distance(prompt, positive) + relu(margin - distance(prompt, negative)))
+```
+
+The implementation uses mean-pooled last hidden states and cosine distance. `configs/contrastive_sft.yaml` controls `alignment_weight` and `margin`.
+
+## 50% Pruning
+
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model.
+
+Run one pruning method:
+
+```bash
+python scripts/prune.py \
+  --config configs/prune_50.yaml \
+  --method magnitude \
+  --checkpoint runs/contrastive-sft-0p2b/latest \
+  --output-dir runs/pruned-magnitude-50
+```
+
+Available methods:
+
+- `magnitude`: global unstructured 50% magnitude pruning.
+- `2of4`: NVIDIA-style semi-structured 2:4 pruning, two zeros in each group of four linear weights.
+- `wanda`: activation-aware 50% pruning using calibration data.
+- `gradient`: gradient-score pruning using `abs(weight * grad)` on calibration batches.
+
+Run all four:
+
+```bash
+CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
+```
+
+Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. To do sparse recovery tuning after any pruning method, set `prune.recovery_steps` above `0`. The script reapplies masks after each optimizer step so pruned weights stay zero.
+
+Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
 ## Add More Public Sources
 

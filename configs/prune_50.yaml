@@ -1,0 +1,25 @@
+run:
+  seed: 42
+
+model:
+  block_size: 2048
+
+train:
+  batch_size: 2
+
+prune:
+  base_model: runs/contrastive-sft-0p2b/latest
+  output_dir: runs/pruned-0p2b
+  method: magnitude
+  sparsity: 0.5
+  include_lm_head: false
+  calibration_data_path: data/sft/contrastive_train.jsonl
+  calibration_batches: 128
+  max_length: 2048
+  batch_size: 2
+  num_workers: 0
+  recovery_steps: 0
+  recovery_learning_rate: 0.000005
+  recovery_weight_decay: 0.0
+  max_grad_norm: 1.0
+  overwrite: true
