@@ -5,11 +5,13 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -30,6 +32,20 @@ def select_device(requested: str) -> torch.device:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def setup_distributed_eval(requested_device: str) -> tuple[torch.device, int, int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size > 1:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Multi-GPU eval requires CUDA.")
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        return torch.device("cuda", local_rank), rank, local_rank, world_size
+    return select_device(requested_device), rank, local_rank, world_size
 
 
 def dtype_for(name: str, device: torch.device) -> torch.dtype | str:
@@ -234,7 +250,7 @@ def main() -> None:
     parser.add_argument("--num-beams", type=int, default=1)
     args = parser.parse_args()
 
-    device = select_device(args.device)
+    device, rank, local_rank, world_size = setup_distributed_eval(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=False)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -262,7 +278,15 @@ def main() -> None:
     examples = [tokenize_example(tokenizer, record, max_length=max_length) for record in records]
 
     output_dir = Path(args.output_dir or Path("runs") / "eval" / f"{dataset_path.stem}_prompt_response").expanduser()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if rank == 0:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"Prompt/response eval runtime: world_size={world_size} "
+            f"rank={rank} local_rank={local_rank} device={device} "
+            f"total_examples={len(records)} shard_examples={(len(records) + world_size - 1 - rank) // world_size}"
+        )
+    if world_size > 1:
+        dist.barrier()
 
     total_loss_sum = 0.0
     total_tokens = 0
@@ -270,11 +294,18 @@ def main() -> None:
     generated_token_lengths: list[int] = []
     results: list[dict[str, Any]] = []
     batch_size = max(1, int(args.batch_size))
-    for start in tqdm(range(0, len(examples), batch_size), desc="prompt-response-eval"):
-        batch = examples[start : start + batch_size]
+    indexed_examples = [(index, example) for index, example in enumerate(examples) if index % world_size == rank]
+    progress = tqdm(
+        range(0, len(indexed_examples), batch_size),
+        desc=f"prompt-response-eval-rank{rank}",
+        disable=(rank != 0),
+    )
+    for start in progress:
+        batch_pairs = indexed_examples[start : start + batch_size]
+        batch = [example for _, example in batch_pairs]
         scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
         for offset, score in enumerate(scores):
-            index = start + offset
+            index = batch_pairs[offset][0]
             token_count = int(score["token_count"])
             loss_sum = float(score["loss_sum"])
             total_tokens += token_count
@@ -310,6 +341,39 @@ def main() -> None:
                     generated_token_lengths.append(generated_token_count)
                     result["exact_match"] = is_exact
             results.append(result)
+
+    local_payload = {
+        "total_loss_sum": total_loss_sum,
+        "total_tokens": total_tokens,
+        "exact_correct": exact_correct,
+        "generated_token_lengths": generated_token_lengths,
+        "results": results,
+    }
+    if world_size > 1:
+        gathered: list[dict[str, Any] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
+        dist.gather_object(local_payload, gathered, dst=0)
+    else:
+        gathered = [local_payload]
+
+    if rank != 0:
+        if world_size > 1:
+            dist.barrier()
+            dist.destroy_process_group()
+        return
+
+    payloads = [payload for payload in gathered or [] if payload is not None]
+    total_loss_sum = sum(float(payload["total_loss_sum"]) for payload in payloads)
+    total_tokens = sum(int(payload["total_tokens"]) for payload in payloads)
+    exact_correct = sum(int(payload["exact_correct"]) for payload in payloads)
+    generated_token_lengths = [
+        int(length)
+        for payload in payloads
+        for length in payload["generated_token_lengths"]
+    ]
+    results = sorted(
+        [result for payload in payloads for result in payload["results"]],
+        key=lambda row: int(row["index"]),
+    )
 
     mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
     avg_generated_tokens = (
@@ -351,6 +415,9 @@ def main() -> None:
         if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
             print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
     print(f"Wrote results to {output_dir}")
+    if world_size > 1:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

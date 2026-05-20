@@ -184,6 +184,23 @@ python scripts/eval_prompt_response.py \
 
 The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy; exact match normalizes whitespace and strips EOS/pad tokens before comparing the generated response to the target response. Use `--no-exact-match` only when you want loss/perplexity without generation.
 
+For large eval files on your 8x H20 machine, shard generation across all GPUs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false \
+torchrun --standalone --nproc_per_node=8 scripts/eval_prompt_response.py \
+  --model-path /absolute/path/to/sft/checkpoint \
+  --dataset-file /absolute/path/to/eval.json \
+  --output-dir runs/eval/my_smart_home_eval \
+  --max-new-tokens 64 \
+  --temperature 0 \
+  --num-beams 1 \
+  --batch-size 8 \
+  --dtype bf16
+```
+
+Rank 0 writes the combined `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`.
+
 For local SFT/fine-tuning with your chosen model and dataset paths:
 
 ```bash
