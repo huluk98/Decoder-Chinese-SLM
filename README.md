@@ -522,6 +522,27 @@ The default SFT mode is regular causal-LM supervised fine-tuning. Contrastive po
 
 Use `--epochs N` to train for `N` passes over your SFT dataset. If `--epochs` is omitted, the script uses `train.max_steps` from the config. Internally, epochs are converted into optimizer steps using the dataloader length and `train.grad_accum_steps`.
 
+SFT data is normalized automatically before tokenization by `normalize_sft_record` in `src/chatlm_decoder/sft_data.py`. This is important: the dataset should be shaped to the model's role-token format instead of asking the model to infer inconsistent dataset schemas. The normalizer:
+
+- strips duplicated `<|user|>`, `<|assistant|>`, `<|system|>`, and `<|eos|>` tokens from raw fields;
+- cleans line endings and repeated blank lines;
+- combines `instruction` plus `input`/`context` into one user prompt;
+- converts `messages` or `conversations` rows into the same chat format;
+- always writes prompts as `<|user|>\n...\n<|assistant|>\n`, with optional `<|system|>` before the user turn;
+- always appends one final `<|eos|>` to the response.
+
+For ChatML/ShareGPT-style rows, the last assistant message is trained as the answer and earlier turns are used as the masked prompt:
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "你是一个中文助手。"},
+    {"role": "user", "content": "什么是小模型？"},
+    {"role": "assistant", "content": "小模型是参数量较小、部署成本较低的模型。"}
+  ]
+}
+```
+
 For contrastive SFT, each row also includes a positive semantic example and a negative example:
 
 ```json

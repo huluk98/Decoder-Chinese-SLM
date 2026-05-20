@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -9,20 +10,59 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 USER_TOKEN = "<|user|>"
 ASSISTANT_TOKEN = "<|assistant|>"
+SYSTEM_TOKEN = "<|system|>"
 EOS_TOKEN = "<|eos|>"
-PROMPT_FIELDS = ("prompt", "instruction", "question", "input", "x")
+PROMPT_FIELDS = ("prompt", "instruction", "question", "query", "input", "x")
+INPUT_FIELDS = ("input", "context", "source", "background")
+SYSTEM_FIELDS = ("system", "system_prompt")
 RESPONSE_FIELDS = ("response", "responses", "output", "answer", "completion", "target", "y")
+MESSAGE_FIELDS = ("messages", "conversations")
+CONTENT_FIELDS = ("content", "value", "text", "message")
+ROLE_ALIASES = {
+    "human": USER_TOKEN,
+    "user": USER_TOKEN,
+    "instruction": USER_TOKEN,
+    "prompt": USER_TOKEN,
+    "assistant": ASSISTANT_TOKEN,
+    "gpt": ASSISTANT_TOKEN,
+    "bot": ASSISTANT_TOKEN,
+    "model": ASSISTANT_TOKEN,
+    "system": SYSTEM_TOKEN,
+}
+SPECIAL_TOKEN_PATTERN = re.compile(r"<\|(?:user|assistant|system|eos)\|>")
+BLANK_LINE_PATTERN = re.compile(r"\n{3,}")
 
 
 def _clean(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).strip()
+    if isinstance(value, list):
+        text = "\n".join(_clean(item) for item in value)
+    elif isinstance(value, dict):
+        for field in CONTENT_FIELDS + RESPONSE_FIELDS + PROMPT_FIELDS:
+            if field in value:
+                text = _clean(value.get(field))
+                break
+        else:
+            text = json.dumps(value, ensure_ascii=False)
+    else:
+        text = str(value)
+    text = text.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
+    text = "\n".join(line.strip() for line in text.splitlines())
+    text = BLANK_LINE_PATTERN.sub("\n\n", text)
+    return text.strip()
+
+
+def _clean_content(value: Any) -> str:
+    text = _clean(value)
+    text = SPECIAL_TOKEN_PATTERN.sub("", text)
+    text = BLANK_LINE_PATTERN.sub("\n\n", text)
+    return text.strip()
 
 
 def _first_text(record: dict[str, Any], fields: Iterable[str]) -> str:
     for field in fields:
-        value = _clean(record.get(field))
+        value = _clean_content(record.get(field))
         if value:
             return value
     return ""
@@ -32,32 +72,104 @@ def _field_hint(record: dict[str, Any]) -> str:
     return ", ".join(record.keys()) or "none"
 
 
-def format_prompt(record: dict[str, Any]) -> str:
+def _message_role(turn: dict[str, Any]) -> str:
+    raw_role = _clean(turn.get("role") or turn.get("from") or turn.get("speaker")).lower()
+    return ROLE_ALIASES.get(raw_role, "")
+
+
+def _message_content(turn: dict[str, Any]) -> str:
+    for field in CONTENT_FIELDS:
+        content = _clean_content(turn.get(field))
+        if content:
+            return content
+    return ""
+
+
+def _iter_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
+    for field in MESSAGE_FIELDS:
+        messages = record.get(field)
+        if isinstance(messages, list):
+            return [turn for turn in messages if isinstance(turn, dict)]
+    return []
+
+
+def _format_transcript_prompt(messages: list[dict[str, Any]]) -> tuple[str, str] | None:
+    assistant_indices = [
+        index
+        for index, turn in enumerate(messages)
+        if _message_role(turn) == ASSISTANT_TOKEN and _message_content(turn)
+    ]
+    if not assistant_indices:
+        return None
+
+    response_index = assistant_indices[-1]
+    response = _message_content(messages[response_index])
+    parts: list[str] = []
+    for turn in messages[:response_index]:
+        role_token = _message_role(turn)
+        content = _message_content(turn)
+        if role_token and content:
+            parts.append(f"{role_token}\n{content}")
+
+    if not any(part.startswith(USER_TOKEN) for part in parts):
+        return None
+    prompt = "\n".join(parts + [ASSISTANT_TOKEN])
+    return f"{prompt}\n", response
+
+
+def normalize_sft_record(record: dict[str, Any]) -> tuple[str, str]:
+    """Normalize one messy SFT row into the model's canonical prompt/response text."""
+    messages = _iter_messages(record)
+    from_messages = _format_transcript_prompt(messages) if messages else None
+    if from_messages is not None:
+        prompt, response = from_messages
+        return prompt, response if response.endswith(EOS_TOKEN) else f"{response}{EOS_TOKEN}"
+
+    system = _first_text(record, SYSTEM_FIELDS)
     instruction = _first_text(record, PROMPT_FIELDS)
+    extra_input = ""
+    if "instruction" in record or "prompt" in record or "question" in record:
+        extra_input = _first_text(record, INPUT_FIELDS)
+    if extra_input and extra_input != instruction:
+        instruction = f"{instruction}\n{extra_input}" if instruction else extra_input
+
     if not instruction:
         raise ValueError(
             "SFT rows must include prompt text. Expected one of "
-            f"{', '.join(PROMPT_FIELDS)}. Available fields: {_field_hint(record)}."
+            f"{', '.join(PROMPT_FIELDS)} or a messages/conversations field. "
+            f"Available fields: {_field_hint(record)}."
         )
-    extra_input = _clean(record.get("input")) if "instruction" in record else ""
-    if extra_input and extra_input != instruction:
-        instruction = f"{instruction}\n{extra_input}" if instruction else extra_input
-    return f"{USER_TOKEN}\n{instruction}\n{ASSISTANT_TOKEN}\n"
 
-
-def format_response(record: dict[str, Any]) -> str:
     response = _first_text(record, RESPONSE_FIELDS)
     if not response:
         raise ValueError(
             "SFT rows must include response text. Expected one of "
-            f"{', '.join(RESPONSE_FIELDS)}. Available fields: {_field_hint(record)}."
+            f"{', '.join(RESPONSE_FIELDS)} or a messages/conversations field "
+            f"with an assistant turn. Available fields: {_field_hint(record)}."
         )
-    return response if response.endswith(EOS_TOKEN) else f"{response}{EOS_TOKEN}"
+
+    parts: list[str] = []
+    if system:
+        parts.append(f"{SYSTEM_TOKEN}\n{system}")
+    parts.append(f"{USER_TOKEN}\n{instruction}")
+    parts.append(ASSISTANT_TOKEN)
+    prompt = "\n".join(parts) + "\n"
+    return prompt, response if response.endswith(EOS_TOKEN) else f"{response}{EOS_TOKEN}"
+
+
+def format_prompt(record: dict[str, Any]) -> str:
+    prompt, _ = normalize_sft_record(record)
+    return prompt
+
+
+def format_response(record: dict[str, Any]) -> str:
+    _, response = normalize_sft_record(record)
+    return response
 
 
 def format_sft_text(record: dict[str, Any]) -> tuple[str, str]:
-    prompt = format_prompt(record)
-    return prompt, prompt + format_response(record)
+    prompt, response = normalize_sft_record(record)
+    return prompt, prompt + response
 
 
 def _coerce_json_records(payload: Any, path: Path) -> list[dict[str, Any]]:
