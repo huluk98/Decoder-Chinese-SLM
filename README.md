@@ -641,8 +641,45 @@ For large public model distribution, Hugging Face Hub is usually a better home f
 
 ## References
 
-- ChatLM-mini-Chinese model card and config: [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), [`config.json`](https://huggingface.co/charent/ChatLM-mini-Chinese/blob/main/config.json).
-- C-Eval dataset and benchmark: [`ceval/ceval-exam`](https://huggingface.co/datasets/ceval/ceval-exam), [`hkust-nlp/ceval`](https://github.com/hkust-nlp/ceval).
-- Llama architecture fields are mapped to Hugging Face [`LlamaConfig`](https://huggingface.co/docs/transformers/model_doc/llama).
-- H20 memory and compute capability reference: NVIDIA [`Supported GPUs`](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html).
-- Multi-GPU launch uses PyTorch [`DistributedDataParallel`](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html); for larger-than-memory variants, PyTorch [`FSDP`](https://docs.pytorch.org/docs/stable/fsdp.html) is the natural next step.
+This project is an independent decoder-only implementation and experiment scaffold. If you use this repository, also cite and respect the licenses/terms of the upstream repositories, datasets, benchmarks, and software that your run depends on.
+
+### Reference Model And Benchmark
+
+- `charent/ChatLM-mini-Chinese`: Hugging Face model repository used as the same-size reference target for the 0.2B parameter budget, 29,298-token vocabulary, Chinese public-data recipe, loss-curve style, and C-Eval reporting comparison. Repository: [`https://huggingface.co/charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese). Config reference: [`config.json`](https://huggingface.co/charent/ChatLM-mini-Chinese/blob/main/config.json).
+- `ceval/ceval-exam`: Hugging Face dataset repository used for C-Eval validation and test loading. Repository: [`https://huggingface.co/datasets/ceval/ceval-exam`](https://huggingface.co/datasets/ceval/ceval-exam).
+- `hkust-nlp/ceval`: Official C-Eval benchmark repository used for benchmark context and subject/category mapping. Repository: [`https://github.com/hkust-nlp/ceval`](https://github.com/hkust-nlp/ceval). Subject mapping reference: [`subject_mapping.json`](https://raw.githubusercontent.com/hkust-nlp/ceval/main/subject_mapping.json).
+
+### Public Data Repositories
+
+- `YeungNLP/firefly-pretrain-dataset`: Hugging Face dataset repository used for public Chinese web/wiki-style pretraining sources, including `webText2019zh.jsonl` and `wiki_zh.jsonl`. Repository: [`https://huggingface.co/datasets/YeungNLP/firefly-pretrain-dataset`](https://huggingface.co/datasets/YeungNLP/firefly-pretrain-dataset).
+- `ZhouLV/Chinese-Train-Datasets`: Hugging Face dataset repository used for the Baike QA source. Repository: [`https://huggingface.co/datasets/ZhouLV/Chinese-Train-Datasets`](https://huggingface.co/datasets/ZhouLV/Chinese-Train-Datasets). Baike path used in config: [`baike2018qa`](https://huggingface.co/datasets/ZhouLV/Chinese-Train-Datasets/tree/main/baike2018qa).
+- `ticoAg/Chinese-medical-dialogue`: Hugging Face dataset repository used for Chinese medical dialogue/QA data. Repository: [`https://huggingface.co/datasets/ticoAg/Chinese-medical-dialogue`](https://huggingface.co/datasets/ticoAg/Chinese-medical-dialogue).
+- `wangrui6/Zhihu-KOL`: Hugging Face dataset repository used for Zhihu KOL question-answer style data. Repository: [`https://huggingface.co/datasets/wangrui6/Zhihu-KOL`](https://huggingface.co/datasets/wangrui6/Zhihu-KOL).
+- `BelleGroup/train_1M_CN`: Hugging Face dataset repository used for BELLE Chinese instruction/chat data. Repository: [`https://huggingface.co/datasets/BelleGroup/train_1M_CN`](https://huggingface.co/datasets/BelleGroup/train_1M_CN).
+- `BelleGroup/train_2M_CN`: Hugging Face dataset repository used for BELLE Chinese instruction/chat data. Repository: [`https://huggingface.co/datasets/BelleGroup/train_2M_CN`](https://huggingface.co/datasets/BelleGroup/train_2M_CN).
+- `BelleGroup/train_3.5M_CN`: Hugging Face dataset repository used for BELLE Chinese instruction/chat data. Repository: [`https://huggingface.co/datasets/BelleGroup/train_3.5M_CN`](https://huggingface.co/datasets/BelleGroup/train_3.5M_CN).
+
+### Software And Systems
+
+- Hugging Face Transformers: model definitions, `LlamaConfig`, tokenizer/model loading, generation, and checkpoint serialization. Repository: [`https://github.com/huggingface/transformers`](https://github.com/huggingface/transformers). Llama docs: [`https://huggingface.co/docs/transformers/model_doc/llama`](https://huggingface.co/docs/transformers/model_doc/llama).
+- Hugging Face Datasets: streaming/loading public datasets and C-Eval splits. Repository: [`https://github.com/huggingface/datasets`](https://github.com/huggingface/datasets).
+- Hugging Face Tokenizers: BPE tokenizer training/runtime components. Repository: [`https://github.com/huggingface/tokenizers`](https://github.com/huggingface/tokenizers).
+- Hugging Face Accelerate: optional launcher configs for H20 multi-GPU runs. Repository: [`https://github.com/huggingface/accelerate`](https://github.com/huggingface/accelerate).
+- PyTorch: tensor runtime, BF16/TF32 training, SDPA attention kernels, and distributed data parallel training. Repository: [`https://github.com/pytorch/pytorch`](https://github.com/pytorch/pytorch). DDP docs: [`DistributedDataParallel`](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html). FSDP docs: [`FullyShardedDataParallel`](https://docs.pytorch.org/docs/stable/fsdp.html).
+- DeepSpeed: optional ZeRO-1 optimizer/runtime path for H20 pretraining. Repository: [`https://github.com/deepspeedai/DeepSpeed`](https://github.com/deepspeedai/DeepSpeed).
+- Safetensors: safe model tensor serialization for checkpoints. Repository: [`https://github.com/huggingface/safetensors`](https://github.com/huggingface/safetensors).
+- NVIDIA H20/system references: H20 memory and compute capability should be checked against the current NVIDIA documentation for the exact machine being used. MIG supported GPU reference: [`https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html`](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-gpus.html).
+
+## Cite This Repository
+
+GitHub can read [`CITATION.cff`](CITATION.cff) and show a "Cite this repository" button. A plain BibTeX entry is also provided below:
+
+```bibtex
+@software{decoder_chinese_slm_2026,
+  author = {huluk98},
+  title = {Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Training Codebase},
+  year = {2026},
+  version = {0.1.0},
+  url = {https://github.com/huluk98/Decoder-Chinese-SLM}
+}
+```

@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it as below and also cite the upstream datasets, benchmarks, and software that your run uses."
+title: "Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Training Codebase"
+version: "0.1.0"
+date-released: "2026-05-20"
+authors:
+  - name: "huluk98"
+url: "https://github.com/huluk98/Decoder-Chinese-SLM"
+repository-code: "https://github.com/huluk98/Decoder-Chinese-SLM"
+abstract: "A codebase for training, evaluating, fine-tuning, and pruning a roughly 0.2B parameter decoder-only Chinese small language model with H20 multi-GPU recipes, public Chinese data preparation, C-Eval evaluation, and local inference utilities."
+keywords:
+  - "Chinese language model"
+  - "small language model"
+  - "decoder-only"
+  - "causal language modeling"
+  - "C-Eval"
+  - "H20"
+  - "fine-tuning"
+  - "pruning"
+preferred-citation:
+  type: software
+  title: "Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Training Codebase"
+  version: "0.1.0"
+  date-released: "2026-05-20"
+  authors:
+    - name: "huluk98"
+  url: "https://github.com/huluk98/Decoder-Chinese-SLM"
