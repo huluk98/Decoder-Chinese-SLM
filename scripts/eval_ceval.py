@@ -19,6 +19,61 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 CHOICES = ("A", "B", "C", "D")
+CATEGORY_ORDER = ("Humanities", "Other", "STEM", "Social Science")
+SUBJECT_CATEGORIES = {
+    "computer_network": "STEM",
+    "operating_system": "STEM",
+    "computer_architecture": "STEM",
+    "college_programming": "STEM",
+    "college_physics": "STEM",
+    "college_chemistry": "STEM",
+    "advanced_mathematics": "STEM",
+    "probability_and_statistics": "STEM",
+    "discrete_mathematics": "STEM",
+    "electrical_engineer": "STEM",
+    "metrology_engineer": "STEM",
+    "high_school_mathematics": "STEM",
+    "high_school_physics": "STEM",
+    "high_school_chemistry": "STEM",
+    "high_school_biology": "STEM",
+    "middle_school_mathematics": "STEM",
+    "middle_school_biology": "STEM",
+    "middle_school_physics": "STEM",
+    "middle_school_chemistry": "STEM",
+    "veterinary_medicine": "STEM",
+    "college_economics": "Social Science",
+    "business_administration": "Social Science",
+    "marxism": "Social Science",
+    "mao_zedong_thought": "Social Science",
+    "education_science": "Social Science",
+    "teacher_qualification": "Social Science",
+    "high_school_politics": "Social Science",
+    "high_school_geography": "Social Science",
+    "middle_school_politics": "Social Science",
+    "middle_school_geography": "Social Science",
+    "modern_chinese_history": "Humanities",
+    "ideological_and_moral_cultivation": "Humanities",
+    "logic": "Humanities",
+    "law": "Humanities",
+    "chinese_language_and_literature": "Humanities",
+    "art_studies": "Humanities",
+    "professional_tour_guide": "Humanities",
+    "legal_professional": "Humanities",
+    "high_school_chinese": "Humanities",
+    "high_school_history": "Humanities",
+    "middle_school_history": "Humanities",
+    "civil_servant": "Other",
+    "sports_science": "Other",
+    "plant_protection": "Other",
+    "basic_medicine": "Other",
+    "clinical_medicine": "Other",
+    "urban_and_rural_planner": "Other",
+    "accountant": "Other",
+    "fire_engineer": "Other",
+    "environmental_impact_assessment_engineer": "Other",
+    "tax_accountant": "Other",
+    "physician": "Other",
+}
 
 
 def select_device(requested: str) -> torch.device:
@@ -53,6 +108,26 @@ def clean_answer(value: Any) -> str | None:
     text = str(value).strip().upper()
     match = re.search(r"[ABCD]", text)
     return match.group(0) if match else None
+
+
+def build_category_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    categories = {
+        category: {"category": category, "correct": 0, "question_count": 0, "subject_count": 0, "accuracy": math.nan}
+        for category in CATEGORY_ORDER
+    }
+    for summary in summaries:
+        subject = str(summary["subject"])
+        category = SUBJECT_CATEGORIES.get(subject)
+        if category is None:
+            raise KeyError(f"Missing C-Eval category mapping for subject: {subject}")
+        categories[category]["correct"] += int(summary["correct"])
+        categories[category]["question_count"] += int(summary["total"])
+        categories[category]["subject_count"] += 1
+
+    for item in categories.values():
+        total = int(item["question_count"])
+        item["accuracy"] = float(item["correct"] / total) if total else math.nan
+    return [categories[category] for category in CATEGORY_ORDER]
 
 
 def format_question(row: dict[str, Any]) -> str:
@@ -227,6 +302,7 @@ def write_outputs(output_dir: Path, summaries: list[dict[str, Any]], records: li
     overall_total = sum(int(item["total"]) for item in summaries)
     overall_correct = sum(int(item["correct"]) for item in summaries)
     overall_accuracy = overall_correct / overall_total if overall_total else math.nan
+    category_summaries = build_category_summaries(summaries)
     payload = {
         "checkpoint": args.checkpoint,
         "dataset": args.dataset,
@@ -239,6 +315,7 @@ def write_outputs(output_dir: Path, summaries: list[dict[str, Any]], records: li
             "correct": overall_correct,
             "accuracy": overall_accuracy,
         },
+        "categories": category_summaries,
         "subjects": summaries,
     }
 
@@ -248,9 +325,15 @@ def write_outputs(output_dir: Path, summaries: list[dict[str, Any]], records: li
 
     with (output_dir / "ceval_predictions.csv").open("w", encoding="utf-8", newline="") as handle:
         fieldnames = ["subject", "id", "prediction", "answer", "correct"] + [f"score_{choice}" for choice in CHOICES]
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         writer.writerows(records)
+
+    with (output_dir / "ceval_category_summary.csv").open("w", encoding="utf-8", newline="") as handle:
+        fieldnames = ["category", "correct", "question_count", "accuracy", "subject_count"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(category_summaries)
 
 
 def main() -> None:

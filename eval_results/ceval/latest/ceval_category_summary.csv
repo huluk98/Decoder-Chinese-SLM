@@ -1,0 +1,5 @@
+category,correct,question_count,accuracy,subject_count
+Humanities,67,257,0.2607003891050584,11
+Other,89,384,0.23177083333333334,11
+STEM,90,430,0.20930232558139536,20
+Social Science,74,275,0.2690909090909091,10

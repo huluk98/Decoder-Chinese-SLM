@@ -14,6 +14,15 @@ Decoder-only 0.2B checkpoint evaluated on C-Eval validation with 5-shot promptin
 | Correct / Total | 320 / 1346 |
 | Accuracy | 23.77% |
 
+## Category Split
+
+| category | correct | question_count | accuracy |
+| --- | ---: | ---: | ---: |
+| Humanities | 67 | 257 | 26.07% |
+| Other | 89 | 384 | 23.18% |
+| STEM | 90 | 430 | 20.93% |
+| Social Science | 74 | 275 | 26.91% |
+
 ## Best Subjects
 
 | Subject | Correct / Total | Accuracy |
@@ -27,4 +36,5 @@ Decoder-only 0.2B checkpoint evaluated on C-Eval validation with 5-shot promptin
 Raw files:
 
 - [`ceval_summary.json`](ceval_summary.json)
+- [`ceval_category_summary.csv`](ceval_category_summary.csv)
 - [`ceval_predictions.csv`](ceval_predictions.csv)

@@ -379,6 +379,15 @@ Latest checked-in decoder-only result:
 | --- | --- | ---: | --- | ---: | ---: |
 | `runs/h20-8gpu-llama-0p2b-deepspeed/latest` | `val` | 5 | chat format | 320 / 1346 | 23.77% |
 
+Category split, matching the reporting format used by ChatLM-mini-Chinese:
+
+| category | correct | question_count | accuracy |
+| --- | ---: | ---: | ---: |
+| Humanities | 67 | 257 | 26.07% |
+| Other | 89 | 384 | 23.18% |
+| STEM | 90 | 430 | 20.93% |
+| Social Science | 74 | 275 | 26.91% |
+
 Raw result files are stored in [`eval_results/ceval/latest`](eval_results/ceval/latest).
 
 Run a quick two-subject smoke check:
@@ -402,7 +411,7 @@ python scripts/eval_ceval.py \
   --n-shot 5
 ```
 
-The script writes `ceval_summary.json` and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+The script writes `ceval_summary.json`, `ceval_category_summary.csv`, and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
 
 ## SFT And Contrastive SFT
 

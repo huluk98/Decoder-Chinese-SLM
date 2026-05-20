@@ -10,6 +10,36 @@
     "correct": 320,
     "accuracy": 0.237741456166419
   },
+  "categories": [
+    {
+      "category": "Humanities",
+      "correct": 67,
+      "question_count": 257,
+      "subject_count": 11,
+      "accuracy": 0.2607003891050584
+    },
+    {
+      "category": "Other",
+      "correct": 89,
+      "question_count": 384,
+      "subject_count": 11,
+      "accuracy": 0.23177083333333334
+    },
+    {
+      "category": "STEM",
+      "correct": 90,
+      "question_count": 430,
+      "subject_count": 20,
+      "accuracy": 0.20930232558139536
+    },
+    {
+      "category": "Social Science",
+      "correct": 74,
+      "question_count": 275,
+      "subject_count": 10,
+      "accuracy": 0.2690909090909091
+    }
+  ],
   "subjects": [
     {
       "subject": "accountant",
