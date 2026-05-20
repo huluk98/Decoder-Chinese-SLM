@@ -349,6 +349,17 @@ def main() -> None:
     args = parser.parse_args()
 
     device, rank, local_rank, world_size = setup_distributed_eval(args.device)
+    checkpoint_path = Path(args.checkpoint).expanduser()
+    local_checkpoint_like = (
+        checkpoint_path.is_absolute()
+        or args.checkpoint.startswith(("./", "../"))
+        or ("/" in args.checkpoint and checkpoint_path.parent.exists())
+    )
+    if local_checkpoint_like and not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Model checkpoint path does not exist: {checkpoint_path}. "
+            "If training just finished, point --model-path at the run's latest checkpoint or a step-* directory."
+        )
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=False)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
