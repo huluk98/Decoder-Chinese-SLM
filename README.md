@@ -222,7 +222,7 @@ For structured smart-home command generation, use the dedicated short-output SFT
 2. Set `model_name_or_path` to the pretrained 0.2B checkpoint directory.
 3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows.
 
-The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. Evaluation uses greedy decoding with `max_new_tokens=64` and reports normalized exact-match accuracy plus average generated token length.
+The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. The 8-GPU launch script trains through the configured epochs first, then runs one final exact-match generation eval. It does not stop at every epoch for full-dataset validation.
 
 Debug overfit on one GPU first:
 
@@ -230,7 +230,7 @@ Debug overfit on one GPU first:
 ./run_sft_debug_1gpu.sh
 ```
 
-Full 8x H20 SFT run:
+Full 8x H20 SFT run followed by final 8-GPU exact-match eval:
 
 ```bash
 ./run_sft_8gpu.sh
@@ -242,7 +242,9 @@ Equivalent one-line launch:
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/train.py --config configs/sft_0p2b_8gpu.yaml
 ```
 
-Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, and `save_total_limit=2`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
+The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using `output_dir/latest`. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`.
+
+Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_total_limit=2`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
 
 ## Train A 0.2B-ish Model
 

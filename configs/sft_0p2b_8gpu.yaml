@@ -27,7 +27,7 @@ torch_compile: false
 
 logging_steps: 10
 save_strategy: epoch
-eval_strategy: epoch
+eval_strategy: none
 save_total_limit: 2
 
 dataloader_num_workers: 8

@@ -382,6 +382,19 @@ def normalize_for_exact_match(text: str) -> str:
     return text.strip()
 
 
+def should_run_eval(eval_strategy: str, step: int, eval_steps: int, epoch_boundary: bool, final_step: bool) -> bool:
+    strategy = str(eval_strategy).lower()
+    if strategy in {"no", "none", "false", "off"}:
+        return False
+    if strategy == "final":
+        return bool(final_step)
+    if strategy == "epoch":
+        return bool(epoch_boundary or final_step)
+    if strategy == "steps":
+        return bool(step % max(1, int(eval_steps)) == 0 or final_step)
+    raise ValueError("eval_strategy must be one of: final, epoch, steps, none.")
+
+
 def evaluate_exact_match(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -635,6 +648,7 @@ def main(argv: list[str] | None = None) -> None:
     save_every = int(train_config.get("save_every", 500))
     eval_steps = int(train_config.get("eval_steps", save_every))
     log_every = int(train_config.get("log_every", 10))
+    maybe_print(rank, f"SFT eval_strategy={eval_strategy} | save_strategy={save_strategy}")
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -743,12 +757,14 @@ def main(argv: list[str] | None = None) -> None:
             or (save_strategy == "steps" and step % save_every == 0)
             or final_step
         )
-        should_eval = (
+        should_eval = bool(
             eval_path
-            and (
-                (eval_strategy == "epoch" and epoch_boundary)
-                or (eval_strategy == "steps" and step % eval_steps == 0)
-                or final_step
+            and should_run_eval(
+                eval_strategy=eval_strategy,
+                step=step,
+                eval_steps=eval_steps,
+                epoch_boundary=epoch_boundary,
+                final_step=final_step,
             )
         )
         if should_eval or should_save:
