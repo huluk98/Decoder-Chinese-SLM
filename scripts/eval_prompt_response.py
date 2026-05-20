@@ -221,7 +221,12 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--exact-match", action="store_true", help="Generate every row and report normalized exact-match accuracy.")
+    parser.add_argument(
+        "--exact-match",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate every row and report normalized exact-match accuracy. Use --no-exact-match for loss-only eval.",
+    )
     parser.add_argument("--generate-samples", type=int, default=0, help="Generate completions for the first N rows.")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.0)

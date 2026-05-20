@@ -175,7 +175,6 @@ Evaluate a local instruction/response SFT file by generated exact-match accuracy
 python scripts/eval_prompt_response.py \
   --model-path /absolute/path/to/sft/checkpoint \
   --dataset-file /absolute/path/to/eval.json \
-  --exact-match \
   --max-new-tokens 64 \
   --temperature 0 \
   --batch-size 8 \
@@ -183,7 +182,7 @@ python scripts/eval_prompt_response.py \
   --dtype bf16
 ```
 
-The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. Exact match normalizes whitespace and strips EOS/pad tokens before comparing the generated response to the target response.
+The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy; exact match normalizes whitespace and strips EOS/pad tokens before comparing the generated response to the target response. Use `--no-exact-match` only when you want loss/perplexity without generation.
 
 For local SFT/fine-tuning with your chosen model and dataset paths:
 
