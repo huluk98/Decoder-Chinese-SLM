@@ -182,7 +182,7 @@ python scripts/eval_prompt_response.py \
   --dtype bf16
 ```
 
-The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy; exact match normalizes whitespace and strips EOS/pad tokens before comparing the generated response to the target response. Use `--no-exact-match` only when you want loss/perplexity without generation.
+The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy. The default `--comparison-mode command` strips chat markers, EOS/pad tokens, code fences, zero-width characters, wrapper quotes, harmless trailing punctuation, and canonicalizes quote style plus spaces around command punctuation before comparing. Use `--comparison-mode normalized` for stricter cleaned-text equality, or `--no-exact-match` when you want loss/perplexity without generation.
 
 For large eval files on your 8x H20 machine, shard generation across all GPUs:
 

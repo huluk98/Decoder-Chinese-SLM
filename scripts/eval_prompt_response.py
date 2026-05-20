@@ -6,7 +6,9 @@ import csv
 import json
 import math
 import os
+import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,45 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
 
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
+CHAT_MARKERS = (
+    "<|user|>",
+    "<|assistant|>",
+    "<|system|>",
+    "<|eos|>",
+    "assistant:",
+    "Assistant:",
+    "ASSISTANT:",
+    "回答:",
+    "回答：",
+    "答案:",
+    "答案：",
+    "输出:",
+    "输出：",
+)
+ZERO_WIDTH_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+FENCE_PATTERN = re.compile(r"^\s*```(?:json|python|text|txt|bash|sh)?\s*|\s*```\s*$", re.IGNORECASE)
+TRAILING_STOP_PATTERN = re.compile(r"[\s。．.；;，,]+$")
+STRUCTURED_SPACE_PATTERN = re.compile(r"\s*([(),:=\[\]{}])\s*")
+QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "（": "(",
+        "）": ")",
+        "，": ",",
+        "：": ":",
+        "；": ";",
+        "［": "[",
+        "］": "]",
+        "｛": "{",
+        "｝": "}",
+        "＝": "=",
+    }
+)
 
 
 def select_device(requested: str) -> torch.device:
@@ -217,10 +258,61 @@ def generate_completion(
 
 
 def normalize_for_exact_match(text: str, tokenizer: Any | None = None) -> str:
-    for special_token in (EOS_TOKEN, getattr(tokenizer, "eos_token", None), getattr(tokenizer, "pad_token", None)):
+    text = unicodedata.normalize("NFKC", str(text))
+    text = text.translate(QUOTE_TRANSLATION)
+    text = ZERO_WIDTH_PATTERN.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    for special_token in (
+        EOS_TOKEN,
+        getattr(tokenizer, "bos_token", None),
+        getattr(tokenizer, "eos_token", None),
+        getattr(tokenizer, "pad_token", None),
+        getattr(tokenizer, "unk_token", None),
+    ):
         if special_token:
             text = text.replace(str(special_token), "")
+    text = FENCE_PATTERN.sub("", text).strip()
+    for marker in CHAT_MARKERS:
+        if text.startswith(marker):
+            text = text[len(marker) :].strip()
+    for marker in ("<|user|>", "<|system|>", "\nUser:", "\n用户:"):
+        if marker in text:
+            text = text.split(marker, 1)[0].strip()
+    text = strip_wrapping_quotes(text)
+    text = TRAILING_STOP_PATTERN.sub("", text)
     return " ".join(text.split()).strip()
+
+
+def strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    changed = True
+    while changed and len(text) >= 2:
+        changed = False
+        pairs = (("`", "`"), ('"', '"'), ("'", "'"))
+        for left, right in pairs:
+            if text.startswith(left) and text.endswith(right):
+                text = text[1:-1].strip()
+                changed = True
+    return text
+
+
+def canonicalize_command_response(text: str) -> str:
+    text = normalize_for_exact_match(text)
+    text = STRUCTURED_SPACE_PATTERN.sub(r"\1", text)
+    text = text.replace('"', "'")
+    return text.strip()
+
+
+def mismatch_reason(generated: str, target: str) -> str:
+    if generated == target:
+        return "match"
+    if generated.lower() == target.lower():
+        return "case_only_difference"
+    if generated.replace(" ", "") == target.replace(" ", ""):
+        return "whitespace_only_difference"
+    if generated in target or target in generated:
+        return "one_side_contains_the_other"
+    return "different_text"
 
 
 def main() -> None:
@@ -248,6 +340,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--num-beams", type=int, default=1)
+    parser.add_argument(
+        "--comparison-mode",
+        choices=("normalized", "command"),
+        default="command",
+        help="normalized compares cleaned text; command additionally canonicalizes punctuation, quote style, and spaces around command syntax.",
+    )
     args = parser.parse_args()
 
     device, rank, local_rank, world_size = setup_distributed_eval(args.device)
@@ -331,15 +429,25 @@ def main() -> None:
                 )
                 normalized_generated = normalize_for_exact_match(generated, tokenizer=tokenizer)
                 normalized_target = normalize_for_exact_match(batch[offset]["response_text"], tokenizer=tokenizer)
+                if args.comparison_mode == "command":
+                    comparison_generated = canonicalize_command_response(normalized_generated)
+                    comparison_target = canonicalize_command_response(normalized_target)
+                else:
+                    comparison_generated = normalized_generated
+                    comparison_target = normalized_target
                 result["generated"] = generated
                 result["normalized_generated"] = normalized_generated
                 result["normalized_target"] = normalized_target
+                result["comparison_generated"] = comparison_generated
+                result["comparison_target"] = comparison_target
+                result["comparison_mode"] = args.comparison_mode
                 result["generated_token_count"] = generated_token_count
                 if bool(args.exact_match):
-                    is_exact = normalized_generated == normalized_target
+                    is_exact = comparison_generated == comparison_target
                     exact_correct += int(is_exact)
                     generated_token_lengths.append(generated_token_count)
                     result["exact_match"] = is_exact
+                    result["mismatch_reason"] = mismatch_reason(comparison_generated, comparison_target)
             results.append(result)
 
     local_payload = {
@@ -390,6 +498,7 @@ def main() -> None:
         "exact_match_correct": exact_correct if args.exact_match else None,
         "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
         "max_new_tokens": int(args.max_new_tokens),
+        "comparison_mode": args.comparison_mode if args.exact_match else None,
         "max_length": max_length,
         "batch_size": batch_size,
     }
