@@ -4,6 +4,8 @@ This is a clean starter codebase for training a decoder-only autoregressive Chin
 
 The upstream ChatLM-mini-Chinese model is a T5-style text-to-text model, not decoder-only. Its model card reports a 0.2B parameter model, a 29,298 token vocabulary, and public dataset sources. This project keeps the size target and Chinese data recipe, but uses a modern Llama-family causal LM.
 
+For a concise project overview, see [ABOUT.md](ABOUT.md).
+
 ## Why 0.2B?
 
 The goal of this project is not to compete with frontier-scale general chat models. It is to train a compact Chinese decoder model that can be adapted for edge and domain-specific deployment.
