@@ -20,9 +20,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 CHOICES = ("A", "B", "C", "D")
 CATEGORY_ORDER = ("Humanities", "Other", "STEM", "Social Science")
-LOCAL_JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
-QUESTION_FIELDS = ("question", "prompt", "instruction", "query", "text")
-ANSWER_FIELDS = ("answer", "label", "target", "correct_answer", "correct")
 SUBJECT_CATEGORIES = {
     "computer_network": "STEM",
     "operating_system": "STEM",
@@ -122,7 +119,7 @@ def build_category_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, 
         subject = str(summary["subject"])
         category = SUBJECT_CATEGORIES.get(subject)
         if category is None:
-            continue
+            raise KeyError(f"Missing C-Eval category mapping for subject: {subject}")
         categories[category]["correct"] += int(summary["correct"])
         categories[category]["question_count"] += int(summary["total"])
         categories[category]["subject_count"] += 1
@@ -130,111 +127,7 @@ def build_category_summaries(summaries: list[dict[str, Any]]) -> list[dict[str, 
     for item in categories.values():
         total = int(item["question_count"])
         item["accuracy"] = float(item["correct"] / total) if total else math.nan
-    return [categories[category] for category in CATEGORY_ORDER if int(categories[category]["question_count"]) > 0]
-
-
-def first_text(record: dict[str, Any], fields: tuple[str, ...]) -> str:
-    for field in fields:
-        value = record.get(field)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
-
-
-def coerce_records(payload: Any, path: Path) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        records = payload
-    elif isinstance(payload, dict):
-        records = None
-        for key in LOCAL_JSON_LIST_KEYS:
-            value = payload.get(key)
-            if isinstance(value, list):
-                records = value
-                break
-        if records is None:
-            records = [payload]
-    else:
-        raise ValueError(f"{path} must contain a JSON object, a JSON list, or a wrapper with one of {LOCAL_JSON_LIST_KEYS}.")
-
-    clean_records: list[dict[str, Any]] = []
-    for index, record in enumerate(records):
-        if not isinstance(record, dict):
-            raise ValueError(f"{path}: record {index} must be a JSON object.")
-        clean_records.append(record)
-    return clean_records
-
-
-def read_local_records(path: str | Path) -> list[dict[str, Any]]:
-    data_path = Path(path).expanduser()
-    suffix = data_path.suffix.lower()
-    if suffix == ".json":
-        return coerce_records(json.loads(data_path.read_text(encoding="utf-8")), data_path)
-    if suffix == ".jsonl":
-        records: list[dict[str, Any]] = []
-        with data_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError(f"{data_path}:{line_number} must be a JSON object.")
-                records.append(record)
-        return records
-    if suffix == ".csv":
-        with data_path.open("r", encoding="utf-8", newline="") as handle:
-            return list(csv.DictReader(handle))
-    raise ValueError(f"Unsupported eval file extension: {suffix}. Use .json, .jsonl, or .csv.")
-
-
-def normalize_options(record: dict[str, Any], path: Path, index: int) -> dict[str, str]:
-    direct = {choice: str(record.get(choice, "")).strip() for choice in CHOICES}
-    if all(direct.values()):
-        return direct
-
-    lower_direct = {choice: str(record.get(choice.lower(), "")).strip() for choice in CHOICES}
-    if all(lower_direct.values()):
-        return lower_direct
-
-    options = record.get("options", record.get("choices"))
-    if isinstance(options, dict):
-        mapped = {choice: str(options.get(choice, options.get(choice.lower(), ""))).strip() for choice in CHOICES}
-        if all(mapped.values()):
-            return mapped
-    if isinstance(options, list) and len(options) >= len(CHOICES):
-        return {choice: str(options[idx]).strip() for idx, choice in enumerate(CHOICES)}
-
-    raise ValueError(
-        f"{path}: record {index} must include A/B/C/D fields, a/b/c/d fields, "
-        "or an options/choices list or dict with four choices."
-    )
-
-
-def normalize_local_row(record: dict[str, Any], path: Path, index: int, default_subject: str) -> dict[str, Any]:
-    question = first_text(record, QUESTION_FIELDS)
-    if not question:
-        raise ValueError(f"{path}: record {index} is missing question text. Expected one of {QUESTION_FIELDS}.")
-
-    answer = clean_answer(first_text(record, ANSWER_FIELDS))
-    if answer is None:
-        raise ValueError(f"{path}: record {index} is missing an A/B/C/D answer. Expected one of {ANSWER_FIELDS}.")
-
-    options = normalize_options(record, path=path, index=index)
-    return {
-        "id": record.get("id", index),
-        "subject": str(record.get("subject") or record.get("category") or default_subject),
-        "question": question,
-        "answer": answer,
-        **options,
-    }
-
-
-def load_local_eval_rows(path: str | Path, default_subject: str) -> list[dict[str, Any]]:
-    data_path = Path(path).expanduser()
-    return [
-        normalize_local_row(record, path=data_path, index=index, default_subject=default_subject)
-        for index, record in enumerate(read_local_records(data_path))
-    ]
+    return [categories[category] for category in CATEGORY_ORDER]
 
 
 def format_question(row: dict[str, Any]) -> str:
@@ -442,9 +335,8 @@ def write_outputs(output_dir: Path, summaries: list[dict[str, Any]], records: li
     payload = {
         "checkpoint": args.checkpoint,
         "dataset": args.dataset,
-        "dataset_file": args.dataset_file,
         "split": args.split,
-        "n_shot": getattr(args, "effective_n_shot", args.n_shot),
+        "n_shot": args.n_shot,
         "chat_format": not args.no_chat_format,
         "normalize_by_length": args.normalize_by_length,
         "overall": {
@@ -466,12 +358,11 @@ def write_outputs(output_dir: Path, summaries: list[dict[str, Any]], records: li
         writer.writeheader()
         writer.writerows(records)
 
-    if category_summaries:
-        with (output_dir / "ceval_category_summary.csv").open("w", encoding="utf-8", newline="") as handle:
-            fieldnames = ["category", "correct", "question_count", "accuracy", "subject_count"]
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
-            writer.writeheader()
-            writer.writerows(category_summaries)
+    with (output_dir / "ceval_category_summary.csv").open("w", encoding="utf-8", newline="") as handle:
+        fieldnames = ["category", "correct", "question_count", "accuracy", "subject_count"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(category_summaries)
 
 
 def main() -> None:
@@ -484,9 +375,6 @@ def main() -> None:
         help="Model checkpoint directory, for example runs/h20-8gpu-llama-0p2b-deepspeed/latest.",
     )
     parser.add_argument("--dataset", default="ceval/ceval-exam", help="Hugging Face dataset name.")
-    parser.add_argument("--dataset-file", default=None, help="Optional local .json, .jsonl, or .csv multiple-choice eval file.")
-    parser.add_argument("--fewshot-file", default=None, help="Optional local .json, .jsonl, or .csv few-shot examples for --dataset-file.")
-    parser.add_argument("--local-subject", default=None, help="Subject name to use when local rows do not include subject/category.")
     parser.add_argument("--subjects", default="all", help="Comma-separated C-Eval subjects, or all.")
     parser.add_argument("--split", default="val", choices=["dev", "val", "test"], help="Evaluation split.")
     parser.add_argument("--n-shot", type=int, default=5, help="Number of dev examples to include as few-shot context.")
@@ -521,86 +409,38 @@ def main() -> None:
     summaries: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
 
-    if args.dataset_file:
-        dataset_path = Path(args.dataset_file).expanduser()
-        default_subject = args.local_subject or dataset_path.stem
-        local_rows = load_local_eval_rows(dataset_path, default_subject=default_subject)
-        fewshot_rows: list[dict[str, Any]] = []
-        if args.fewshot_file:
-            fewshot_path = Path(args.fewshot_file).expanduser()
-            fewshot_rows = load_local_eval_rows(fewshot_path, default_subject=default_subject)[: int(args.n_shot)]
-        args.effective_n_shot = len(fewshot_rows)
-
-        rows_by_subject: dict[str, list[dict[str, Any]]] = {}
-        for row in local_rows:
-            rows_by_subject.setdefault(str(row["subject"]), []).append(row)
-
-        subjects = list(rows_by_subject)
-        if args.subjects != "all":
-            requested = {subject.strip() for subject in args.subjects.split(",") if subject.strip()}
-            subjects = [subject for subject in subjects if subject in requested]
-        if args.max_subjects is not None:
-            subjects = subjects[: int(args.max_subjects)]
-
-        for subject in tqdm(subjects, desc="local-subjects"):
-            subject_fewshot = [row for row in fewshot_rows if str(row["subject"]) == subject]
-            if not subject_fewshot:
-                subject_fewshot = fewshot_rows
-            summary, subject_records = evaluate_rows(
-                model=model,
-                tokenizer=tokenizer,
-                eval_rows=rows_by_subject[subject],
-                subject=subject,
-                split=args.split,
-                n_shot=len(subject_fewshot),
-                fewshot_rows=subject_fewshot,
-                limit=args.limit,
-                device=device,
-                max_length=max_length,
-                chat_format=not args.no_chat_format,
-                normalize_by_length=args.normalize_by_length,
-            )
-            summaries.append(summary)
-            records.extend(subject_records)
-            print(f"{subject}: {summary['accuracy']:.4f} ({summary['correct']}/{summary['total']})")
+    if args.subjects == "all":
+        subjects = get_dataset_config_names(args.dataset)
     else:
-        args.effective_n_shot = args.n_shot
-        if args.subjects == "all":
-            subjects = get_dataset_config_names(args.dataset)
-        else:
-            subjects = [subject.strip() for subject in args.subjects.split(",") if subject.strip()]
-        if args.max_subjects is not None:
-            subjects = subjects[: int(args.max_subjects)]
+        subjects = [subject.strip() for subject in args.subjects.split(",") if subject.strip()]
+    if args.max_subjects is not None:
+        subjects = subjects[: int(args.max_subjects)]
 
-        for subject in tqdm(subjects, desc="subjects"):
-            summary, subject_records = evaluate_subject(
-                model=model,
-                tokenizer=tokenizer,
-                dataset_name=args.dataset,
-                subject=subject,
-                split=args.split,
-                n_shot=args.n_shot,
-                limit=args.limit,
-                device=device,
-                max_length=max_length,
-                chat_format=not args.no_chat_format,
-                normalize_by_length=args.normalize_by_length,
-            )
-            summaries.append(summary)
-            records.extend(subject_records)
-            print(f"{subject}: {summary['accuracy']:.4f} ({summary['correct']}/{summary['total']})")
+    for subject in tqdm(subjects, desc="subjects"):
+        summary, subject_records = evaluate_subject(
+            model=model,
+            tokenizer=tokenizer,
+            dataset_name=args.dataset,
+            subject=subject,
+            split=args.split,
+            n_shot=args.n_shot,
+            limit=args.limit,
+            device=device,
+            max_length=max_length,
+            chat_format=not args.no_chat_format,
+            normalize_by_length=args.normalize_by_length,
+        )
+        summaries.append(summary)
+        records.extend(subject_records)
+        print(f"{subject}: {summary['accuracy']:.4f} ({summary['correct']}/{summary['total']})")
 
-    default_output_dir = Path(args.checkpoint) / "eval" / f"ceval_{args.split}_{args.n_shot}shot"
-    if args.dataset_file:
-        default_output_dir = Path("runs") / "eval" / f"{Path(args.dataset_file).expanduser().stem}_{args.split}"
-    output_dir = Path(args.output_dir or default_output_dir).expanduser()
+    output_dir = Path(args.output_dir or Path(args.checkpoint) / "eval" / f"ceval_{args.split}_{args.n_shot}shot").expanduser()
     write_outputs(output_dir=output_dir, summaries=summaries, records=records, args=args)
 
     total = sum(int(item["total"]) for item in summaries)
     correct = sum(int(item["correct"]) for item in summaries)
     accuracy = correct / total if total else math.nan
-    label = "Local eval" if args.dataset_file else "C-Eval"
-    print(f"{label} {args.split} {getattr(args, 'effective_n_shot', args.n_shot)}-shot accuracy: {accuracy:.4f} ({correct}/{total})")
+    print(f"C-Eval {args.split} {args.n_shot}-shot accuracy: {accuracy:.4f} ({correct}/{total})")
     print(f"Wrote results to {output_dir}")
 
 

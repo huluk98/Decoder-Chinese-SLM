@@ -451,36 +451,43 @@ python scripts/eval_ceval.py \
   --n-shot 5
 ```
 
-Evaluate a local multiple-choice file with your chosen model path:
+The script writes `ceval_summary.json`, `ceval_category_summary.csv`, and `ceval_predictions.csv` under `runs/.../latest/eval/ceval_<split>_<n-shot>shot/` by default. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+
+## Prompt/Response Evaluation
+
+Custom prompt/response datasets are evaluated separately from C-Eval. This evaluator expects only `prompt` and `response` fields, normalizes them into the same `<|user|>` / `<|assistant|>` format used by SFT, and reports teacher-forced response loss and perplexity.
 
 ```bash
-python scripts/eval_ceval.py \
+python scripts/eval_prompt_response.py \
   --model-path /absolute/path/to/model/checkpoint \
   --dataset-file /absolute/path/to/eval.json \
-  --output-dir runs/my-local-eval \
-  --split val \
-  --no-chat-format
+  --output-dir runs/my-prompt-response-eval \
+  --batch-size 8 \
+  --dtype bf16
 ```
 
-Local eval files can be `.json`, `.jsonl`, or `.csv`. Each row needs `question`, choices `A`, `B`, `C`, `D`, and an `answer` field:
+The local eval file can be `.json`, `.jsonl`, or `.csv`, but each row should be simple:
 
 ```json
 [
   {
-    "subject": "my_domain",
-    "question": "以下哪一项最适合边缘端小模型？",
-    "A": "低延迟本地推理",
-    "B": "无限上下文长度",
-    "C": "不需要任何数据",
-    "D": "只能用于英文",
-    "answer": "A"
+    "prompt": "请解释边缘端中文小模型的优势。",
+    "response": "边缘端中文小模型通常具有低延迟、低成本和更好的本地隐私保护。"
   }
 ]
 ```
 
-You may also use `options` or `choices` as a four-item list instead of explicit `A`/`B`/`C`/`D` fields. For few-shot local eval, pass `--fewshot-file /path/to/dev_examples.json`.
+To also inspect generations for the first few rows:
 
-The script writes `ceval_summary.json`, `ceval_predictions.csv`, and, for known C-Eval subjects, `ceval_category_summary.csv`. Hugging Face C-Eval runs default to `runs/.../latest/eval/ceval_<split>_<n-shot>shot/`; local file runs default to `runs/eval/<dataset_stem>_<split>/`. Use `--split test` after you are ready for a final reported score, and use `--no-chat-format` if you want the plain prompt without `<|user|>` and `<|assistant|>` wrappers.
+```bash
+python scripts/eval_prompt_response.py \
+  --model-path /absolute/path/to/model/checkpoint \
+  --dataset-file /absolute/path/to/eval.json \
+  --generate-samples 10 \
+  --max-new-tokens 256
+```
+
+This writes `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`.
 
 ## SFT And Contrastive SFT
 
