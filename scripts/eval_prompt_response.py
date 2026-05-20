@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.sft_data import normalize_sft_record
+from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
 
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
 
@@ -90,16 +90,20 @@ def read_prompt_response_records(path: str | Path) -> list[dict[str, Any]]:
         raise ValueError(f"Unsupported eval file extension: {suffix}. Use .json, .jsonl, or .csv.")
 
     for index, record in enumerate(records):
-        if not str(record.get("prompt", "")).strip():
-            raise ValueError(f"{data_path}: record {index} is missing a non-empty `prompt` field.")
-        if not str(record.get("response", "")).strip():
-            raise ValueError(f"{data_path}: record {index} is missing a non-empty `response` field.")
+        try:
+            normalize_sft_record(record)
+        except ValueError as exc:
+            raise ValueError(
+                f"{data_path}: record {index} must normalize into prompt/response text. "
+                "Use fields like instruction+response, prompt+response, question+answer, "
+                f"or messages/conversations. Original error: {exc}"
+            ) from exc
     return records
 
 
 def tokenize_example(tokenizer: Any, record: dict[str, Any], max_length: int) -> dict[str, Any]:
-    prompt_text, full_text = normalize_sft_record({"prompt": record["prompt"], "response": record["response"]})
-    full_text = prompt_text + full_text
+    prompt_text, response_text = normalize_sft_record(record)
+    full_text = prompt_text + response_text
     prompt_ids = tokenizer(prompt_text, add_special_tokens=False, truncation=True, max_length=max_length)["input_ids"]
     full_ids = tokenizer(full_text, add_special_tokens=False, truncation=True, max_length=max_length)["input_ids"]
     labels = list(full_ids)
@@ -108,6 +112,7 @@ def tokenize_example(tokenizer: Any, record: dict[str, Any], max_length: int) ->
     return {
         "record": record,
         "prompt_text": prompt_text,
+        "response_text": response_text,
         "full_text": full_text,
         "input_ids": [int(token_id) for token_id in full_ids],
         "labels": [int(token_id) for token_id in labels],
@@ -176,11 +181,13 @@ def generate_completion(
     max_new_tokens: int,
     temperature: float,
     top_p: float,
-) -> str:
+    num_beams: int,
+) -> tuple[str, int]:
     inputs = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0,
+        "num_beams": int(num_beams),
         "pad_token_id": tokenizer.pad_token_id,
         "eos_token_id": tokenizer.eos_token_id,
     }
@@ -189,23 +196,37 @@ def generate_completion(
         generation_kwargs["top_p"] = top_p
     output_ids = model.generate(**inputs, **generation_kwargs)
     completion_ids = output_ids[0][int(inputs["input_ids"].shape[-1]) :]
-    return tokenizer.decode(completion_ids, skip_special_tokens=True).strip()
+    completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
+    return completion, int(completion_ids.numel())
+
+
+def normalize_for_exact_match(text: str, tokenizer: Any | None = None) -> str:
+    for special_token in (EOS_TOKEN, getattr(tokenizer, "eos_token", None), getattr(tokenizer, "pad_token", None)):
+        if special_token:
+            text = text.replace(str(special_token), "")
+    return " ".join(text.split()).strip()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a prompt/response dataset by response loss and perplexity.")
+    parser = argparse.ArgumentParser(description="Evaluate a local SFT prompt/response dataset.")
     parser.add_argument("--model-path", "--checkpoint", dest="checkpoint", required=True)
-    parser.add_argument("--dataset-file", required=True, help="Local .json, .jsonl, or .csv file with prompt and response fields.")
+    parser.add_argument(
+        "--dataset-file",
+        required=True,
+        help="Local .json, .jsonl, or .csv file with instruction+response, prompt+response, question+answer, or messages.",
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--device", default="auto", help="auto, cuda, cuda:0, cpu, or mps.")
     parser.add_argument("--dtype", default="bf16", choices=("auto", "bf16", "fp16", "fp32"))
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--exact-match", action="store_true", help="Generate every row and report normalized exact-match accuracy.")
     parser.add_argument("--generate-samples", type=int, default=0, help="Generate completions for the first N rows.")
-    parser.add_argument("--max-new-tokens", type=int, default=128)
+    parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--num-beams", type=int, default=1)
     args = parser.parse_args()
 
     device = select_device(args.device)
@@ -231,6 +252,8 @@ def main() -> None:
     records = read_prompt_response_records(dataset_path)
     if args.limit is not None:
         records = records[: int(args.limit)]
+    if not records:
+        raise ValueError(f"No eval records found in {dataset_path}.")
     examples = [tokenize_example(tokenizer, record, max_length=max_length) for record in records]
 
     output_dir = Path(args.output_dir or Path("runs") / "eval" / f"{dataset_path.stem}_prompt_response").expanduser()
@@ -238,6 +261,8 @@ def main() -> None:
 
     total_loss_sum = 0.0
     total_tokens = 0
+    exact_correct = 0
+    generated_token_lengths: list[int] = []
     results: list[dict[str, Any]] = []
     batch_size = max(1, int(args.batch_size))
     for start in tqdm(range(0, len(examples), batch_size), desc="prompt-response-eval"):
@@ -251,14 +276,14 @@ def main() -> None:
             total_loss_sum += loss_sum
             result = {
                 "index": index,
-                "prompt": records[index]["prompt"],
-                "response": records[index]["response"],
+                "prompt": batch[offset]["prompt_text"],
+                "response": batch[offset]["response_text"],
                 "loss": score["loss"],
                 "perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
                 "response_token_count": token_count,
             }
-            if index < int(args.generate_samples):
-                result["generated"] = generate_completion(
+            if bool(args.exact_match) or index < int(args.generate_samples):
+                generated, generated_token_count = generate_completion(
                     model=model,
                     tokenizer=tokenizer,
                     prompt_text=batch[offset]["prompt_text"],
@@ -266,10 +291,25 @@ def main() -> None:
                     max_new_tokens=int(args.max_new_tokens),
                     temperature=float(args.temperature),
                     top_p=float(args.top_p),
+                    num_beams=int(args.num_beams),
                 )
+                normalized_generated = normalize_for_exact_match(generated, tokenizer=tokenizer)
+                normalized_target = normalize_for_exact_match(batch[offset]["response_text"], tokenizer=tokenizer)
+                result["generated"] = generated
+                result["normalized_generated"] = normalized_generated
+                result["normalized_target"] = normalized_target
+                result["generated_token_count"] = generated_token_count
+                if bool(args.exact_match):
+                    is_exact = normalized_generated == normalized_target
+                    exact_correct += int(is_exact)
+                    generated_token_lengths.append(generated_token_count)
+                    result["exact_match"] = is_exact
             results.append(result)
 
     mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
+    avg_generated_tokens = (
+        sum(generated_token_lengths) / len(generated_token_lengths) if generated_token_lengths else math.nan
+    )
     summary = {
         "checkpoint": args.checkpoint,
         "dataset_file": str(dataset_path),
@@ -277,6 +317,10 @@ def main() -> None:
         "response_tokens": total_tokens,
         "mean_response_loss": mean_loss,
         "response_perplexity": math.exp(mean_loss) if total_tokens else math.nan,
+        "exact_match_accuracy": exact_correct / len(records) if args.exact_match and records else None,
+        "exact_match_correct": exact_correct if args.exact_match else None,
+        "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
+        "max_new_tokens": int(args.max_new_tokens),
         "max_length": max_length,
         "batch_size": batch_size,
     }
@@ -293,6 +337,14 @@ def main() -> None:
         f"ppl={summary['response_perplexity']:.4f} "
         f"examples={summary['total_examples']} tokens={summary['response_tokens']}"
     )
+    if args.exact_match:
+        print(
+            f"Exact-match accuracy={summary['exact_match_accuracy']:.4f} "
+            f"({summary['exact_match_correct']}/{summary['total_examples']}) "
+            f"avg_generated_tokens={summary['avg_generated_tokens']:.2f}"
+        )
+        if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
+            print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
     print(f"Wrote results to {output_dir}")
 
 

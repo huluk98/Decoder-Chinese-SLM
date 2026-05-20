@@ -169,6 +169,22 @@ python scripts/generate.py \
 
 `--dataset-file` accepts `.jsonl`, `.json`, `.csv`, or `.txt`. For JSONL/JSON/CSV, the script automatically looks for `prompt`, `instruction`, `question`, `input`, `text`, or `query`; pass `--text-field your_column_name` if your file uses a different column. For base pretraining checkpoints, add `--no-chat-format` if you want the raw prompt without `<|user|>` and `<|assistant|>` wrappers.
 
+Evaluate a local instruction/response SFT file by generated exact-match accuracy:
+
+```bash
+python scripts/eval_prompt_response.py \
+  --model-path /absolute/path/to/sft/checkpoint \
+  --dataset-file /absolute/path/to/eval.json \
+  --exact-match \
+  --max-new-tokens 64 \
+  --temperature 0 \
+  --batch-size 8 \
+  --device cuda:0 \
+  --dtype bf16
+```
+
+The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. Exact match normalizes whitespace and strips EOS/pad tokens before comparing the generated response to the target response.
+
 For local SFT/fine-tuning with your chosen model and dataset paths:
 
 ```bash
