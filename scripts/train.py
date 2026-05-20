@@ -838,6 +838,21 @@ def print_first_batch_debug(
         print("[warning] labels contain values less than -100")
 
 
+def should_dispatch_to_sft(config: dict[str, Any]) -> bool:
+    flat_sft_keys = {
+        "model_name_or_path",
+        "train_file",
+        "eval_file",
+        "max_seq_length",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+    }
+    if any(key in config for key in flat_sft_keys):
+        return True
+    sft_config = config.get("sft", {})
+    return bool(sft_config.get("base_model") and sft_config.get("data_path"))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train a decoder-only Chinese causal language model.")
     parser.add_argument("--config", default="configs/model_0p2b.yaml", help="Path to a YAML config.")
@@ -845,12 +860,22 @@ def main() -> None:
     parser.add_argument("--deepspeed", action="store_true", help="Enable DeepSpeed using train.deepspeed config.")
     parser.add_argument("--deepspeed-config", default=None, help="Optional DeepSpeed JSON config path.")
     parser.add_argument("--local_rank", "--local-rank", type=int, default=None, help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
 
     if args.local_rank is not None and "LOCAL_RANK" not in os.environ:
         os.environ["LOCAL_RANK"] = str(args.local_rank)
 
     config = load_config(args.config)
+    if should_dispatch_to_sft(config):
+        if args.resume is not None or args.deepspeed or args.deepspeed_config is not None:
+            parser.error("--resume/--deepspeed are for pretraining; pass an SFT checkpoint with --checkpoint instead.")
+        from sft import main as sft_main
+
+        sft_main(["--config", args.config, *unknown_args])
+        return
+    if unknown_args:
+        parser.error(f"unrecognized arguments: {' '.join(unknown_args)}")
+
     train_config = config["train"]
     use_deepspeed = bool(
         args.deepspeed

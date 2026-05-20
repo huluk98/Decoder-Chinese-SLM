@@ -180,6 +180,36 @@ python scripts/sft.py \
   --epochs 3
 ```
 
+## 8-GPU Smart-Home SFT
+
+For structured smart-home command generation, use the dedicated short-output SFT config:
+
+1. Edit `configs/sft_0p2b_8gpu.yaml`.
+2. Set `model_name_or_path` to the pretrained 0.2B checkpoint directory.
+3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows.
+
+The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. Evaluation uses greedy decoding with `max_new_tokens=64` and reports normalized exact-match accuracy plus average generated token length.
+
+Debug overfit on one GPU first:
+
+```bash
+./run_sft_debug_1gpu.sh
+```
+
+Full 8x H20 SFT run:
+
+```bash
+./run_sft_8gpu.sh
+```
+
+Equivalent one-line launch:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/train.py --config configs/sft_0p2b_8gpu.yaml
+```
+
+Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, and `save_total_limit=2`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
+
 ## Train A 0.2B-ish Model
 
 Train a tokenizer first. This command automatically downloads every configured dataset source into the local cache, normalizes the cached/local records into one JSONL file, then trains the tokenizer from that merged file. The target vocab size is 29,298 to mirror ChatLM-mini-Chinese.

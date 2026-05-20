@@ -220,10 +220,17 @@ def read_records(path: str | Path) -> Iterator[dict[str, Any]]:
 
 
 class SFTDataset(Dataset):
-    def __init__(self, path: str | Path, max_samples: int | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        max_samples: int | None = None,
+        group_by_length: bool = False,
+    ) -> None:
         records = list(read_records(path))
         if max_samples is not None:
             records = records[: int(max_samples)]
+        if group_by_length:
+            records.sort(key=lambda record: len(json.dumps(record, ensure_ascii=False)))
         self.records = records
 
     def __len__(self) -> int:
@@ -322,11 +329,15 @@ def build_sft_dataloader(
     shuffle: bool = True,
     contrastive: bool = False,
     max_samples: int | None = None,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    group_by_length: bool = False,
+    drop_last: bool = False,
     rank: int = 0,
     world_size: int = 1,
 ) -> DataLoader:
     dataset_cls = ContrastiveSFTDataset if contrastive else SFTDataset
-    dataset = dataset_cls(path, max_samples=max_samples)
+    dataset = dataset_cls(path, max_samples=max_samples, group_by_length=group_by_length)
     collate = contrastive_sft_collate if contrastive else sft_collate
     sampler = (
         DistributedSampler(dataset, num_replicas=int(world_size), rank=int(rank), shuffle=bool(shuffle))
@@ -339,5 +350,8 @@ def build_sft_dataloader(
         shuffle=bool(shuffle) if sampler is None else False,
         sampler=sampler,
         num_workers=int(num_workers),
+        pin_memory=bool(pin_memory),
+        persistent_workers=bool(persistent_workers) and int(num_workers) > 0,
+        drop_last=bool(drop_last),
         collate_fn=lambda features: collate(features, tokenizer, int(max_length)),
     )
