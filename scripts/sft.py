@@ -144,18 +144,23 @@ def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run SFT or contrastive positive/negative SFT on a checkpoint.")
+    parser = argparse.ArgumentParser(description="Run regular SFT, or explicitly opt into contrastive positive/negative SFT.")
     parser.add_argument("--config", default="configs/sft.yaml")
-    parser.add_argument("--mode", choices=("sft", "contrastive"), default=None)
+    parser.add_argument(
+        "--mode",
+        choices=("sft", "contrastive"),
+        default="sft",
+        help="Default is regular SFT. Pass --mode contrastive only for positive/negative contrastive SFT.",
+    )
     parser.add_argument("--checkpoint", default=None, help="Base/pretrained checkpoint to fine-tune.")
-    parser.add_argument("--data-path", default=None, help="Override the SFT JSONL dataset path from the config.")
+    parser.add_argument("--data-path", default=None, help="Override the SFT .jsonl or .json dataset path from the config.")
     parser.add_argument("--output-dir", default=None, help="Override the fine-tuned checkpoint output directory.")
     args = parser.parse_args()
 
     config = load_config(args.config)
     train_config = config["train"]
     sft_config = config.get("sft", {})
-    mode = args.mode or str(sft_config.get("mode", "sft"))
+    mode = str(args.mode)
     contrastive = mode == "contrastive"
 
     device, rank, local_rank, world_size = setup_distributed()
@@ -175,7 +180,7 @@ def main() -> None:
 
     data_path = args.data_path or sft_config.get("data_path") or config["data"].get("sft_path")
     if not data_path:
-        raise ValueError("Set sft.data_path or pass --data-path to an SFT JSONL file.")
+        raise ValueError("Set sft.data_path or pass --data-path to an SFT .jsonl or .json file.")
     dataloader = build_sft_dataloader(
         path=data_path,
         tokenizer=tokenizer,

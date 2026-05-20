@@ -462,11 +462,32 @@ python scripts/sft.py \
   --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
 ```
 
-SFT JSONL rows can use `prompt`/`response`, `instruction`/`response`, `question`/`answer`, or similar fields:
+SFT files can be `.jsonl` or normal `.json`. Rows can use `prompt`/`response`, `prompt`/`responses`, `instruction`/`response`, `question`/`answer`, or similar fields:
 
 ```json
 {"prompt": "什么是边缘端中文小模型？", "response": "..."}
 ```
+
+For a normal JSON file, use either a list:
+
+```json
+[
+  {"prompt": "什么是边缘端中文小模型？", "response": "..."},
+  {"prompt": "它适合哪些场景？", "response": "..."}
+]
+```
+
+or a wrapper object:
+
+```json
+{
+  "data": [
+    {"prompt": "什么是边缘端中文小模型？", "response": "..."}
+  ]
+}
+```
+
+The default SFT mode is regular causal-LM supervised fine-tuning. Contrastive positive/negative SFT is only enabled when you explicitly pass `--mode contrastive`.
 
 For contrastive SFT, each row also includes a positive semantic example and a negative example:
 

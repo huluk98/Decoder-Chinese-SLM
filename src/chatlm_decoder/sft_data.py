@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 USER_TOKEN = "<|user|>"
 ASSISTANT_TOKEN = "<|assistant|>"
 EOS_TOKEN = "<|eos|>"
+PROMPT_FIELDS = ("prompt", "instruction", "question", "input", "x")
+RESPONSE_FIELDS = ("response", "responses", "output", "answer", "completion", "target", "y")
 
 
 def _clean(value: Any) -> str:
@@ -26,8 +28,17 @@ def _first_text(record: dict[str, Any], fields: Iterable[str]) -> str:
     return ""
 
 
+def _field_hint(record: dict[str, Any]) -> str:
+    return ", ".join(record.keys()) or "none"
+
+
 def format_prompt(record: dict[str, Any]) -> str:
-    instruction = _first_text(record, ("prompt", "instruction", "question", "input", "x"))
+    instruction = _first_text(record, PROMPT_FIELDS)
+    if not instruction:
+        raise ValueError(
+            "SFT rows must include prompt text. Expected one of "
+            f"{', '.join(PROMPT_FIELDS)}. Available fields: {_field_hint(record)}."
+        )
     extra_input = _clean(record.get("input")) if "instruction" in record else ""
     if extra_input and extra_input != instruction:
         instruction = f"{instruction}\n{extra_input}" if instruction else extra_input
@@ -35,7 +46,12 @@ def format_prompt(record: dict[str, Any]) -> str:
 
 
 def format_response(record: dict[str, Any]) -> str:
-    response = _first_text(record, ("response", "output", "answer", "completion", "y"))
+    response = _first_text(record, RESPONSE_FIELDS)
+    if not response:
+        raise ValueError(
+            "SFT rows must include response text. Expected one of "
+            f"{', '.join(RESPONSE_FIELDS)}. Available fields: {_field_hint(record)}."
+        )
     return response if response.endswith(EOS_TOKEN) else f"{response}{EOS_TOKEN}"
 
 
@@ -44,17 +60,56 @@ def format_sft_text(record: dict[str, Any]) -> tuple[str, str]:
     return prompt, prompt + format_response(record)
 
 
-def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
-    with Path(path).expanduser().open("r", encoding="utf-8") as handle:
-        for line in handle:
+def _coerce_json_records(payload: Any, path: Path) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        records = payload
+    elif isinstance(payload, dict):
+        records = None
+        for key in ("data", "records", "items", "examples", "train"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                records = value
+                break
+        if records is None:
+            records = [payload]
+    else:
+        raise ValueError(
+            f"{path} must contain a JSON object, a JSON list, "
+            "or an object with a data/records/items/examples/train list."
+        )
+
+    clean_records: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"{path}: record {index} must be a JSON object.")
+        clean_records.append(record)
+    return clean_records
+
+
+def read_records(path: str | Path) -> Iterator[dict[str, Any]]:
+    data_path = Path(path).expanduser()
+    suffix = data_path.suffix.lower()
+    if suffix == ".json":
+        payload = json.loads(data_path.read_text(encoding="utf-8"))
+        yield from _coerce_json_records(payload, data_path)
+        return
+
+    if suffix != ".jsonl":
+        raise ValueError(f"Unsupported SFT data file extension: {suffix}. Use .jsonl or .json.")
+
+    with data_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
             line = line.strip()
             if line:
-                yield json.loads(line)
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError(f"{data_path}:{line_number} must be a JSON object.")
+                yield record
 
 
 class SFTDataset(Dataset):
     def __init__(self, path: str | Path, max_samples: int | None = None) -> None:
-        records = list(read_jsonl(path))
+        records = list(read_records(path))
         if max_samples is not None:
             records = records[: int(max_samples)]
         self.records = records
