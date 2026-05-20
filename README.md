@@ -373,6 +373,14 @@ The estimate detects appended resume segments by watching `time_seconds` reset. 
 
 C-Eval is a Chinese multiple-choice benchmark with 52 subjects and `dev`, `val`, and `test` splits. This repo evaluates your decoder-only checkpoint by scoring the conditional log probability of answer choices `A`, `B`, `C`, and `D`, which is more stable for a base/pretraining checkpoint than asking it to generate free-form answers.
 
+Latest checked-in decoder-only result:
+
+| Checkpoint | Split | Shots | Prompt Format | Correct / Total | Accuracy |
+| --- | --- | ---: | --- | ---: | ---: |
+| `runs/h20-8gpu-llama-0p2b-deepspeed/latest` | `val` | 5 | chat format | 320 / 1346 | 23.77% |
+
+Raw result files are stored in [`eval_results/ceval/latest`](eval_results/ceval/latest).
+
 Run a quick two-subject smoke check:
 
 ```bash
