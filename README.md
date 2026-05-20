@@ -140,6 +140,45 @@ python scripts/generate.py \
   --prompt "如何开始学习机器学习？"
 ```
 
+## Run Locally With Custom Paths
+
+For local inference, point `--checkpoint` at any Hugging Face-style checkpoint directory that contains `config.json`, tokenizer files, and `model.safetensors`.
+
+Single prompt:
+
+```bash
+python scripts/generate.py \
+  --checkpoint /absolute/path/to/your/checkpoint \
+  --prompt "请介绍一下边缘端中文小模型的优势。" \
+  --device cuda:0 \
+  --dtype bf16 \
+  --max-new-tokens 256
+```
+
+Run a local dataset file and write generations to JSONL:
+
+```bash
+python scripts/generate.py \
+  --checkpoint /absolute/path/to/your/checkpoint \
+  --dataset-file /absolute/path/to/prompts.jsonl \
+  --text-field prompt \
+  --output-file runs/local_generations.jsonl \
+  --device cuda:0 \
+  --dtype bf16
+```
+
+`--dataset-file` accepts `.jsonl`, `.json`, `.csv`, or `.txt`. For JSONL/JSON/CSV, the script automatically looks for `prompt`, `instruction`, `question`, `input`, `text`, or `query`; pass `--text-field your_column_name` if your file uses a different column. For base pretraining checkpoints, add `--no-chat-format` if you want the raw prompt without `<|user|>` and `<|assistant|>` wrappers.
+
+For local SFT/fine-tuning with your chosen model and dataset paths:
+
+```bash
+python scripts/sft.py \
+  --config configs/sft.yaml \
+  --checkpoint /absolute/path/to/base/checkpoint \
+  --data-path /absolute/path/to/sft_train.jsonl \
+  --output-dir runs/my-local-sft
+```
+
 ## Train A 0.2B-ish Model
 
 Train a tokenizer first. This command automatically downloads every configured dataset source into the local cache, normalizes the cached/local records into one JSONL file, then trains the tokenizer from that merged file. The target vocab size is 29,298 to mirror ChatLM-mini-Chinese.

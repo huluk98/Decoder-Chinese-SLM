@@ -148,6 +148,8 @@ def main() -> None:
     parser.add_argument("--config", default="configs/sft.yaml")
     parser.add_argument("--mode", choices=("sft", "contrastive"), default=None)
     parser.add_argument("--checkpoint", default=None, help="Base/pretrained checkpoint to fine-tune.")
+    parser.add_argument("--data-path", default=None, help="Override the SFT JSONL dataset path from the config.")
+    parser.add_argument("--output-dir", default=None, help="Override the fine-tuned checkpoint output directory.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -171,9 +173,9 @@ def main() -> None:
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
 
-    data_path = sft_config.get("data_path") or config["data"].get("sft_path")
+    data_path = args.data_path or sft_config.get("data_path") or config["data"].get("sft_path")
     if not data_path:
-        raise ValueError("Set sft.data_path to an SFT JSONL file.")
+        raise ValueError("Set sft.data_path or pass --data-path to an SFT JSONL file.")
     dataloader = build_sft_dataloader(
         path=data_path,
         tokenizer=tokenizer,
@@ -198,7 +200,7 @@ def main() -> None:
         enabled=(device.type == "cuda" and str(train_config["precision"]).lower() == "fp16")
     )
     grad_accum_steps = int(train_config.get("grad_accum_steps", 1))
-    output_dir = Path(config["run"]["output_dir"]).expanduser()
+    output_dir = Path(args.output_dir or config["run"]["output_dir"]).expanduser()
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
     if world_size > 1:
