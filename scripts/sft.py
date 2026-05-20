@@ -155,6 +155,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None, help="Base/pretrained checkpoint to fine-tune.")
     parser.add_argument("--data-path", default=None, help="Override the SFT .jsonl or .json dataset path from the config.")
     parser.add_argument("--output-dir", default=None, help="Override the fine-tuned checkpoint output directory.")
+    parser.add_argument("--epochs", type=float, default=None, help="Train for this many dataset passes. Overrides train.max_steps when set.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -193,7 +194,8 @@ def main() -> None:
         rank=rank,
         world_size=world_size,
     )
-    data_iter = iter(dataloader)
+    if len(dataloader) <= 0:
+        raise ValueError(f"SFT dataset produced no batches: {data_path}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -205,6 +207,13 @@ def main() -> None:
         enabled=(device.type == "cuda" and str(train_config["precision"]).lower() == "fp16")
     )
     grad_accum_steps = int(train_config.get("grad_accum_steps", 1))
+    epochs = args.epochs if args.epochs is not None else train_config.get("epochs")
+    if epochs is not None:
+        epochs = float(epochs)
+        if epochs <= 0:
+            raise ValueError("--epochs must be greater than 0.")
+        total_micro_batches = int(math.ceil(epochs * len(dataloader)))
+        train_config["max_steps"] = max(1, int(math.ceil(total_micro_batches / grad_accum_steps)))
     output_dir = Path(args.output_dir or config["run"]["output_dir"]).expanduser()
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -214,10 +223,22 @@ def main() -> None:
     align_weight = float(sft_config.get("alignment_weight", 0.1))
     margin = float(sft_config.get("margin", 0.5))
     maybe_print(rank, f"SFT mode={mode} | base={checkpoint} | output={output_dir} | world_size={world_size}")
+    if epochs is not None:
+        maybe_print(
+            rank,
+            f"SFT epochs={epochs:g} | micro_batches_per_epoch={len(dataloader)} | "
+            f"grad_accum_steps={grad_accum_steps} | optimizer_steps={int(train_config['max_steps'])}",
+        )
+    else:
+        maybe_print(rank, f"SFT max_steps={int(train_config['max_steps'])} | micro_batches_per_epoch={len(dataloader)}")
     maybe_print(rank, "Contrastive objective: gen_loss + lambda * (d(anchor,pos) + relu(margin - d(anchor,neg)))")
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    current_epoch = 0
+    if hasattr(dataloader.sampler, "set_epoch"):
+        dataloader.sampler.set_epoch(current_epoch)
+    data_iter = iter(dataloader)
     progress = trange(1, int(train_config["max_steps"]) + 1, disable=(rank != 0), desc=f"{mode}-sft")
     run_start = time.perf_counter()
     for step in progress:
@@ -231,6 +252,9 @@ def main() -> None:
             try:
                 batch = next(data_iter)
             except StopIteration:
+                current_epoch += 1
+                if hasattr(dataloader.sampler, "set_epoch"):
+                    dataloader.sampler.set_epoch(current_epoch)
                 data_iter = iter(dataloader)
                 batch = next(data_iter)
             batch = move_batch(batch, device)
@@ -279,6 +303,7 @@ def main() -> None:
                 gen=f"{float(logged[1]):.4f}",
                 align=f"{float(logged[2]):.4f}",
                 lr=f"{lr:.2e}",
+                epoch=current_epoch + 1,
                 step_s=f"{elapsed / step:.2f}",
             )
 

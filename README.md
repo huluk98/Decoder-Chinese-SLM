@@ -176,7 +176,8 @@ python scripts/sft.py \
   --config configs/sft.yaml \
   --checkpoint /absolute/path/to/base/checkpoint \
   --data-path /absolute/path/to/sft_train.jsonl \
-  --output-dir runs/my-local-sft
+  --output-dir runs/my-local-sft \
+  --epochs 3
 ```
 
 ## Train A 0.2B-ish Model
@@ -459,7 +460,8 @@ After pretraining, run standard supervised fine-tuning on instruction/answer row
 ```bash
 python scripts/sft.py \
   --config configs/sft.yaml \
-  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest
+  --checkpoint runs/h20-8gpu-llama-0p2b-deepspeed/latest \
+  --epochs 3
 ```
 
 SFT files can be `.jsonl` or normal `.json`. Rows can use `prompt`/`response`, `prompt`/`responses`, `instruction`/`response`, `question`/`answer`, or similar fields:
@@ -488,6 +490,8 @@ or a wrapper object:
 ```
 
 The default SFT mode is regular causal-LM supervised fine-tuning. Contrastive positive/negative SFT is only enabled when you explicitly pass `--mode contrastive`.
+
+Use `--epochs N` to train for `N` passes over your SFT dataset. If `--epochs` is omitted, the script uses `train.max_steps` from the config. Internally, epochs are converted into optimizer steps using the dataloader length and `train.grad_accum_steps`.
 
 For contrastive SFT, each row also includes a positive semantic example and a negative example:
 
