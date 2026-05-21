@@ -29,4 +29,5 @@ train:
   num_workers: 2
   log_every: 10
   save_every: 500
-  save_total_limit: 3
+  save_total_limit: 1
+  save_final_only: true

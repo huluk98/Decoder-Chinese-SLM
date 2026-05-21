@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import math
 import os
+import random
 import re
 import shutil
 import statistics
+import subprocess
 import sys
 import time
 from contextlib import nullcontext
@@ -28,6 +31,11 @@ from chatlm_decoder.config import load_config
 from chatlm_decoder.command_eval import canonicalize_command_response
 from chatlm_decoder.pruning import apply_masks, mask_sparsity
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
+
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - numpy is optional for this script.
+    np = None
 
 
 def is_dist() -> bool:
@@ -60,6 +68,71 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
 def maybe_print(rank: int, message: str) -> None:
     if rank == 0:
         print(message)
+
+
+def git_commit_hash() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+
+
+def checkpoint_file_timestamps(path: str | Path) -> dict[str, Any]:
+    checkpoint_path = Path(path).expanduser()
+    if not checkpoint_path.exists():
+        return {"exists": False, "path": str(checkpoint_path)}
+    files: dict[str, Any] = {}
+    candidates = [
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "model.safetensors",
+        "pytorch_model.bin",
+        "trainer_state.pt",
+    ]
+    for name in candidates:
+        candidate = checkpoint_path / name
+        if candidate.exists():
+            stat = candidate.stat()
+            files[name] = {
+                "size_bytes": int(stat.st_size),
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
+            }
+    return {
+        "exists": True,
+        "path": str(checkpoint_path),
+        "resolved_path": str(checkpoint_path.resolve()),
+        "files": files,
+    }
+
+
+def set_all_seeds(seed: int, rank: int, deterministic: bool) -> dict[str, Any]:
+    effective_seed = int(seed) + int(rank)
+    random.seed(effective_seed)
+    if np is not None:
+        np.random.seed(effective_seed)
+    torch.manual_seed(effective_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(effective_seed)
+    if deterministic:
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(True)
+    return {
+        "python_random_seed": effective_seed,
+        "numpy_seed": effective_seed if np is not None else None,
+        "torch_seed": effective_seed,
+        "torch_cuda_seed": effective_seed if torch.cuda.is_available() else None,
+        "deterministic_algorithms_enabled": bool(torch.are_deterministic_algorithms_enabled()),
+    }
 
 
 def autocast_for(device: torch.device, precision: str):
@@ -119,38 +192,45 @@ def save_checkpoint(
     tokenizer: Any,
     output_dir: Path,
     step: int,
-    keep_last: int,
     pruning_masks: dict[str, torch.Tensor] | None = None,
     pruning_mask_source: str | None = None,
+    checkpoint_name: str = "final",
 ) -> None:
-    checkpoint_dir = output_dir / f"step-{step:06d}"
+    checkpoint_dir = output_dir / checkpoint_name
     if checkpoint_dir.exists():
         shutil.rmtree(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     unwrap_model(model).save_pretrained(checkpoint_dir, safe_serialization=True)
     tokenizer.save_pretrained(checkpoint_dir)
-    torch.save({"step": step}, checkpoint_dir / "trainer_state.pt")
+    state = {
+        "step": step,
+        "checkpoint_name": checkpoint_name,
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+    torch.save(state, checkpoint_dir / "trainer_state.pt")
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
         write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
-    latest = output_dir / "latest"
-    if latest.is_symlink() or latest.exists():
-        if latest.is_dir() and not latest.is_symlink():
-            shutil.rmtree(latest)
-        else:
-            latest.unlink()
-    try:
-        latest.symlink_to(os.path.relpath(checkpoint_dir, start=output_dir), target_is_directory=True)
-    except OSError:
-        shutil.copytree(checkpoint_dir, latest)
-
-    checkpoints = sorted(
-        [path for path in output_dir.iterdir() if path.is_dir() and path.name.startswith("step-")],
-        key=lambda path: path.name,
-    )
-    keep_last = max(1, int(keep_last))
-    for stale in checkpoints[:-keep_last]:
-        shutil.rmtree(stale, ignore_errors=True)
+    manifest = {
+        **state,
+        "checkpoint_path": str(checkpoint_dir),
+        "resolved_checkpoint_path": str(checkpoint_dir.resolve()),
+        "model_class": unwrap_model(model).__class__.__name__,
+        "model_type": getattr(unwrap_model(model).config, "model_type", None),
+        "parameter_count": count_all_parameters(model),
+        "tokenizer_vocab_size": len(tokenizer),
+        "contains_model_safetensors": any(checkpoint_dir.glob("*.safetensors")),
+        "contains_config": (checkpoint_dir / "config.json").exists(),
+        "contains_tokenizer": (checkpoint_dir / "tokenizer_config.json").exists()
+        and any((checkpoint_dir / name).exists() for name in ("tokenizer.json", "tokenizer.model", "vocab.json")),
+    }
+    with (checkpoint_dir / "checkpoint_manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    with (output_dir / "final_checkpoint.json").open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+    print(f"[checkpoint] saved SFT checkpoint: {checkpoint_dir}")
 
 
 def mean_pool_last_hidden(model: torch.nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -253,6 +333,22 @@ def write_pruning_report(
         handle.write("\n")
 
 
+def remove_stale_sft_checkpoints(output_dir: Path) -> None:
+    """Remove old SFT checkpoint aliases so eval cannot pick a stale model."""
+    for path in output_dir.glob("step-*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    for name in ("latest", "final"):
+        path = output_dir / name
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+    final_manifest = output_dir / "final_checkpoint.json"
+    if final_manifest.exists():
+        final_manifest.unlink()
+
+
 def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     train_config = dict(config["train"])
     sft_config = dict(config.get("sft", {}))
@@ -297,6 +393,7 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         "save_total_limit": "save_total_limit",
         "save_every": "save_every",
         "save_strategy": "save_strategy",
+        "save_final_only": "save_final_only",
         "eval_strategy": "eval_strategy",
         "eval_steps": "eval_steps",
         "torch_compile": "compile",
@@ -402,6 +499,75 @@ def print_startup_summary(
         f"  trainable_parameters={trainable_parameter_count(model):,}\n"
         f"  total_parameters={count_all_parameters(model):,}"
     )
+
+
+def write_sft_run_config(
+    output_dir: Path,
+    args: argparse.Namespace,
+    config: dict[str, Any],
+    train_config: dict[str, Any],
+    sft_config: dict[str, Any],
+    run_config: dict[str, Any],
+    generation_config: dict[str, Any],
+    checkpoint: str,
+    data_path: str,
+    eval_path: str | None,
+    model: torch.nn.Module,
+    tokenizer: Any,
+    world_size: int,
+    local_rank: int,
+    seed_info: dict[str, Any],
+    max_seq_length: int,
+    max_new_tokens: int,
+) -> None:
+    payload = {
+        "script": "scripts/sft.py",
+        "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "git_commit": git_commit_hash(),
+        "config_path": args.config,
+        "mode": str(args.mode or sft_config.get("mode", "sft")),
+        "model_path": checkpoint,
+        "checkpoint_path_used_for_training": checkpoint,
+        "tokenizer_path": checkpoint,
+        "checkpoint_files": checkpoint_file_timestamps(checkpoint),
+        "train_file": str(data_path),
+        "eval_file": str(eval_path) if eval_path else None,
+        "output_dir": str(output_dir),
+        "expected_final_checkpoint_path": str(output_dir / "final"),
+        "world_size": int(world_size),
+        "local_rank": int(local_rank),
+        "model_class": unwrap_model(model).__class__.__name__,
+        "model_type": getattr(unwrap_model(model).config, "model_type", None),
+        "parameter_count": count_all_parameters(model),
+        "trainable_parameter_count": trainable_parameter_count(model),
+        "max_seq_length": int(max_seq_length),
+        "max_new_tokens": int(max_new_tokens),
+        "seed_info": seed_info,
+        "train": train_config,
+        "sft": sft_config,
+        "run": run_config,
+        "generation": generation_config,
+        "tokenizer": {
+            "class": tokenizer.__class__.__name__,
+            "vocab_size": len(tokenizer),
+            "pad_token_id": tokenizer.pad_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "padding_side": getattr(tokenizer, "padding_side", None),
+        },
+    "trainer_flags": {
+            "save_strategy": train_config.get("save_strategy"),
+            "eval_strategy": train_config.get("eval_strategy"),
+            "save_final_only": bool(train_config.get("save_final_only", True)),
+            "load_best_model_at_end": False,
+            "metric_for_best_model": None,
+            "greater_is_better": None,
+            "remove_unused_columns": train_config.get("remove_unused_columns"),
+        },
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "run_config.json").open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
 
 
 def print_tokenized_debug_sample(tokenizer: Any, batch: dict[str, torch.Tensor], rank: int) -> None:
@@ -616,6 +782,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--max_seq_length", "--max-seq-length", type=int, default=None)
     parser.add_argument("--benchmark-runs", "--benchmark_runs", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None, help="Override run.seed for model/init/dropout reproducibility.")
+    parser.add_argument("--data_seed", "--data-seed", type=int, default=None, help="Override dataset/DataLoader shuffle seed.")
+    parser.add_argument(
+        "--deterministic",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable deterministic PyTorch algorithms where available. This can reduce speed.",
+    )
     parser.add_argument("--pruning-mask", "--pruning_mask", default=None, help="Optional pruning_masks.pt to keep zeros fixed during SFT retuning.")
     return parser.parse_args(argv)
 
@@ -624,6 +798,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     config = load_config(args.config)
     train_config, sft_config, run_config, generation_config = _copy_flat_config(config)
+    train_config.setdefault("save_final_only", True)
 
     if args.per_device_train_batch_size is not None:
         train_config["batch_size"] = int(args.per_device_train_batch_size)
@@ -635,6 +810,11 @@ def main(argv: list[str] | None = None) -> None:
         sft_config["benchmark_runs"] = int(args.benchmark_runs)
     if args.output_dir is not None:
         run_config["output_dir"] = args.output_dir
+    if args.seed is not None:
+        run_config["seed"] = int(args.seed)
+    if args.data_seed is not None:
+        config["data"]["seed"] = int(args.data_seed)
+        train_config["data_seed"] = int(args.data_seed)
     if args.pruning_mask is not None:
         sft_config["pruning_mask_path"] = args.pruning_mask
 
@@ -643,9 +823,8 @@ def main(argv: list[str] | None = None) -> None:
     device, rank, local_rank, world_size = setup_distributed()
     configure_cuda(train_config, rank)
     seed = int(run_config.get("seed", 42))
-    torch.manual_seed(seed + rank)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed + rank)
+    data_seed = int(train_config.get("data_seed", config["data"].get("seed", seed)))
+    seed_info = set_all_seeds(seed, rank=rank, deterministic=bool(args.deterministic))
 
     checkpoint = args.checkpoint or sft_config.get("base_model") or run_config.get("base_model")
     if not checkpoint:
@@ -712,6 +891,7 @@ def main(argv: list[str] | None = None) -> None:
         drop_last=bool(train_config.get("drop_last", False)),
         rank=rank,
         world_size=world_size,
+        seed=data_seed,
     )
     if len(dataloader) <= 0:
         raise ValueError(f"SFT dataset produced no batches: {data_path}")
@@ -742,6 +922,15 @@ def main(argv: list[str] | None = None) -> None:
     output_dir = Path(run_config["output_dir"]).expanduser()
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
+        stale_candidates = [path for path in output_dir.glob("step-*") if path.is_dir()]
+        stale_candidates.extend(path for path in (output_dir / "latest", output_dir / "final") if path.exists() or path.is_symlink())
+        if stale_candidates:
+            maybe_print(
+                rank,
+                "[checkpoint] removing stale SFT checkpoint folders before training so final eval cannot reuse them: "
+                + ", ".join(str(path) for path in stale_candidates),
+            )
+        remove_stale_sft_checkpoints(output_dir)
     if world_size > 1:
         dist.barrier()
 
@@ -758,6 +947,7 @@ def main(argv: list[str] | None = None) -> None:
         max_new_tokens=max_new_tokens,
         model=model,
     )
+    maybe_print(rank, f"Seeds: run_seed={seed} data_seed={data_seed} deterministic={seed_info['deterministic_algorithms_enabled']}")
     if args.debug_overfit_samples is not None:
         maybe_print(rank, f"Debug overfit mode: using {args.debug_overfit_samples} samples for {train_config['max_steps']} steps.")
     maybe_print(
@@ -779,10 +969,31 @@ def main(argv: list[str] | None = None) -> None:
         eval_path = None
     eval_strategy = str(train_config.get("eval_strategy", "epoch")).lower()
     save_strategy = str(train_config.get("save_strategy", "steps")).lower()
+    save_final_only = bool(train_config.get("save_final_only", True))
     save_every = int(train_config.get("save_every", 500))
     eval_steps = int(train_config.get("eval_steps", save_every))
     log_every = int(train_config.get("log_every", 10))
-    maybe_print(rank, f"SFT eval_strategy={eval_strategy} | save_strategy={save_strategy}")
+    maybe_print(rank, f"SFT eval_strategy={eval_strategy} | save_strategy={save_strategy} | save_final_only={save_final_only}")
+    if rank == 0:
+        write_sft_run_config(
+            output_dir=output_dir,
+            args=args,
+            config=config,
+            train_config=train_config,
+            sft_config=sft_config,
+            run_config=run_config,
+            generation_config=generation_config,
+            checkpoint=checkpoint,
+            data_path=str(data_path),
+            eval_path=str(eval_path) if eval_path else None,
+            model=model,
+            tokenizer=tokenizer,
+            world_size=world_size,
+            local_rank=local_rank,
+            seed_info={**seed_info, "data_seed": data_seed, "base_seed": seed},
+            max_seq_length=max_seq_length,
+            max_new_tokens=max_new_tokens,
+        )
 
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -889,9 +1100,13 @@ def main(argv: list[str] | None = None) -> None:
         epoch_boundary = step % optimizer_steps_per_epoch == 0
         final_step = step == int(train_config["max_steps"])
         should_save = (
-            (save_strategy == "epoch" and epoch_boundary)
-            or (save_strategy == "steps" and step % save_every == 0)
-            or final_step
+            final_step
+            if save_final_only
+            else (
+                (save_strategy == "epoch" and epoch_boundary)
+                or (save_strategy == "steps" and step % save_every == 0)
+                or final_step
+            )
         )
         should_eval = bool(
             eval_path
@@ -926,9 +1141,9 @@ def main(argv: list[str] | None = None) -> None:
                     tokenizer=tokenizer,
                     output_dir=output_dir,
                     step=step,
-                    keep_last=int(train_config.get("save_total_limit", 2)),
                     pruning_masks=pruning_masks,
                     pruning_mask_source=str(pruning_mask_path) if pruning_mask_path else None,
+                    checkpoint_name="final" if save_final_only or final_step else f"step-{step:06d}",
                 )
             if is_dist():
                 dist.barrier()

@@ -56,12 +56,15 @@ def as_path(value: Any) -> Path:
 
 
 def latest_checkpoint(output_dir: Path) -> Path:
+    final = output_dir / "final"
+    if final.exists():
+        return final
     latest = output_dir / "latest"
     if latest.exists():
         return latest
     checkpoints = sorted([path for path in output_dir.glob("step-*") if path.is_dir()], key=lambda path: path.name)
     if not checkpoints:
-        raise FileNotFoundError(f"No latest or step-* checkpoint found in {output_dir}")
+        raise FileNotFoundError(f"No final, latest, or step-* checkpoint found in {output_dir}")
     return checkpoints[-1]
 
 
@@ -400,7 +403,7 @@ def main() -> None:
                     env=env,
                     dry_run=args.dry_run,
                 )
-                retuned_checkpoint = latest_checkpoint(retuned_dir) if not args.dry_run else retuned_dir / "latest"
+                retuned_checkpoint = latest_checkpoint(retuned_dir) if not args.dry_run else retuned_dir / "final"
                 run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
                 retuned_report = retuned_checkpoint / "pruning_report.json"
                 if args.dry_run or not retuned_report.exists():

@@ -184,7 +184,7 @@ python scripts/eval_prompt_response.py \
   --dtype bf16
 ```
 
-The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy. The default `--comparison-mode command` strips chat markers/EOS/pad tokens, then compares a conservative smart-home command form so style-only variants can match while wrong device, room, mode, direction, timer, or on/off actions still fail. Use `--comparison-mode normalized` for stricter cleaned-text equality, or `--no-exact-match` when you want loss/perplexity without generation.
+The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports whitespace-insensitive exact-match accuracy with `--comparison-mode whitespace`. Use `--comparison-mode normalized` for light formatting cleanup, `--comparison-mode command` only when intentionally measuring semantic smart-home command equivalence, or `--no-exact-match` when you want loss/perplexity without generation.
 
 For large eval files on your 8x H20 machine, shard generation across all GPUs:
 
@@ -203,6 +203,15 @@ torchrun --standalone --nproc_per_node=8 scripts/eval_prompt_response.py \
 ```
 
 With `--benchmark-runs 5`, rank 0 writes `run_01` through `run_05` prediction folders plus `prompt_response_eval_benchmark_summary.json`, including mean ± sample std for loss, perplexity, exact-match accuracy, generated length, and eval wall time.
+
+For audit-safe comparisons, eval now writes a unique timestamped child folder under `--output-dir` plus `run_config.json`, `split_audit.json`, `metrics.json`, `prediction_debug.csv`, and `prompt_response_eval_predictions.jsonl`. Compare two runs with:
+
+```bash
+python scripts/compare_predictions.py \
+  /path/to/old/prompt_response_eval_predictions.jsonl \
+  /path/to/new/prompt_response_eval_predictions.jsonl \
+  --output-json runs/eval/compare_predictions.json
+```
 
 For local SFT/fine-tuning with your chosen model and dataset paths:
 
@@ -243,9 +252,9 @@ Equivalent one-line launch:
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/train.py --config configs/sft_0p2b_8gpu.yaml
 ```
 
-The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using `output_dir/latest`. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`. Set `benchmark_runs` in `configs/sft_0p2b_8gpu.yaml`, or override once with `SFT_BENCHMARK_RUNS=3 ./run_sft_8gpu.sh`.
+The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using exactly `output_dir/final`, the checkpoint written by the run that just completed. It does not fall back to `latest` or `step-*`, so stale SFT checkpoints cannot be evaluated by accident. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`. Set `benchmark_runs` in `configs/sft_0p2b_8gpu.yaml`, or override once with `SFT_BENCHMARK_RUNS=3 ./run_sft_8gpu.sh`.
 
-Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_total_limit=2`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
+Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_final_only=true`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
 
 ## Train A 0.2B-ish Model
 
@@ -554,7 +563,7 @@ python scripts/eval_prompt_response.py \
   --max-new-tokens 64
 ```
 
-This writes `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`. By default `--comparison-mode command` compares a conservative canonical smart-home command form, so wording variants such as `灯已开启` and `已打开灯` can count as the same command while device, room, direction, mode, timer, and on/off differences still fail. Add `--benchmark-runs 5` to repeat the full eval five times and write a mean ± std benchmark summary.
+This writes `prompt_response_eval_summary.json`, `metrics.json`, `split_audit.json`, `prediction_debug.csv`, and `prompt_response_eval_predictions.jsonl`. By default `--comparison-mode whitespace` is the strict whitespace-insensitive exact-match metric. Use `--comparison-mode command` only when you intentionally want conservative smart-home semantic equivalence. Add `--benchmark-runs 5` to repeat the full eval five times and write a mean ± std benchmark summary.
 
 ## SFT And Contrastive SFT
 
@@ -817,9 +826,9 @@ git pull origin main
 
 ## Checkpoints
 
-Checkpoints are written under `run.output_dir` as `step-000000/` directories. The trainer keeps only the newest `train.save_total_limit` checkpoint directories, which is set to `3` in the checked-in configs. Each retained checkpoint contains the model safetensors, tokenizer files, config, and `trainer_state.pt`.
+SFT checkpoints are written once under `run.output_dir/final/`. Before a new SFT starts, old `step-*`, `latest`, and `final` SFT checkpoint folders in that output directory are removed so the final eval cannot accidentally load a stale model. The final folder contains the model safetensors, tokenizer files, config, `trainer_state.pt`, and `checkpoint_manifest.json`; `run.output_dir/final_checkpoint.json` records the exact checkpoint path used for eval.
 
-`latest` is updated to point at the newest checkpoint for convenient generation and resume experiments. On normal Linux training machines this is a symlink, so it does not duplicate another full `model.safetensors` file.
+Pretraining checkpoints are still step-based under `run.output_dir` because long pretraining runs need resume and crash recovery.
 
 The trainer also handles stoppage:
 

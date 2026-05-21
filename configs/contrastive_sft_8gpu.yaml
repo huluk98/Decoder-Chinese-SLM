@@ -40,6 +40,7 @@ train:
   persistent_workers: true
   log_every: 10
   save_every: 250
-  save_total_limit: 3
-  save_strategy: steps
+  save_total_limit: 1
+  save_strategy: final
+  save_final_only: true
   eval_strategy: none

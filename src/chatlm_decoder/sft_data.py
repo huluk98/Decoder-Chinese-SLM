@@ -335,15 +335,18 @@ def build_sft_dataloader(
     drop_last: bool = False,
     rank: int = 0,
     world_size: int = 1,
+    seed: int = 42,
 ) -> DataLoader:
     dataset_cls = ContrastiveSFTDataset if contrastive else SFTDataset
     dataset = dataset_cls(path, max_samples=max_samples, group_by_length=group_by_length)
     collate = contrastive_sft_collate if contrastive else sft_collate
     sampler = (
-        DistributedSampler(dataset, num_replicas=int(world_size), rank=int(rank), shuffle=bool(shuffle))
+        DistributedSampler(dataset, num_replicas=int(world_size), rank=int(rank), shuffle=bool(shuffle), seed=int(seed))
         if int(world_size) > 1
         else None
     )
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
     return DataLoader(
         dataset,
         batch_size=int(batch_size),
@@ -353,5 +356,6 @@ def build_sft_dataloader(
         pin_memory=bool(pin_memory),
         persistent_workers=bool(persistent_workers) and int(num_workers) > 0,
         drop_last=bool(drop_last),
+        generator=generator,
         collate_fn=lambda features: collate(features, tokenizer, int(max_length)),
     )
