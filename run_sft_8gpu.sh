@@ -11,6 +11,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
 CONFIG_PATH="${CONFIG_PATH:-configs/sft_0p2b_8gpu.yaml}"
+SFT_BENCHMARK_RUNS="${SFT_BENCHMARK_RUNS:-}"
 
 torchrun --standalone --nproc_per_node=8 scripts/train.py \
   --config "${CONFIG_PATH}"
@@ -52,6 +53,7 @@ eval_batch_size = int(config.get("per_device_eval_batch_size") or config.get("tr
 bf16 = bool(config.get("bf16", True))
 fp16 = bool(config.get("fp16", False))
 dtype = "bf16" if bf16 else ("fp16" if fp16 else "fp32")
+benchmark_runs = int(config.get("benchmark_runs") or config.get("eval", {}).get("benchmark_runs") or 5)
 
 print(output_dir)
 print(eval_path or "")
@@ -59,6 +61,7 @@ print(model_path or "")
 print(max_new_tokens)
 print(eval_batch_size)
 print(dtype)
+print(benchmark_runs)
 PY
 )
 
@@ -68,6 +71,8 @@ MODEL_PATH="${SFT_EVAL_VALUES[2]}"
 MAX_NEW_TOKENS="${SFT_EVAL_VALUES[3]}"
 EVAL_BATCH_SIZE="${SFT_EVAL_VALUES[4]}"
 EVAL_DTYPE="${SFT_EVAL_VALUES[5]}"
+CONFIG_BENCHMARK_RUNS="${SFT_EVAL_VALUES[6]}"
+SFT_BENCHMARK_RUNS="${SFT_BENCHMARK_RUNS:-${CONFIG_BENCHMARK_RUNS}}"
 
 if [[ -n "${EVAL_FILE}" && -f "${EVAL_FILE}" ]]; then
   if [[ -z "${MODEL_PATH}" || ! -d "${MODEL_PATH}" ]]; then
@@ -76,17 +81,18 @@ if [[ -n "${EVAL_FILE}" && -f "${EVAL_FILE}" ]]; then
     echo "Check your output_dir in ${CONFIG_PATH}: ${OUTPUT_DIR}"
     exit 1
   fi
-  echo "SFT training finished. Running final 8-GPU exact-match eval on: ${EVAL_FILE}"
+  echo "SFT training finished. Running final 8-GPU exact-match benchmark (${SFT_BENCHMARK_RUNS} runs) on: ${EVAL_FILE}"
   echo "Using model checkpoint: ${MODEL_PATH}"
   torchrun --standalone --nproc_per_node=8 scripts/eval_prompt_response.py \
     --model-path "${MODEL_PATH}" \
     --dataset-file "${EVAL_FILE}" \
-    --output-dir "${OUTPUT_DIR}/eval/final_prompt_response" \
+    --output-dir "${OUTPUT_DIR}/eval/final_prompt_response_benchmark" \
     --max-new-tokens "${MAX_NEW_TOKENS}" \
     --temperature 0 \
     --num-beams 1 \
     --batch-size "${EVAL_BATCH_SIZE}" \
-    --dtype "${EVAL_DTYPE}"
+    --dtype "${EVAL_DTYPE}" \
+    --benchmark-runs "${SFT_BENCHMARK_RUNS}"
 else
   echo "SFT training finished. Skipping final eval because no eval_file/train_file exists in ${CONFIG_PATH}."
 fi

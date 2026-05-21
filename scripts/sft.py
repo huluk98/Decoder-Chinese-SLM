@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import sys
 import time
 from contextlib import nullcontext
@@ -24,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
+from chatlm_decoder.command_eval import canonicalize_command_response
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
 
 
@@ -194,6 +196,8 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         sft_config["max_length"] = 128
     if "max_new_tokens" in config:
         generation_config["max_new_tokens"] = int(config["max_new_tokens"])
+    if "benchmark_runs" in config:
+        sft_config["benchmark_runs"] = int(config["benchmark_runs"])
 
     mapping = {
         "num_train_epochs": "epochs",
@@ -382,6 +386,15 @@ def normalize_for_exact_match(text: str) -> str:
     return text.strip()
 
 
+def mean_std(values: list[float]) -> tuple[float, float]:
+    finite_values = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite_values:
+        return math.nan, math.nan
+    if len(finite_values) == 1:
+        return finite_values[0], 0.0
+    return statistics.mean(finite_values), statistics.stdev(finite_values)
+
+
 def should_run_eval(eval_strategy: str, step: int, eval_steps: int, epoch_boundary: bool, final_step: bool) -> bool:
     strategy = str(eval_strategy).lower()
     if strategy in {"no", "none", "false", "off"}:
@@ -405,6 +418,7 @@ def evaluate_exact_match(
     output_dir: Path,
     step: int,
     max_samples: int | None = None,
+    benchmark_runs: int = 1,
 ) -> dict[str, Any] | None:
     if not eval_path:
         return None
@@ -417,65 +431,88 @@ def evaluate_exact_match(
     eval_model = unwrap_model(model)
     was_training = eval_model.training
     eval_model.eval()
-    correct = 0
-    generated_lengths: list[int] = []
-    examples: list[dict[str, str]] = []
-    with torch.no_grad():
-        for index, record in enumerate(records):
-            prompt, target_response = normalize_sft_record(record)
-            encoded = tokenizer(
-                prompt,
-                return_tensors="pt",
-                add_special_tokens=False,
-                truncation=True,
-                max_length=int(max_seq_length),
-            )
-            encoded = {key: value.to(device) for key, value in encoded.items()}
-            generated = eval_model.generate(
-                **encoded,
-                max_new_tokens=int(max_new_tokens),
-                do_sample=False,
-                num_beams=1,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-            continuation = generated[0, encoded["input_ids"].shape[1] :]
-            generated_lengths.append(int(continuation.numel()))
-            prediction = tokenizer.decode(continuation.detach().cpu().tolist(), skip_special_tokens=False)
-            normalized_prediction = normalize_for_exact_match(prediction)
-            normalized_target = normalize_for_exact_match(target_response)
-            correct += int(normalized_prediction == normalized_target)
-            if index < 5:
-                examples.append(
-                    {
-                        "prompt": prompt,
-                        "prediction": normalized_prediction,
-                        "target": normalized_target,
-                    }
+    run_metrics: list[dict[str, Any]] = []
+    benchmark_runs = max(1, int(benchmark_runs))
+    for run_index in range(benchmark_runs):
+        correct = 0
+        generated_lengths: list[int] = []
+        examples: list[dict[str, str]] = []
+        with torch.no_grad():
+            for index, record in enumerate(records):
+                prompt, target_response = normalize_sft_record(record)
+                encoded = tokenizer(
+                    prompt,
+                    return_tensors="pt",
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=int(max_seq_length),
                 )
+                encoded = {key: value.to(device) for key, value in encoded.items()}
+                generated = eval_model.generate(
+                    **encoded,
+                    max_new_tokens=int(max_new_tokens),
+                    do_sample=False,
+                    num_beams=1,
+                    eos_token_id=tokenizer.eos_token_id,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+                continuation = generated[0, encoded["input_ids"].shape[1] :]
+                generated_lengths.append(int(continuation.numel()))
+                prediction = tokenizer.decode(continuation.detach().cpu().tolist(), skip_special_tokens=False)
+                normalized_prediction = canonicalize_command_response(normalize_for_exact_match(prediction))
+                normalized_target = canonicalize_command_response(normalize_for_exact_match(target_response))
+                correct += int(normalized_prediction == normalized_target)
+                if index < 5:
+                    examples.append(
+                        {
+                            "prompt": prompt,
+                            "prediction": normalized_prediction,
+                            "target": normalized_target,
+                        }
+                    )
+        avg_generated_tokens = sum(generated_lengths) / max(1, len(generated_lengths))
+        run_metrics.append(
+            {
+                "benchmark_run": run_index + 1,
+                "exact_match": correct / len(records),
+                "correct": correct,
+                "avg_generated_tokens": avg_generated_tokens,
+                "examples": examples,
+            }
+        )
     if was_training:
         eval_model.train()
 
     total = len(records)
-    avg_generated_tokens = sum(generated_lengths) / max(1, len(generated_lengths))
+    exact_mean, exact_std = mean_std([float(run["exact_match"]) for run in run_metrics])
+    length_mean, length_std = mean_std([float(run["avg_generated_tokens"]) for run in run_metrics])
+    correct_mean, correct_std = mean_std([float(run["correct"]) for run in run_metrics])
     metrics = {
         "step": int(step),
         "eval_file": str(eval_path),
         "num_examples": total,
-        "exact_match": correct / total,
-        "correct": correct,
-        "avg_generated_tokens": avg_generated_tokens,
+        "benchmark_runs": benchmark_runs,
+        "exact_match": exact_mean,
+        "exact_match_mean": exact_mean,
+        "exact_match_std": exact_std,
+        "correct_mean": correct_mean,
+        "correct_std": correct_std,
+        "avg_generated_tokens": length_mean,
+        "avg_generated_tokens_mean": length_mean,
+        "avg_generated_tokens_std": length_std,
         "max_new_tokens": int(max_new_tokens),
-        "examples": examples,
+        "per_run_summaries": run_metrics,
+        "examples": run_metrics[-1]["examples"] if run_metrics else [],
     }
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / f"eval_step_{step:06d}.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, ensure_ascii=False, indent=2)
     print(
-        f"Eval exact_match={metrics['exact_match']:.4f} "
-        f"({correct}/{total}) | avg_generated_tokens={avg_generated_tokens:.2f}"
+        f"Eval exact_match={metrics['exact_match_mean']:.4f} ± {metrics['exact_match_std']:.4f} "
+        f"| avg_generated_tokens={metrics['avg_generated_tokens_mean']:.2f} ± "
+        f"{metrics['avg_generated_tokens_std']:.2f} | runs={benchmark_runs}"
     )
-    if avg_generated_tokens >= 0.9 * int(max_new_tokens):
+    if length_mean >= 0.9 * int(max_new_tokens):
         print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
     return metrics
 
@@ -498,6 +535,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--per_device_train_batch_size", type=int, default=None)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--max_seq_length", "--max-seq-length", type=int, default=None)
+    parser.add_argument("--benchmark-runs", "--benchmark_runs", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -512,6 +550,8 @@ def main(argv: list[str] | None = None) -> None:
         train_config["grad_accum_steps"] = int(args.gradient_accumulation_steps)
     if args.max_seq_length is not None:
         sft_config["max_length"] = int(args.max_seq_length)
+    if args.benchmark_runs is not None:
+        sft_config["benchmark_runs"] = int(args.benchmark_runs)
     if args.output_dir is not None:
         run_config["output_dir"] = args.output_dir
 
@@ -781,6 +821,7 @@ def main(argv: list[str] | None = None) -> None:
                     output_dir=output_dir,
                     step=step,
                     max_samples=sft_config.get("eval_max_samples"),
+                    benchmark_runs=int(sft_config.get("benchmark_runs", 1)),
                 )
                 model.train()
             if rank == 0 and should_save:

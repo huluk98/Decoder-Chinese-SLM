@@ -7,7 +7,9 @@ import json
 import math
 import os
 import re
+import statistics
 import sys
+import time
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from chatlm_decoder.command_eval import canonicalize_command_response
 from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
 
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
@@ -42,7 +45,6 @@ CHAT_MARKERS = (
 ZERO_WIDTH_PATTERN = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
 FENCE_PATTERN = re.compile(r"^\s*```(?:json|python|text|txt|bash|sh)?\s*|\s*```\s*$", re.IGNORECASE)
 TRAILING_STOP_PATTERN = re.compile(r"[\s。．.；;，,]+$")
-STRUCTURED_SPACE_PATTERN = re.compile(r"\s*([(),:=\[\]{}])\s*")
 QUOTE_TRANSLATION = str.maketrans(
     {
         "“": '"',
@@ -296,13 +298,6 @@ def strip_wrapping_quotes(text: str) -> str:
     return text
 
 
-def canonicalize_command_response(text: str) -> str:
-    text = normalize_for_exact_match(text)
-    text = STRUCTURED_SPACE_PATTERN.sub(r"\1", text)
-    text = text.replace('"', "'")
-    return text.strip()
-
-
 def mismatch_reason(generated: str, target: str) -> str:
     if generated == target:
         return "match"
@@ -313,6 +308,29 @@ def mismatch_reason(generated: str, target: str) -> str:
     if generated in target or target in generated:
         return "one_side_contains_the_other"
     return "different_text"
+
+
+def mean_std(values: list[float]) -> tuple[float, float]:
+    finite_values = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite_values:
+        return math.nan, math.nan
+    if len(finite_values) == 1:
+        return finite_values[0], 0.0
+    return statistics.mean(finite_values), statistics.stdev(finite_values)
+
+
+def benchmark_metric_summary(run_summaries: list[dict[str, Any]], key: str) -> dict[str, float | str]:
+    values = [
+        float(summary[key])
+        for summary in run_summaries
+        if summary.get(key) is not None and math.isfinite(float(summary[key]))
+    ]
+    mean_value, std_value = mean_std(values)
+    return {
+        f"{key}_mean": mean_value,
+        f"{key}_std": std_value,
+        f"{key}_mean_pm_std": f"{mean_value:.6f} ± {std_value:.6f}",
+    }
 
 
 def main() -> None:
@@ -340,6 +358,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--num-beams", type=int, default=1)
+    parser.add_argument(
+        "--benchmark-runs",
+        type=int,
+        default=1,
+        help="Repeat full generation eval N times and report mean ± sample std across runs.",
+    )
     parser.add_argument(
         "--comparison-mode",
         choices=("normalized", "command"),
@@ -387,92 +411,163 @@ def main() -> None:
     examples = [tokenize_example(tokenizer, record, max_length=max_length) for record in records]
 
     output_dir = Path(args.output_dir or Path("runs") / "eval" / f"{dataset_path.stem}_prompt_response").expanduser()
+    benchmark_runs = max(1, int(args.benchmark_runs))
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         print(
             f"Prompt/response eval runtime: world_size={world_size} "
             f"rank={rank} local_rank={local_rank} device={device} "
-            f"total_examples={len(records)} shard_examples={(len(records) + world_size - 1 - rank) // world_size}"
+            f"total_examples={len(records)} shard_examples={(len(records) + world_size - 1 - rank) // world_size} "
+            f"benchmark_runs={benchmark_runs}"
         )
     if world_size > 1:
         dist.barrier()
 
-    total_loss_sum = 0.0
-    total_tokens = 0
-    exact_correct = 0
-    generated_token_lengths: list[int] = []
-    results: list[dict[str, Any]] = []
     batch_size = max(1, int(args.batch_size))
     indexed_examples = [(index, example) for index, example in enumerate(examples) if index % world_size == rank]
-    progress = tqdm(
-        range(0, len(indexed_examples), batch_size),
-        desc=f"prompt-response-eval-rank{rank}",
-        disable=(rank != 0),
-    )
-    for start in progress:
-        batch_pairs = indexed_examples[start : start + batch_size]
-        batch = [example for _, example in batch_pairs]
-        scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
-        for offset, score in enumerate(scores):
-            index = batch_pairs[offset][0]
-            token_count = int(score["token_count"])
-            loss_sum = float(score["loss_sum"])
-            total_tokens += token_count
-            total_loss_sum += loss_sum
-            result = {
-                "index": index,
-                "prompt": batch[offset]["prompt_text"],
-                "response": batch[offset]["response_text"],
-                "loss": score["loss"],
-                "perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
-                "response_token_count": token_count,
-            }
-            if bool(args.exact_match) or index < int(args.generate_samples):
-                generated, generated_token_count = generate_completion(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt_text=batch[offset]["prompt_text"],
-                    device=device,
-                    max_new_tokens=int(args.max_new_tokens),
-                    temperature=float(args.temperature),
-                    top_p=float(args.top_p),
-                    num_beams=int(args.num_beams),
-                )
-                normalized_generated = normalize_for_exact_match(generated, tokenizer=tokenizer)
-                normalized_target = normalize_for_exact_match(batch[offset]["response_text"], tokenizer=tokenizer)
-                if args.comparison_mode == "command":
-                    comparison_generated = canonicalize_command_response(normalized_generated)
-                    comparison_target = canonicalize_command_response(normalized_target)
-                else:
-                    comparison_generated = normalized_generated
-                    comparison_target = normalized_target
-                result["generated"] = generated
-                result["normalized_generated"] = normalized_generated
-                result["normalized_target"] = normalized_target
-                result["comparison_generated"] = comparison_generated
-                result["comparison_target"] = comparison_target
-                result["comparison_mode"] = args.comparison_mode
-                result["generated_token_count"] = generated_token_count
-                if bool(args.exact_match):
-                    is_exact = comparison_generated == comparison_target
-                    exact_correct += int(is_exact)
-                    generated_token_lengths.append(generated_token_count)
-                    result["exact_match"] = is_exact
-                    result["mismatch_reason"] = mismatch_reason(comparison_generated, comparison_target)
-            results.append(result)
+    run_summaries: list[dict[str, Any]] = []
 
-    local_payload = {
-        "total_loss_sum": total_loss_sum,
-        "total_tokens": total_tokens,
-        "exact_correct": exact_correct,
-        "generated_token_lengths": generated_token_lengths,
-        "results": results,
-    }
-    if world_size > 1:
-        gathered: list[dict[str, Any] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
-        dist.gather_object(local_payload, gathered, dst=0)
-    else:
-        gathered = [local_payload]
+    for run_index in range(benchmark_runs):
+        run_start = time.perf_counter()
+        total_loss_sum = 0.0
+        total_tokens = 0
+        exact_correct = 0
+        generated_token_lengths: list[int] = []
+        results: list[dict[str, Any]] = []
+        progress = tqdm(
+            range(0, len(indexed_examples), batch_size),
+            desc=f"prompt-response-eval-run{run_index + 1:02d}-rank{rank}",
+            disable=(rank != 0),
+        )
+        for start in progress:
+            batch_pairs = indexed_examples[start : start + batch_size]
+            batch = [example for _, example in batch_pairs]
+            scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
+            for offset, score in enumerate(scores):
+                index = batch_pairs[offset][0]
+                token_count = int(score["token_count"])
+                loss_sum = float(score["loss_sum"])
+                total_tokens += token_count
+                total_loss_sum += loss_sum
+                result = {
+                    "benchmark_run": run_index + 1,
+                    "index": index,
+                    "prompt": batch[offset]["prompt_text"],
+                    "response": batch[offset]["response_text"],
+                    "loss": score["loss"],
+                    "perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
+                    "response_token_count": token_count,
+                }
+                if bool(args.exact_match) or index < int(args.generate_samples):
+                    generated, generated_token_count = generate_completion(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt_text=batch[offset]["prompt_text"],
+                        device=device,
+                        max_new_tokens=int(args.max_new_tokens),
+                        temperature=float(args.temperature),
+                        top_p=float(args.top_p),
+                        num_beams=int(args.num_beams),
+                    )
+                    normalized_generated = normalize_for_exact_match(generated, tokenizer=tokenizer)
+                    normalized_target = normalize_for_exact_match(batch[offset]["response_text"], tokenizer=tokenizer)
+                    if args.comparison_mode == "command":
+                        comparison_generated = canonicalize_command_response(normalized_generated)
+                        comparison_target = canonicalize_command_response(normalized_target)
+                    else:
+                        comparison_generated = normalized_generated
+                        comparison_target = normalized_target
+                    result["generated"] = generated
+                    result["normalized_generated"] = normalized_generated
+                    result["normalized_target"] = normalized_target
+                    result["comparison_generated"] = comparison_generated
+                    result["comparison_target"] = comparison_target
+                    result["comparison_mode"] = args.comparison_mode
+                    result["generated_token_count"] = generated_token_count
+                    if bool(args.exact_match):
+                        is_exact = comparison_generated == comparison_target
+                        exact_correct += int(is_exact)
+                        generated_token_lengths.append(generated_token_count)
+                        result["exact_match"] = is_exact
+                        result["mismatch_reason"] = mismatch_reason(comparison_generated, comparison_target)
+                results.append(result)
+
+        local_payload = {
+            "total_loss_sum": total_loss_sum,
+            "total_tokens": total_tokens,
+            "exact_correct": exact_correct,
+            "generated_token_lengths": generated_token_lengths,
+            "results": results,
+        }
+        if world_size > 1:
+            gathered: list[dict[str, Any] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
+            dist.gather_object(local_payload, gathered, dst=0)
+        else:
+            gathered = [local_payload]
+
+        if rank != 0:
+            continue
+
+        payloads = [payload for payload in gathered or [] if payload is not None]
+        total_loss_sum = sum(float(payload["total_loss_sum"]) for payload in payloads)
+        total_tokens = sum(int(payload["total_tokens"]) for payload in payloads)
+        exact_correct = sum(int(payload["exact_correct"]) for payload in payloads)
+        generated_token_lengths = [
+            int(length)
+            for payload in payloads
+            for length in payload["generated_token_lengths"]
+        ]
+        results = sorted(
+            [result for payload in payloads for result in payload["results"]],
+            key=lambda row: int(row["index"]),
+        )
+
+        mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
+        avg_generated_tokens = (
+            sum(generated_token_lengths) / len(generated_token_lengths) if generated_token_lengths else math.nan
+        )
+        summary = {
+            "benchmark_run": run_index + 1,
+            "benchmark_runs": benchmark_runs,
+            "checkpoint": args.checkpoint,
+            "dataset_file": str(dataset_path),
+            "total_examples": len(records),
+            "response_tokens": total_tokens,
+            "mean_response_loss": mean_loss,
+            "response_perplexity": math.exp(mean_loss) if total_tokens else math.nan,
+            "exact_match_accuracy": exact_correct / len(records) if args.exact_match and records else None,
+            "exact_match_correct": exact_correct if args.exact_match else None,
+            "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
+            "max_new_tokens": int(args.max_new_tokens),
+            "comparison_mode": args.comparison_mode if args.exact_match else None,
+            "max_length": max_length,
+            "batch_size": batch_size,
+            "eval_wall_seconds": time.perf_counter() - run_start,
+        }
+        run_summaries.append(summary)
+
+        run_output_dir = output_dir if benchmark_runs == 1 else output_dir / f"run_{run_index + 1:02d}"
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        with (run_output_dir / "prompt_response_eval_summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(summary, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        with (run_output_dir / "prompt_response_eval_predictions.jsonl").open("w", encoding="utf-8") as handle:
+            for result in results:
+                handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+
+        print(
+            f"[run {run_index + 1}/{benchmark_runs}] Prompt/response eval loss={summary['mean_response_loss']:.4f} "
+            f"ppl={summary['response_perplexity']:.4f} "
+            f"examples={summary['total_examples']} tokens={summary['response_tokens']}"
+        )
+        if args.exact_match:
+            print(
+                f"[run {run_index + 1}/{benchmark_runs}] Exact-match accuracy={summary['exact_match_accuracy']:.4f} "
+                f"({summary['exact_match_correct']}/{summary['total_examples']}) "
+                f"avg_generated_tokens={summary['avg_generated_tokens']:.2f}"
+            )
+            if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
+                print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
 
     if rank != 0:
         if world_size > 1:
@@ -480,61 +575,50 @@ def main() -> None:
             dist.destroy_process_group()
         return
 
-    payloads = [payload for payload in gathered or [] if payload is not None]
-    total_loss_sum = sum(float(payload["total_loss_sum"]) for payload in payloads)
-    total_tokens = sum(int(payload["total_tokens"]) for payload in payloads)
-    exact_correct = sum(int(payload["exact_correct"]) for payload in payloads)
-    generated_token_lengths = [
-        int(length)
-        for payload in payloads
-        for length in payload["generated_token_lengths"]
-    ]
-    results = sorted(
-        [result for payload in payloads for result in payload["results"]],
-        key=lambda row: int(row["index"]),
-    )
+    if benchmark_runs > 1:
+        benchmark_summary: dict[str, Any] = {
+            "checkpoint": args.checkpoint,
+            "dataset_file": str(dataset_path),
+            "benchmark_runs": benchmark_runs,
+            "total_examples": len(records),
+            "max_new_tokens": int(args.max_new_tokens),
+            "comparison_mode": args.comparison_mode if args.exact_match else None,
+            "max_length": max_length,
+            "batch_size": batch_size,
+            "per_run_summaries": run_summaries,
+        }
+        for key in ("mean_response_loss", "response_perplexity", "avg_generated_tokens", "eval_wall_seconds"):
+            benchmark_summary.update(benchmark_metric_summary(run_summaries, key))
+        if args.exact_match:
+            benchmark_summary.update(benchmark_metric_summary(run_summaries, "exact_match_accuracy"))
+            correct_values = [
+                float(summary["exact_match_correct"])
+                for summary in run_summaries
+                if summary.get("exact_match_correct") is not None
+            ]
+            correct_mean, correct_std = mean_std(correct_values)
+            benchmark_summary["exact_match_correct_mean"] = correct_mean
+            benchmark_summary["exact_match_correct_std"] = correct_std
 
-    mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
-    avg_generated_tokens = (
-        sum(generated_token_lengths) / len(generated_token_lengths) if generated_token_lengths else math.nan
-    )
-    summary = {
-        "checkpoint": args.checkpoint,
-        "dataset_file": str(dataset_path),
-        "total_examples": len(records),
-        "response_tokens": total_tokens,
-        "mean_response_loss": mean_loss,
-        "response_perplexity": math.exp(mean_loss) if total_tokens else math.nan,
-        "exact_match_accuracy": exact_correct / len(records) if args.exact_match and records else None,
-        "exact_match_correct": exact_correct if args.exact_match else None,
-        "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
-        "max_new_tokens": int(args.max_new_tokens),
-        "comparison_mode": args.comparison_mode if args.exact_match else None,
-        "max_length": max_length,
-        "batch_size": batch_size,
-    }
+        with (output_dir / "prompt_response_eval_benchmark_summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(benchmark_summary, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        with (output_dir / "prompt_response_eval_summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(benchmark_summary, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
 
-    with (output_dir / "prompt_response_eval_summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
-    with (output_dir / "prompt_response_eval_predictions.jsonl").open("w", encoding="utf-8") as handle:
-        for result in results:
-            handle.write(json.dumps(result, ensure_ascii=False) + "\n")
-
-    print(
-        f"Prompt/response eval loss={summary['mean_response_loss']:.4f} "
-        f"ppl={summary['response_perplexity']:.4f} "
-        f"examples={summary['total_examples']} tokens={summary['response_tokens']}"
-    )
-    if args.exact_match:
         print(
-            f"Exact-match accuracy={summary['exact_match_accuracy']:.4f} "
-            f"({summary['exact_match_correct']}/{summary['total_examples']}) "
-            f"avg_generated_tokens={summary['avg_generated_tokens']:.2f}"
+            "Prompt/response benchmark summary:\n"
+            f"  loss={benchmark_summary['mean_response_loss_mean_pm_std']}\n"
+            f"  ppl={benchmark_summary['response_perplexity_mean_pm_std']}\n"
+            f"  avg_generated_tokens={benchmark_summary['avg_generated_tokens_mean_pm_std']}"
         )
-        if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
-            print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
-    print(f"Wrote results to {output_dir}")
+        if args.exact_match:
+            print(f"  exact_match_accuracy={benchmark_summary['exact_match_accuracy_mean_pm_std']}")
+        print(f"Wrote benchmark results to {output_dir}")
+    else:
+        print(f"Wrote results to {output_dir}")
+
     if world_size > 1:
         dist.barrier()
         dist.destroy_process_group()

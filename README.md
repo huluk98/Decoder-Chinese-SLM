@@ -184,7 +184,7 @@ python scripts/eval_prompt_response.py \
   --dtype bf16
 ```
 
-The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy. The default `--comparison-mode command` strips chat markers, EOS/pad tokens, code fences, zero-width characters, wrapper quotes, harmless trailing punctuation, and canonicalizes quote style plus spaces around command punctuation before comparing. Use `--comparison-mode normalized` for stricter cleaned-text equality, or `--no-exact-match` when you want loss/perplexity without generation.
+The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports exact-match accuracy. The default `--comparison-mode command` strips chat markers/EOS/pad tokens, then compares a conservative smart-home command form so style-only variants can match while wrong device, room, mode, direction, timer, or on/off actions still fail. Use `--comparison-mode normalized` for stricter cleaned-text equality, or `--no-exact-match` when you want loss/perplexity without generation.
 
 For large eval files on your 8x H20 machine, shard generation across all GPUs:
 
@@ -198,10 +198,11 @@ torchrun --standalone --nproc_per_node=8 scripts/eval_prompt_response.py \
   --temperature 0 \
   --num-beams 1 \
   --batch-size 8 \
-  --dtype bf16
+  --dtype bf16 \
+  --benchmark-runs 5
 ```
 
-Rank 0 writes the combined `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`.
+With `--benchmark-runs 5`, rank 0 writes `run_01` through `run_05` prediction folders plus `prompt_response_eval_benchmark_summary.json`, including mean ± sample std for loss, perplexity, exact-match accuracy, generated length, and eval wall time.
 
 For local SFT/fine-tuning with your chosen model and dataset paths:
 
@@ -222,7 +223,7 @@ For structured smart-home command generation, use the dedicated short-output SFT
 2. Set `model_name_or_path` to the pretrained 0.2B checkpoint directory.
 3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows.
 
-The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. The 8-GPU launch script trains through the configured epochs first, then runs one final exact-match generation eval. It does not stop at every epoch for full-dataset validation.
+The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. The 8-GPU launch script trains through the configured epochs first, then runs a five-pass exact-match generation benchmark by default. It does not stop at every epoch for full-dataset validation.
 
 Debug overfit on one GPU first:
 
@@ -242,7 +243,7 @@ Equivalent one-line launch:
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/train.py --config configs/sft_0p2b_8gpu.yaml
 ```
 
-The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using `output_dir/latest`. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`.
+The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using `output_dir/latest`. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`. Set `benchmark_runs` in `configs/sft_0p2b_8gpu.yaml`, or override once with `SFT_BENCHMARK_RUNS=3 ./run_sft_8gpu.sh`.
 
 Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_total_limit=2`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
 
@@ -550,10 +551,10 @@ python scripts/eval_prompt_response.py \
   --model-path /absolute/path/to/model/checkpoint \
   --dataset-file /absolute/path/to/eval.json \
   --generate-samples 10 \
-  --max-new-tokens 256
+  --max-new-tokens 64
 ```
 
-This writes `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`.
+This writes `prompt_response_eval_summary.json` and `prompt_response_eval_predictions.jsonl`. By default `--comparison-mode command` compares a conservative canonical smart-home command form, so wording variants such as `灯已开启` and `已打开灯` can count as the same command while device, room, direction, mode, timer, and on/off differences still fail. Add `--benchmark-runs 5` to repeat the full eval five times and write a mean ± std benchmark summary.
 
 ## SFT And Contrastive SFT
 

@@ -5,6 +5,7 @@ output_dir: outputs/sft_0p2b_8gpu
 
 max_seq_length: 128
 max_new_tokens: 64
+benchmark_runs: 5
 
 num_train_epochs: 3
 learning_rate: 2.0e-5
