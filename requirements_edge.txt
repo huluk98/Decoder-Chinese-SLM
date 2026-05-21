@@ -1,0 +1,33 @@
+# Edge deployment Python requirements for Jetson Orin NX / aarch64.
+#
+# Jetson TensorRT, CUDA, cuDNN, and often the TensorRT Python bindings should
+# come from JetPack / NVIDIA apt repositories, not from generic x86 pip wheels.
+# Install the matching JetPack stack first, then install only the pure Python
+# and platform-available packages below.
+
+transformers>=4.48
+tokenizers>=0.19
+sentencepiece>=0.2
+numpy>=1.24,<2.0
+onnx>=1.16
+safetensors>=0.4.5
+
+# Optional on Jetson. NVIDIA does not publish every onnxruntime variant as a
+# standard aarch64 PyPI wheel. Install onnxruntime-gpu from an NVIDIA-provided
+# wheel when available; otherwise use ONNX checker/export without ORT compare.
+onnxruntime>=1.18; platform_machine != "aarch64"
+
+# TensorRT is normally installed by JetPack, for example:
+#   sudo apt install python3-libnvinfer python3-libnvinfer-dev
+# Do not rely on this PyPI package unless it matches your JetPack/TensorRT
+# repository and Python ABI exactly.
+# tensorrt>=10
+
+# cuda-python is used for TensorRT buffer allocation and INT8 calibration.
+# Install the version that matches the CUDA runtime bundled with JetPack.
+cuda-python>=12.2
+
+# Optional: only needed for best-effort INT4/AWQ weight-only quantization.
+# Use NVIDIA's supported package source for Jetson/TensorRT-LLM compatibility.
+# nvidia-modelopt>=0.19
+
