@@ -632,6 +632,30 @@ python scripts/sft.py \
   --checkpoint runs/sft-0p2b/latest
 ```
 
+For the 8x H20 workflow, edit only `configs/contrastive_sft_8gpu.yaml`:
+
+```yaml
+sft:
+  base_model: /absolute/path/to/base-or-sft-checkpoint
+  data_path: /absolute/path/to/contrastive_train.jsonl
+  eval_path: /absolute/path/to/eval.json
+  max_length: 128
+  alignment_weight: 0.1
+  margin: 0.5
+```
+
+Then run:
+
+```bash
+./run_contrastive_sft_8gpu.sh
+```
+
+The script uses all 8 visible GPUs, runs contrastive SFT, then evaluates `eval_path` with the same five-pass exact-match benchmark used by regular SFT. If `eval_path` is missing, it falls back to `data_path` for an overfit-style check. Override the config or benchmark count for one run with:
+
+```bash
+CONFIG_PATH=configs/contrastive_sft_8gpu.yaml CONTRASTIVE_BENCHMARK_RUNS=3 ./run_contrastive_sft_8gpu.sh
+```
+
 The contrastive objective follows the pictured semantic-alignment idea:
 
 ```text
@@ -639,6 +663,15 @@ loss = generation_loss + lambda * (distance(prompt, positive) + relu(margin - di
 ```
 
 The implementation uses mean-pooled last hidden states and cosine distance. `configs/contrastive_sft.yaml` controls `alignment_weight` and `margin`.
+
+For hyperparameter testing, start small. A good first screen is 6 runs:
+
+```text
+alignment_weight: 0.03, 0.1, 0.3
+margin:           0.3, 0.5
+```
+
+If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and the same three alignment weights. Avoid going much above `alignment_weight: 0.3` at first; if the contrastive term dominates, exact command generation can get worse even when representation alignment improves.
 
 ## 50% Pruning
 

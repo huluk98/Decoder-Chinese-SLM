@@ -1,0 +1,45 @@
+run:
+  seed: 42
+  output_dir: runs/contrastive-sft-0p2b-8gpu
+
+model:
+  block_size: 2048
+  gradient_checkpointing: false
+
+sft:
+  mode: contrastive
+  base_model: /path/to/sft-or-pretrained-checkpoint
+  data_path: /path/to/contrastive_train.jsonl
+  eval_path: /path/to/eval.json
+  max_length: 128
+  alignment_weight: 0.1
+  margin: 0.5
+  max_samples: null
+  benchmark_runs: 5
+
+generation:
+  max_new_tokens: 64
+  do_sample: false
+  num_beams: 1
+
+train:
+  batch_size: 8
+  grad_accum_steps: 2
+  max_steps: 1000
+  learning_rate: 0.00001
+  min_learning_rate: 0.000001
+  warmup_steps: 50
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.95
+  max_grad_norm: 1.0
+  precision: bf16
+  tf32: true
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  log_every: 10
+  save_every: 250
+  save_total_limit: 3
+  save_strategy: steps
+  eval_strategy: none
