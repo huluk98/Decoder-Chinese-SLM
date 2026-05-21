@@ -567,7 +567,7 @@ python scripts/sft.py \
   --epochs 3
 ```
 
-SFT files can be `.jsonl` or normal `.json`. Rows can use `prompt`/`response`, `prompt`/`responses`, `instruction`/`response`, `question`/`answer`, or similar fields:
+SFT files can be `.jsonl` or normal `.json`. Rows can use `prompt`/`response`, `anchor`/`response`, `prompt`/`responses`, `instruction`/`response`, `question`/`answer`, or similar fields:
 
 ```json
 {"prompt": "什么是边缘端中文小模型？", "response": "..."}
@@ -620,7 +620,7 @@ For ChatML/ShareGPT-style rows, the last assistant message is trained as the ans
 For contrastive SFT, each row also includes a positive semantic example and a negative example:
 
 ```json
-{"prompt": "...", "response": "...", "positive": "...", "negative": "..."}
+{"anchor": "...", "response": "...", "positive": "...", "negative": "..."}
 ```
 
 Run it with:

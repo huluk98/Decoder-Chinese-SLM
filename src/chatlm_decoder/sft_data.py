@@ -12,7 +12,7 @@ USER_TOKEN = "<|user|>"
 ASSISTANT_TOKEN = "<|assistant|>"
 SYSTEM_TOKEN = "<|system|>"
 EOS_TOKEN = "<|eos|>"
-PROMPT_FIELDS = ("prompt", "instruction", "question", "query", "input", "x")
+PROMPT_FIELDS = ("prompt", "anchor", "instruction", "question", "query", "input", "x")
 INPUT_FIELDS = ("input", "context", "source", "background")
 SYSTEM_FIELDS = ("system", "system_prompt")
 RESPONSE_FIELDS = ("response", "responses", "output", "answer", "completion", "target", "y")
@@ -128,7 +128,7 @@ def normalize_sft_record(record: dict[str, Any]) -> tuple[str, str]:
     system = _first_text(record, SYSTEM_FIELDS)
     instruction = _first_text(record, PROMPT_FIELDS)
     extra_input = ""
-    if "instruction" in record or "prompt" in record or "question" in record:
+    if any(field in record for field in ("instruction", "prompt", "question", "anchor")):
         extra_input = _first_text(record, INPUT_FIELDS)
     if extra_input and extra_input != instruction:
         instruction = f"{instruction}\n{extra_input}" if instruction else extra_input
