@@ -121,6 +121,7 @@ def save_checkpoint(
     step: int,
     keep_last: int,
     pruning_masks: dict[str, torch.Tensor] | None = None,
+    pruning_mask_source: str | None = None,
 ) -> None:
     checkpoint_dir = output_dir / f"step-{step:06d}"
     if checkpoint_dir.exists():
@@ -131,6 +132,7 @@ def save_checkpoint(
     torch.save({"step": step}, checkpoint_dir / "trainer_state.pt")
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
+        write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
     latest = output_dir / "latest"
     if latest.is_symlink() or latest.exists():
         if latest.is_dir() and not latest.is_symlink():
@@ -196,6 +198,59 @@ def trainable_parameter_count(model: torch.nn.Module) -> int:
 
 def count_all_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in unwrap_model(model).parameters())
+
+
+def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
+    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
+    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
+    return {
+        "mask_parameter_count": mask_parameter_count,
+        "active_mask_parameters": active_mask_parameters,
+        "pruned_mask_parameters": pruned_mask_parameters,
+        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
+        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
+    }
+
+
+def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
+    total_parameters = 0
+    nonzero_parameters = 0
+    for parameter in unwrap_model(model).parameters():
+        data = parameter.detach()
+        total_parameters += int(data.numel())
+        nonzero_parameters += int(torch.count_nonzero(data).item())
+    zero_parameters = total_parameters - nonzero_parameters
+    return {
+        "total_parameters": total_parameters,
+        "nonzero_parameters": nonzero_parameters,
+        "zero_parameters": zero_parameters,
+        "nonzero_fraction": nonzero_parameters / float(total_parameters or 1),
+        "model_zero_fraction": zero_parameters / float(total_parameters or 1),
+    }
+
+
+def write_pruning_report(
+    checkpoint_dir: Path,
+    model: torch.nn.Module,
+    pruning_masks: dict[str, torch.Tensor],
+    step: int,
+    pruning_mask_source: str | None = None,
+) -> None:
+    metadata = {
+        "method": "sft_retune_with_fixed_pruning_masks",
+        "phase": "retuned_sft",
+        "step": int(step),
+        "sparsity": mask_sparsity(pruning_masks),
+        "pruning_mask_source": pruning_mask_source or "",
+        "mask_preserved_during_sft": True,
+        **mask_parameter_stats(pruning_masks),
+        **model_parameter_stats(model),
+        "note": "SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
+    }
+    with (checkpoint_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
 
 
 def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -873,6 +928,7 @@ def main(argv: list[str] | None = None) -> None:
                     step=step,
                     keep_last=int(train_config.get("save_total_limit", 2)),
                     pruning_masks=pruning_masks,
+                    pruning_mask_source=str(pruning_mask_path) if pruning_mask_path else None,
                 )
             if is_dist():
                 dist.barrier()

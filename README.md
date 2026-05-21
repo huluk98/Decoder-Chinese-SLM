@@ -743,15 +743,15 @@ python scripts/run_pruning_benchmark.py --config configs/pruning_benchmark.yaml
 Outputs are grouped under `benchmark.output_dir`:
 
 ```text
-one_shot/<method>/
-retuned/<method>/
-benchmarks/one_shot/<method>/
-benchmarks/retuned/<method>/
+one_shot/<method>/               # 4 one-shot pruned checkpoints
+retuned/<method>/                # 4 SFT-retuned pruned checkpoints
+benchmarks/one_shot/<method>/    # 4 one-shot benchmark outputs
+benchmarks/retuned/<method>/     # 4 retuned benchmark outputs
 pruning_benchmark_summary.csv
 pruning_benchmark_summary.json
 ```
 
-The CSV includes mean and standard deviation for exact-match accuracy, loss, perplexity, and generated length. By default, each eval runs five benchmark passes.
+That gives 8 model outputs total and 8 benchmark output folders total. Each one-shot checkpoint writes its own `pruning_report.json`; each retuned checkpoint also writes a retuned `pruning_report.json` when the fixed pruning mask is saved. The CSV includes mean and standard deviation for exact-match accuracy, loss, perplexity, generated length, and active/nonzero parameter counts from those reports. By default, each eval runs three benchmark passes; set `benchmark.benchmark_runs` to change the ± sample size.
 
 ## Add More Public Sources
 

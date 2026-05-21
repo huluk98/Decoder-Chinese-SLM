@@ -141,6 +141,35 @@ def recovery_tune(
         apply_masks(model, masks)
 
 
+def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
+    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
+    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
+    return {
+        "mask_parameter_count": mask_parameter_count,
+        "active_mask_parameters": active_mask_parameters,
+        "pruned_mask_parameters": pruned_mask_parameters,
+        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
+        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
+    }
+
+
+def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
+    total_parameters = 0
+    nonzero_parameters = 0
+    for parameter in model.parameters():
+        total_parameters += int(parameter.numel())
+        nonzero_parameters += int(torch.count_nonzero(parameter.detach()).item())
+    zero_parameters = total_parameters - nonzero_parameters
+    return {
+        "total_parameters": total_parameters,
+        "nonzero_parameters": nonzero_parameters,
+        "zero_parameters": zero_parameters,
+        "nonzero_fraction": nonzero_parameters / float(total_parameters or 1),
+        "model_zero_fraction": zero_parameters / float(total_parameters or 1),
+    }
+
+
 def save_pruned_model(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -156,12 +185,16 @@ def save_pruned_model(
     tokenizer.save_pretrained(output_dir)
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
+    mask_stats = mask_parameter_stats(masks)
+    model_stats = model_parameter_stats(model)
     metadata = {
         "method": method,
         "sparsity": mask_sparsity(masks),
         "target_sparsity": float(prune_config.get("sparsity", 0.5)),
         "include_lm_head": bool(prune_config.get("include_lm_head", False)),
         "recovery_steps": int(prune_config.get("recovery_steps", 0)),
+        **mask_stats,
+        **model_stats,
         "note": (
             "2of4 produces an NVIDIA semi-structured 2:4 zero pattern in linear weights. "
             "Actual sparse Tensor Core speedups require an inference/training runtime that uses 2:4 kernels."

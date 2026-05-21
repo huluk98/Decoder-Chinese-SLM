@@ -170,7 +170,7 @@ def run_eval(
             "--dtype",
             str(benchmark.get("dtype", "bf16")),
             "--benchmark-runs",
-            str(int(benchmark.get("benchmark_runs", 5))),
+            str(int(benchmark.get("benchmark_runs", 3))),
         ],
         env=env,
         dry_run=dry_run,
@@ -230,6 +230,13 @@ def read_eval_summary(eval_dir: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+def read_pruning_report(report_path: Path | None) -> dict[str, Any]:
+    if report_path is None or not report_path.exists():
+        return {}
+    with report_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
 def metric(summary: dict[str, Any], name: str) -> Any:
     if f"{name}_mean" in summary:
         return summary.get(f"{name}_mean")
@@ -240,14 +247,33 @@ def metric_std(summary: dict[str, Any], name: str) -> Any:
     return summary.get(f"{name}_std")
 
 
-def summary_row(method: str, phase: str, checkpoint: Path, eval_dir: Path, status: str, error: str = "") -> dict[str, Any]:
+def summary_row(
+    method: str,
+    phase: str,
+    checkpoint: Path,
+    eval_dir: Path,
+    status: str,
+    error: str = "",
+    pruning_report_path: Path | None = None,
+) -> dict[str, Any]:
     summary = read_eval_summary(eval_dir) if status == "ok" else {}
+    pruning_report = read_pruning_report(pruning_report_path)
     return {
         "method": method,
         "phase": phase,
         "status": status,
         "checkpoint": str(checkpoint),
         "eval_dir": str(eval_dir),
+        "pruning_report": str(pruning_report_path or ""),
+        "mask_sparsity": pruning_report.get("mask_sparsity", pruning_report.get("sparsity")),
+        "mask_parameter_count": pruning_report.get("mask_parameter_count"),
+        "active_mask_parameters": pruning_report.get("active_mask_parameters"),
+        "pruned_mask_parameters": pruning_report.get("pruned_mask_parameters"),
+        "active_mask_fraction": pruning_report.get("active_mask_fraction"),
+        "total_parameters": pruning_report.get("total_parameters"),
+        "nonzero_parameters": pruning_report.get("nonzero_parameters"),
+        "zero_parameters": pruning_report.get("zero_parameters"),
+        "nonzero_fraction": pruning_report.get("nonzero_fraction"),
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
         "mean_response_loss_mean": metric(summary, "mean_response_loss"),
@@ -270,6 +296,16 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "status",
         "checkpoint",
         "eval_dir",
+        "pruning_report",
+        "mask_sparsity",
+        "mask_parameter_count",
+        "active_mask_parameters",
+        "pruned_mask_parameters",
+        "active_mask_fraction",
+        "total_parameters",
+        "nonzero_parameters",
+        "zero_parameters",
+        "nonzero_fraction",
         "exact_match_accuracy_mean",
         "exact_match_accuracy_std",
         "mean_response_loss_mean",
@@ -340,7 +376,16 @@ def main() -> None:
                 write_yaml(prune_config_path, prune_config)
                 run_prune(method, base_checkpoint, one_shot_dir, prune_config_path, env=env, dry_run=args.dry_run)
                 run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-                rows.append(summary_row(method, "one_shot", one_shot_dir, one_shot_eval_dir, "ok"))
+                rows.append(
+                    summary_row(
+                        method,
+                        "one_shot",
+                        one_shot_dir,
+                        one_shot_eval_dir,
+                        "ok",
+                        pruning_report_path=one_shot_dir / "pruning_report.json",
+                    )
+                )
 
             if bool(retune.get("enabled", True)):
                 masks_path = one_shot_dir / "pruning_masks.pt"
@@ -357,7 +402,19 @@ def main() -> None:
                 )
                 retuned_checkpoint = latest_checkpoint(retuned_dir) if not args.dry_run else retuned_dir / "latest"
                 run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-                rows.append(summary_row(method, "retuned_sft", retuned_checkpoint, retuned_eval_dir, "ok"))
+                retuned_report = retuned_checkpoint / "pruning_report.json"
+                if args.dry_run or not retuned_report.exists():
+                    retuned_report = one_shot_dir / "pruning_report.json"
+                rows.append(
+                    summary_row(
+                        method,
+                        "retuned_sft",
+                        retuned_checkpoint,
+                        retuned_eval_dir,
+                        "ok",
+                        pruning_report_path=retuned_report,
+                    )
+                )
         except subprocess.CalledProcessError as exc:
             rows.append(summary_row(method, "failed", output_dir, output_dir, "failed", error=str(exc)))
             write_summary(output_dir, rows)

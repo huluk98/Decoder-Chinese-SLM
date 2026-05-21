@@ -4,7 +4,7 @@ benchmark:
   prune_config: configs/prune_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
   eval_file: /path/to/eval.json
-  benchmark_runs: 5
+  benchmark_runs: 3
   max_new_tokens: 64
   eval_batch_size: 16
   dtype: bf16
