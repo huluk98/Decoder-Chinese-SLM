@@ -1,0 +1,37 @@
+benchmark:
+  output_dir: runs/pruning-benchmark-0p2b
+  base_checkpoint: runs/contrastive-sft-0p2b-8gpu/latest
+  prune_config: configs/prune_50.yaml
+  methods: [magnitude, 2of4, wanda, gradient]
+  eval_file: /path/to/eval.json
+  benchmark_runs: 5
+  max_new_tokens: 64
+  eval_batch_size: 16
+  dtype: bf16
+  nproc_per_node: 8
+  cuda_visible_devices: 0,1,2,3,4,5,6,7
+  continue_on_error: false
+
+prune:
+  sparsity: 0.5
+  include_lm_head: false
+  calibration_data_path: /path/to/calibration_or_sft.jsonl
+  calibration_batches: 128
+  max_length: 128
+  batch_size: 2
+  num_workers: 0
+
+one_shot:
+  enabled: true
+
+retune:
+  enabled: true
+  config: configs/sft_0p2b_8gpu.yaml
+  mode: sft
+  data_path: /path/to/retune_sft.jsonl
+  max_steps: 300
+  epochs: null
+  per_device_train_batch_size: null
+  gradient_accumulation_steps: null
+  max_seq_length: 128
+  keep_pruning_masks: true

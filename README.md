@@ -704,6 +704,55 @@ Wanda and gradient pruning require `prune.calibration_data_path`; the default co
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
+### Pruning Benchmark Suite
+
+For a full pruning comparison, use the YAML-driven benchmark suite. It runs all four pruning methods in two phases:
+
+1. one-shot prune with no retuning, then exact-match generation benchmark;
+2. prune, SFT-retune on your dataset while reapplying the pruning mask after every optimizer step, then exact-match generation benchmark.
+
+Edit `configs/pruning_benchmark.yaml`:
+
+```yaml
+benchmark:
+  base_checkpoint: /absolute/path/to/model/latest
+  eval_file: /absolute/path/to/eval.json
+  output_dir: runs/pruning-benchmark-0p2b
+
+prune:
+  calibration_data_path: /absolute/path/to/calibration_or_sft.jsonl
+
+retune:
+  data_path: /absolute/path/to/retune_sft.jsonl
+  max_steps: 300
+```
+
+Then run:
+
+```bash
+./run_pruning_benchmark_suite.sh
+```
+
+Or point at another config file or a directory containing `pruning_benchmark.yaml`:
+
+```bash
+CONFIG_PATH=configs/pruning_benchmark.yaml ./run_pruning_benchmark_suite.sh
+python scripts/run_pruning_benchmark.py --config configs/pruning_benchmark.yaml
+```
+
+Outputs are grouped under `benchmark.output_dir`:
+
+```text
+one_shot/<method>/
+retuned/<method>/
+benchmarks/one_shot/<method>/
+benchmarks/retuned/<method>/
+pruning_benchmark_summary.csv
+pruning_benchmark_summary.json
+```
+
+The CSV includes mean and standard deviation for exact-match accuracy, loss, perplexity, and generated length. By default, each eval runs five benchmark passes.
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:

@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
 from chatlm_decoder.command_eval import canonicalize_command_response
+from chatlm_decoder.pruning import apply_masks, mask_sparsity
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
 
 
@@ -113,7 +114,14 @@ def set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
-def save_checkpoint(model: torch.nn.Module, tokenizer: Any, output_dir: Path, step: int, keep_last: int) -> None:
+def save_checkpoint(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    output_dir: Path,
+    step: int,
+    keep_last: int,
+    pruning_masks: dict[str, torch.Tensor] | None = None,
+) -> None:
     checkpoint_dir = output_dir / f"step-{step:06d}"
     if checkpoint_dir.exists():
         shutil.rmtree(checkpoint_dir)
@@ -121,6 +129,8 @@ def save_checkpoint(model: torch.nn.Module, tokenizer: Any, output_dir: Path, st
     unwrap_model(model).save_pretrained(checkpoint_dir, safe_serialization=True)
     tokenizer.save_pretrained(checkpoint_dir)
     torch.save({"step": step}, checkpoint_dir / "trainer_state.pt")
+    if pruning_masks is not None:
+        torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
     latest = output_dir / "latest"
     if latest.is_symlink() or latest.exists():
         if latest.is_dir() and not latest.is_symlink():
@@ -163,6 +173,19 @@ def contrastive_alignment_loss(model: torch.nn.Module, batch: dict[str, torch.Te
     return (positive_distance + F.relu(float(margin) - negative_distance)).mean()
 
 
+def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
+    mask_path = Path(path).expanduser()
+    masks = torch.load(mask_path, map_location="cpu")
+    if not isinstance(masks, dict) or not masks:
+        raise ValueError(f"Pruning mask file must contain a non-empty dict: {mask_path}")
+    clean_masks: dict[str, torch.Tensor] = {}
+    for name, mask in masks.items():
+        if not isinstance(name, str) or not torch.is_tensor(mask):
+            raise ValueError(f"Invalid pruning mask entry in {mask_path}: {name!r}")
+        clean_masks[name] = mask.bool()
+    return clean_masks
+
+
 def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
 
@@ -198,6 +221,8 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         generation_config["max_new_tokens"] = int(config["max_new_tokens"])
     if "benchmark_runs" in config:
         sft_config["benchmark_runs"] = int(config["benchmark_runs"])
+    if "pruning_mask_path" in config:
+        sft_config["pruning_mask_path"] = config["pruning_mask_path"]
 
     mapping = {
         "num_train_epochs": "epochs",
@@ -536,6 +561,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gradient_accumulation_steps", type=int, default=None)
     parser.add_argument("--max_seq_length", "--max-seq-length", type=int, default=None)
     parser.add_argument("--benchmark-runs", "--benchmark_runs", type=int, default=None)
+    parser.add_argument("--pruning-mask", "--pruning_mask", default=None, help="Optional pruning_masks.pt to keep zeros fixed during SFT retuning.")
     return parser.parse_args(argv)
 
 
@@ -554,6 +580,8 @@ def main(argv: list[str] | None = None) -> None:
         sft_config["benchmark_runs"] = int(args.benchmark_runs)
     if args.output_dir is not None:
         run_config["output_dir"] = args.output_dir
+    if args.pruning_mask is not None:
+        sft_config["pruning_mask_path"] = args.pruning_mask
 
     mode = str(args.mode or sft_config.get("mode", "sft"))
     contrastive = mode == "contrastive"
@@ -590,6 +618,17 @@ def main(argv: list[str] | None = None) -> None:
 
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+
+    pruning_masks = None
+    pruning_mask_path = sft_config.get("pruning_mask_path")
+    if pruning_mask_path:
+        pruning_masks = load_pruning_masks(pruning_mask_path)
+        apply_masks(unwrap_model(model), pruning_masks)
+        maybe_print(
+            rank,
+            f"Pruning masks: loaded {len(pruning_masks)} tensors from {pruning_mask_path} "
+            f"(sparsity={mask_sparsity(pruning_masks):.4f}); masks will be reapplied after every optimizer step.",
+        )
 
     data_path = args.data_path or sft_config.get("data_path") or config["data"].get("sft_path")
     if not data_path:
@@ -756,6 +795,8 @@ def main(argv: list[str] | None = None) -> None:
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        if pruning_masks is not None:
+            apply_masks(unwrap_model(model), pruning_masks)
 
         logged = torch.tensor(
             [
@@ -831,6 +872,7 @@ def main(argv: list[str] | None = None) -> None:
                     output_dir=output_dir,
                     step=step,
                     keep_last=int(train_config.get("save_total_limit", 2)),
+                    pruning_masks=pruning_masks,
                 )
             if is_dist():
                 dist.barrier()
