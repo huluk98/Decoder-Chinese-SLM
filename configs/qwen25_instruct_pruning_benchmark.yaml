@@ -1,0 +1,39 @@
+benchmark:
+  output_dir: runs/qwen25-instruct-pruning-benchmark
+  base_checkpoint: outputs/qwen25_0p5b_instruct_sft/final
+  prune_config: configs/prune_qwen25_50.yaml
+  methods: [magnitude, 2of4, wanda, gradient]
+  eval_file: /path/to/eval.json
+  benchmark_runs: 3
+  max_new_tokens: 64
+  eval_batch_size: 16
+  dtype: bf16
+  prune_dtype: auto
+  nproc_per_node: 8
+  cuda_visible_devices: 0,1,2,3,4,5,6,7
+  continue_on_error: false
+  system_prompt: "You are a strict smart-home command parser. Output only the normalized command response. Do not explain."
+
+prune:
+  sparsity: 0.5
+  include_lm_head: false
+  calibration_data_path: /path/to/calibration_or_sft.json
+  calibration_batches: 128
+  max_length: 256
+  batch_size: 2
+  num_workers: 0
+  dtype: auto
+
+one_shot:
+  enabled: true
+
+retune:
+  enabled: true
+  config: configs/sft_qwen25_0p5b_instruct.yaml
+  data_path: /path/to/retune_sft.json
+  max_steps: 300
+  epochs: null
+  per_device_train_batch_size: null
+  gradient_accumulation_steps: null
+  max_seq_length: 256
+  keep_pruning_masks: true

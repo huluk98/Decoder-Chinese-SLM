@@ -30,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.command_eval import canonicalize_command_response
+from chatlm_decoder.pruning import apply_masks, mask_sparsity
 from chatlm_decoder.qwen25_instruct_data import (
     DEFAULT_SYSTEM_PROMPT,
     assert_no_legacy_tokens,
@@ -174,6 +175,73 @@ def count_parameters(model: torch.nn.Module) -> int:
     return sum(int(parameter.numel()) for parameter in unwrap_model(model).parameters())
 
 
+def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
+    mask_path = Path(path).expanduser()
+    masks = torch.load(mask_path, map_location="cpu")
+    if not isinstance(masks, dict) or not masks:
+        raise ValueError(f"Pruning mask file must contain a non-empty dict: {mask_path}")
+    clean_masks: dict[str, torch.Tensor] = {}
+    for name, mask in masks.items():
+        if not isinstance(name, str) or not torch.is_tensor(mask):
+            raise ValueError(f"Invalid pruning mask entry in {mask_path}: {name!r}")
+        clean_masks[name] = mask.bool()
+    return clean_masks
+
+
+def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
+    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
+    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
+    return {
+        "mask_parameter_count": mask_parameter_count,
+        "active_mask_parameters": active_mask_parameters,
+        "pruned_mask_parameters": pruned_mask_parameters,
+        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
+        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
+    }
+
+
+def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
+    total_parameters = 0
+    nonzero_parameters = 0
+    for parameter in unwrap_model(model).parameters():
+        data = parameter.detach()
+        total_parameters += int(data.numel())
+        nonzero_parameters += int(torch.count_nonzero(data).item())
+    zero_parameters = total_parameters - nonzero_parameters
+    return {
+        "total_parameters": total_parameters,
+        "nonzero_parameters": nonzero_parameters,
+        "zero_parameters": zero_parameters,
+        "nonzero_fraction": nonzero_parameters / float(total_parameters or 1),
+        "model_zero_fraction": zero_parameters / float(total_parameters or 1),
+    }
+
+
+def write_pruning_report(
+    checkpoint_dir: Path,
+    model: torch.nn.Module,
+    pruning_masks: dict[str, torch.Tensor],
+    step: int,
+    pruning_mask_source: str | None = None,
+) -> None:
+    metadata = {
+        "method": "qwen25_instruct_sft_retune_with_fixed_pruning_masks",
+        "phase": "retuned_qwen25_instruct_sft",
+        "step": int(step),
+        "sparsity": mask_sparsity(pruning_masks),
+        "pruning_mask_source": pruning_mask_source or "",
+        "mask_preserved_during_sft": True,
+        "uses_qwen_apply_chat_template": True,
+        **mask_parameter_stats(pruning_masks),
+        **model_parameter_stats(model),
+        "note": "Qwen2.5-Instruct SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
+    }
+    with (checkpoint_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
 def lr_for_step(step: int, max_steps: int, learning_rate: float, warmup_steps: int, scheduler: str) -> float:
     if warmup_steps > 0 and step < warmup_steps:
         return learning_rate * float(step + 1) / float(warmup_steps)
@@ -207,6 +275,8 @@ def save_final_checkpoint(
     output_dir: Path,
     step: int,
     config: dict[str, Any],
+    pruning_masks: dict[str, torch.Tensor] | None = None,
+    pruning_mask_source: str | None = None,
 ) -> Path:
     checkpoint_dir = output_dir / "final"
     if checkpoint_dir.exists():
@@ -216,6 +286,9 @@ def save_final_checkpoint(
     tokenizer.save_pretrained(checkpoint_dir)
     state = {"step": int(step), "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(), "config": config}
     torch.save(state, checkpoint_dir / "trainer_state.pt")
+    if pruning_masks is not None:
+        torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
+        write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
     manifest = {
         "checkpoint_path": str(checkpoint_dir),
         "resolved_checkpoint_path": str(checkpoint_dir.resolve()),
@@ -229,6 +302,8 @@ def save_final_checkpoint(
         "contains_config": (checkpoint_dir / "config.json").exists(),
         "contains_tokenizer": (checkpoint_dir / "tokenizer_config.json").exists()
         and any((checkpoint_dir / name).exists() for name in ("tokenizer.json", "tokenizer.model", "vocab.json")),
+        "contains_pruning_masks": (checkpoint_dir / "pruning_masks.pt").exists(),
+        "contains_pruning_report": (checkpoint_dir / "pruning_report.json").exists(),
     }
     with (checkpoint_dir / "checkpoint_manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
@@ -354,6 +429,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", "--learning_rate", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--data-seed", "--data_seed", type=int, default=None)
+    parser.add_argument("--max-steps", "--max_steps", type=int, default=None)
+    parser.add_argument("--pruning-mask", "--pruning_mask", default=None)
     parser.add_argument("--debug-overfit-samples", "--debug_overfit_samples", type=int, default=None)
     return parser.parse_args()
 
@@ -375,6 +452,7 @@ def main() -> None:
     epochs = float(args.epochs if args.epochs is not None else config.get("num_train_epochs", 3))
     seed = int(args.seed if args.seed is not None else config.get("seed", 42))
     data_seed = int(args.data_seed if args.data_seed is not None else config.get("data_seed", seed))
+    pruning_mask_path = args.pruning_mask or config.get("pruning_mask_path")
     precision = "bf16" if bool(config.get("bf16", True)) else "fp16" if bool(config.get("fp16", False)) else "fp32"
 
     device, rank, local_rank, world_size = setup_distributed()
@@ -394,6 +472,16 @@ def main() -> None:
         model = torch.compile(model)
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+
+    pruning_masks: dict[str, torch.Tensor] | None = None
+    if pruning_mask_path:
+        pruning_masks = load_pruning_masks(pruning_mask_path)
+        apply_masks(unwrap_model(model), pruning_masks)
+        maybe_print(
+            rank,
+            f"Pruning masks: loaded {len(pruning_masks)} tensors from {pruning_mask_path} "
+            f"(sparsity={mask_sparsity(pruning_masks):.4f}); masks will be reapplied after every optimizer step.",
+        )
 
     print_first_prompt(tokenizer, data_path, system_prompt, rank)
     dataloader = build_qwen25_instruct_dataloader(
@@ -424,7 +512,10 @@ def main() -> None:
     )
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda" and precision == "fp16"))
     optimizer_steps_per_epoch = max(1, math.ceil(len(dataloader) / grad_accum_steps))
-    max_steps = max(1, int(math.ceil(float(epochs) * optimizer_steps_per_epoch)))
+    max_steps = max(
+        1,
+        int(args.max_steps if args.max_steps is not None else math.ceil(float(epochs) * optimizer_steps_per_epoch)),
+    )
     warmup_steps = int(float(config.get("warmup_ratio", 0.03)) * max_steps)
     max_new_tokens = int(config.get("max_new_tokens", 64))
 
@@ -452,6 +543,8 @@ def main() -> None:
             "learning_rate": learning_rate,
             "epochs": epochs,
             "max_steps": max_steps,
+            "pruning_mask_path": str(pruning_mask_path) if pruning_mask_path else None,
+            "pruning_mask_sparsity": mask_sparsity(pruning_masks) if pruning_masks is not None else None,
             "seed_info": {**seed_info, "base_seed": seed, "data_seed": data_seed},
             "config": config,
         }
@@ -516,6 +609,8 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.get("max_grad_norm", 1.0)))
         scaler.step(optimizer)
         scaler.update()
+        if pruning_masks is not None:
+            apply_masks(unwrap_model(model), pruning_masks)
         optimizer.zero_grad(set_to_none=True)
         logged = torch.tensor(raw_loss_sum / grad_accum_steps, device=device)
         if is_dist():
@@ -527,7 +622,15 @@ def main() -> None:
     if is_dist():
         dist.barrier()
     if rank == 0:
-        checkpoint_dir = save_final_checkpoint(model, tokenizer, output_dir, max_steps, config)
+        checkpoint_dir = save_final_checkpoint(
+            model,
+            tokenizer,
+            output_dir,
+            max_steps,
+            config,
+            pruning_masks=pruning_masks,
+            pruning_mask_source=str(pruning_mask_path) if pruning_mask_path else None,
+        )
         maybe_print(rank, f"Saved final Qwen2.5-Instruct SFT checkpoint: {checkpoint_dir}")
     if is_dist():
         dist.barrier()

@@ -1,0 +1,23 @@
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+train_file: /path/to/calibration_or_sft.json
+system_prompt: "You are a strict smart-home command parser. Output only the normalized command response. Do not explain."
+max_seq_length: 256
+seed: 42
+
+prune:
+  base_model: outputs/qwen25_0p5b_instruct_sft/final
+  output_dir: runs/pruned-qwen25-0p5b-instruct
+  method: magnitude
+  sparsity: 0.5
+  include_lm_head: false
+  calibration_data_path: /path/to/calibration_or_sft.json
+  calibration_batches: 128
+  max_length: 256
+  batch_size: 2
+  num_workers: 0
+  recovery_steps: 0
+  recovery_learning_rate: 0.000005
+  recovery_weight_decay: 0.0
+  max_grad_norm: 1.0
+  overwrite: true
+  dtype: auto

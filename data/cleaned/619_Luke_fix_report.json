@@ -1,0 +1,901 @@
+{
+  "source": "/Users/luke/Downloads/619_Luke.json",
+  "fixed_all_path": "/Users/luke/Documents/Decoder Only/data/cleaned/619_Luke_fixed_all.json",
+  "fixed_dedup_path": "/Users/luke/Documents/Decoder Only/data/cleaned/619_Luke_fixed_dedup.json",
+  "original_rows": 4515,
+  "fixed_all_rows": 4515,
+  "fixed_dedup_rows": 3474,
+  "changed_rows": 454,
+  "duplicate_rows_removed_in_dedup": 1041,
+  "remaining_duplicate_prompt_conflicts_after_rules": 0,
+  "top_response_counts_before": [
+    [
+      "好的，灯已关闭。",
+      262
+    ],
+    [
+      "好的，灯已开启。",
+      251
+    ],
+    [
+      "好的，灯已调暗一档。",
+      183
+    ],
+    [
+      "好的，空调已关闭。",
+      183
+    ],
+    [
+      "好的，灯已调亮一档。",
+      177
+    ],
+    [
+      "好的，灯已调至最亮。",
+      154
+    ],
+    [
+      "好的，空调风速已提高一档。",
+      152
+    ],
+    [
+      "好的，灯光已打开。",
+      131
+    ],
+    [
+      "好的，电视已开启。",
+      113
+    ],
+    [
+      "好的，灯已打开夜灯模式。",
+      102
+    ],
+    [
+      "好的，空调风向调至上下风。",
+      102
+    ],
+    [
+      "好的，空调已打开。",
+      99
+    ],
+    [
+      "好的，空调已打开制热模式。",
+      91
+    ],
+    [
+      "好的，灯已打开学习模式。",
+      89
+    ],
+    [
+      "好的，灯已打开冷色光。",
+      88
+    ],
+    [
+      "好的，灯已调至最暗。",
+      84
+    ],
+    [
+      "好的，空调风向不动。",
+      70
+    ],
+    [
+      "好的，空调风速已降低一档。",
+      70
+    ],
+    [
+      "好的，灯已打开自然光。",
+      64
+    ],
+    [
+      "好的，空调风向调至左右风。",
+      52
+    ]
+  ],
+  "top_response_counts_after_dedup": [
+    [
+      "好的，空调已关闭。",
+      208
+    ],
+    [
+      "好的，灯已开启。",
+      207
+    ],
+    [
+      "好的，灯已关闭。",
+      135
+    ],
+    [
+      "好的，空调已打开。",
+      122
+    ],
+    [
+      "好的，灯已调暗一档。",
+      115
+    ],
+    [
+      "好的，电视已开启。",
+      110
+    ],
+    [
+      "好的，灯已调亮一档。",
+      109
+    ],
+    [
+      "好的，空调风向调至上下风。",
+      101
+    ],
+    [
+      "好的，灯已打开冷色光。",
+      96
+    ],
+    [
+      "好的，灯已打开夜灯模式。",
+      91
+    ],
+    [
+      "好的，灯已打开学习模式。",
+      84
+    ],
+    [
+      "好的，灯已调至最亮。",
+      80
+    ],
+    [
+      "好的，空调风速已提高一档。",
+      73
+    ],
+    [
+      "好的，灯已打开自然光。",
+      72
+    ],
+    [
+      "好的，空调风向不动。",
+      70
+    ],
+    [
+      "好的，空调已打开制热模式。",
+      68
+    ],
+    [
+      "好的，灯已打开暖色光。",
+      60
+    ],
+    [
+      "好的，空调风向调至左右风。",
+      51
+    ],
+    [
+      "好的，空调温度已调低一度。",
+      50
+    ],
+    [
+      "好的，空调温度已调高一度。",
+      49
+    ]
+  ],
+  "sample_changes": [
+    {
+      "index": 20,
+      "prompt": "灯切换成学习模式。",
+      "old_response": "好的，灯已打开成学习模式。",
+      "new_response": "好的，灯已打开学习模式。"
+    },
+    {
+      "index": 32,
+      "prompt": "要睡觉了，灯开小夜灯。",
+      "old_response": "好的，灯已打开为夜灯模式。",
+      "new_response": "好的，灯已打开夜灯模式。"
+    },
+    {
+      "index": 41,
+      "prompt": "灯，调整到学习模式。",
+      "old_response": "好的，灯已打开到学习模式。",
+      "new_response": "好的，灯已打开学习模式。"
+    },
+    {
+      "index": 475,
+      "prompt": "太亮了，把灯调暗些！",
+      "old_response": "好的，灯已调亮一档。",
+      "new_response": "好的，灯已调暗一档。"
+    },
+    {
+      "index": 482,
+      "prompt": "把灯设为最暗。",
+      "old_response": "好的，灯已打开为最暗。",
+      "new_response": "好的，灯已调至最暗。"
+    },
+    {
+      "index": 535,
+      "prompt": "请帮我把灯开到最亮。",
+      "old_response": "好的，灯已调至最暗。",
+      "new_response": "好的，灯已调至最亮。"
+    },
+    {
+      "index": 616,
+      "prompt": "要睡觉了，开小夜灯。",
+      "old_response": "好的，灯已打开为夜灯模式。",
+      "new_response": "好的，灯已打开夜灯模式。"
+    },
+    {
+      "index": 618,
+      "prompt": "太冷，空调制热。",
+      "old_response": "好的，空调已打开制热模式。",
+      "new_response": "好的，空调已打开制热模式。"
+    },
+    {
+      "index": 619,
+      "prompt": "好潮湿，空调打开抽湿。",
+      "old_response": "好的，空调已打开抽湿模型。",
+      "new_response": "好的，空调已打开抽湿模式。"
+    },
+    {
+      "index": 621,
+      "prompt": "空调请转换为制热模式。",
+      "old_response": "好的，空调已打开制热模式",
+      "new_response": "好的，空调已打开制热模式。"
+    },
+    {
+      "index": 677,
+      "prompt": "空调制热，启动。",
+      "old_response": "好的，空调已启动制热模式。",
+      "new_response": "好的，空调已打开制热模式。"
+    },
+    {
+      "index": 707,
+      "prompt": "用灯光的冷关灯吧。",
+      "old_response": "好的，灯已打开冷色光。",
+      "new_response": "好的，灯已关闭。"
+    },
+    {
+      "index": 711,
+      "prompt": "请把灯光调到冷色光。",
+      "old_response": "好的，灯已打开到冷色光。",
+      "new_response": "好的，灯已打开冷色光。"
+    },
+    {
+      "index": 782,
+      "prompt": "灯光的冷色光更合适。",
+      "old_response": "好的，已保持冷色光。",
+      "new_response": "好的，灯已打开冷色光。"
+    },
+    {
+      "index": 786,
+      "prompt": "开到灯光的暖光色。",
+      "old_response": "好的，灯已打开暖光色。",
+      "new_response": "好的，灯已打开暖色光。"
+    },
+    {
+      "index": 790,
+      "prompt": "请关闭空调的舒睡功能。",
+      "old_response": "好的，空调已关闭舒睡模式。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 811,
+      "prompt": "智能助手，关空调舒睡。",
+      "old_response": "好的，空调已关闭舒睡模式。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 955,
+      "prompt": "空调静音模式。",
+      "old_response": "好的，空调已打开静音模式。",
+      "new_response": "好的，空调已打开静音模式。"
+    },
+    {
+      "index": 986,
+      "prompt": "打开空调。",
+      "old_response": "好的，空调已打开。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1252,
+      "prompt": "空调关上下。",
+      "old_response": "好的，空调风向调至上下风。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1289,
+      "prompt": "空调关左右。",
+      "old_response": "好的，空调风向调至左右风。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1320,
+      "prompt": "空调改成舒睡模式1。",
+      "old_response": "好的，空调已打开舒睡模式一。",
+      "new_response": "好的，空调已打开舒睡模式一。"
+    },
+    {
+      "index": 1380,
+      "prompt": "现在关闭空调舒睡模式。",
+      "old_response": "好的，空调已关闭舒睡模式。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1483,
+      "prompt": "晚上10点自动关空调。",
+      "old_response": "好的，空调已定晚上10点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1484,
+      "prompt": "1小时后空调关一下。",
+      "old_response": "好的，空调已定一小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1486,
+      "prompt": "12点自动关空调。",
+      "old_response": "好的，空调已定12点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1489,
+      "prompt": "半小时关空调。",
+      "old_response": "好的，空调已定半小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1490,
+      "prompt": "3点帮我把空调关一下。",
+      "old_response": "好的，空调已定三点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1494,
+      "prompt": "4点自动关空调。",
+      "old_response": "好的，空调已定四点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1495,
+      "prompt": "半小时后空调关一下。",
+      "old_response": "好的，空调已定半小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1496,
+      "prompt": "11点的时候关空调。",
+      "old_response": "好的，空调已定11点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1497,
+      "prompt": "定时2小时后关空调。",
+      "old_response": "好的，空调已定二小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1501,
+      "prompt": "10点关空调。",
+      "old_response": "好的，空调已定10点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1504,
+      "prompt": "2点关空调。",
+      "old_response": "好的，空调已定二点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1505,
+      "prompt": "半小时帮我把空调关下。",
+      "old_response": "好的，空调已定半小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1507,
+      "prompt": "12点半关空调。",
+      "old_response": "好的，空调已定12点半后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1509,
+      "prompt": "2点自动关空调。",
+      "old_response": "好的，空调已定二点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1510,
+      "prompt": "帮我定时半小时关空调。",
+      "old_response": "好的，空调已定半小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1513,
+      "prompt": "半小时后关空调。",
+      "old_response": "好的，空调已定半小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1514,
+      "prompt": "一小时后停止空调。",
+      "old_response": "好的，空调已定一小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1515,
+      "prompt": "关空调，延迟45分钟。",
+      "old_response": "好的，空调已定45分钟后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1520,
+      "prompt": "5点半自动关空调。",
+      "old_response": "好的，空调已定五点半后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1523,
+      "prompt": "7点自动关空调。",
+      "old_response": "好的，空调已定七点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1526,
+      "prompt": "晚上十点关闭空调。",
+      "old_response": "好的，空调已定晚上10点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1527,
+      "prompt": "明早七点半关闭空调。",
+      "old_response": "好的，空调已定明早七点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1528,
+      "prompt": "一小时后关闭空调。",
+      "old_response": "好的，空调已定一小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1529,
+      "prompt": "11点整关闭空调。",
+      "old_response": "好的，空调已定11点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1530,
+      "prompt": "中午12点关闭空调。",
+      "old_response": "好的，空调已定中午12点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1531,
+      "prompt": "下午三点关闭空调。",
+      "old_response": "好的，空调已定下午三点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1532,
+      "prompt": "凌晨两点关闭空调。",
+      "old_response": "好的，空调已定凌晨两点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1533,
+      "prompt": "明天上午八点关闭空调。",
+      "old_response": "好的，空调已定明天上午八点后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1534,
+      "prompt": "下个小时关闭空调。",
+      "old_response": "好的，空调已定下个小时后关闭。",
+      "new_response": "好的，空调已关闭。"
+    },
+    {
+      "index": 1535,
+      "prompt": "请开空调。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1536,
+      "prompt": "开空调。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1537,
+      "prompt": "把空调打开。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1538,
+      "prompt": "启动空调。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1539,
+      "prompt": "打开空调。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1540,
+      "prompt": "空调启动。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1542,
+      "prompt": "空调开。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1543,
+      "prompt": "把空调开了。",
+      "old_response": "好的，空调已开启。",
+      "new_response": "好的，空调已打开。"
+    },
+    {
+      "index": 1668,
+      "prompt": "空调温度调高。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1669,
+      "prompt": "空调还是太冷。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1670,
+      "prompt": "空调温度太低。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1671,
+      "prompt": "空调冷了些，温度改变一下。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1672,
+      "prompt": "空调还是冷，调高温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1673,
+      "prompt": "空调能不能调高温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1674,
+      "prompt": "空调能不能调高一下。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1675,
+      "prompt": "空调调高温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1676,
+      "prompt": "空调提高温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1677,
+      "prompt": "空调提升温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1678,
+      "prompt": "空调温度提升。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1679,
+      "prompt": "空调升温。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1680,
+      "prompt": "空调温度上一下。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1681,
+      "prompt": "室内空调温度太低了。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1682,
+      "prompt": "室内空调温度太低。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1683,
+      "prompt": "室内空调温度调高。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1684,
+      "prompt": "室内空调温度上升。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1685,
+      "prompt": "上升空调室内温度。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1686,
+      "prompt": "室内空调温度过于低。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1687,
+      "prompt": "室内空调温度上升一下。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1688,
+      "prompt": "室内空调温度高一些。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1689,
+      "prompt": "室内空调温度高一些好吗。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1690,
+      "prompt": "室内温度调高一些。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1691,
+      "prompt": "室内温度调高一些会好。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1692,
+      "prompt": "室内空调太冷。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1693,
+      "prompt": "室内空调温度还是太低。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1694,
+      "prompt": "室内空调温度还是高一点。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1695,
+      "prompt": "把室内空调温度提高一点。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1696,
+      "prompt": "把室内空调温度调高一点。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1697,
+      "prompt": "请把室内空调温度调高一点。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1698,
+      "prompt": "请把室内空调温度提高一点。",
+      "old_response": "好的,空调温度已调高一度。",
+      "new_response": "好的，空调温度已调高一度。"
+    },
+    {
+      "index": 1699,
+      "prompt": "空调温度调低。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1700,
+      "prompt": "空调温度还是太热。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1701,
+      "prompt": "空调温度太高。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1702,
+      "prompt": "空调热了些。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1703,
+      "prompt": "还是热。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1704,
+      "prompt": "空调太热。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1705,
+      "prompt": "能不能调低空调温度。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1706,
+      "prompt": "能不能调低空调一下。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1707,
+      "prompt": "调低空调温度。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1708,
+      "prompt": "空调温度下降。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1709,
+      "prompt": "下调空调温度。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1710,
+      "prompt": "空调温度下调。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1711,
+      "prompt": "空调温度下降一下。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1712,
+      "prompt": "空调温度高了。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1713,
+      "prompt": "室内空调温度高了。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1714,
+      "prompt": "室内空调温度太高。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1715,
+      "prompt": "室内空调温度高了些。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1716,
+      "prompt": "室内空调温度调低。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1717,
+      "prompt": "室内空调温度下调。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1718,
+      "prompt": "下调室内温度。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1719,
+      "prompt": "室内空调温度过于高。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1720,
+      "prompt": "室内空调温度下调一下。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1721,
+      "prompt": "室内空调温度低一些。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1722,
+      "prompt": "室内空调温度低一些好吗。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1723,
+      "prompt": "室内空调温度调低一些。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1724,
+      "prompt": "室内空调温度调低一些会好。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1725,
+      "prompt": "室内空调太热。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1726,
+      "prompt": "室内空调温度还是太高。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    },
+    {
+      "index": 1727,
+      "prompt": "室内空调温度还是低一点。",
+      "old_response": "好的,空调温度已调低一度。",
+      "new_response": "好的，空调温度已调低一度。"
+    }
+  ],
+  "remaining_conflicts_after_rules": [],
+  "original_unique_prompts_before_prompt_cleaning": 3475,
+  "original_duplicate_rows_extra": 1040,
+  "original_duplicate_prompt_conflicts": 144
+}
