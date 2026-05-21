@@ -256,6 +256,54 @@ The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then la
 
 Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_final_only=true`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
 
+## Qwen2.5-0.5B-Instruct SFT
+
+Qwen2.5-Instruct must use its official chat template. Do not run it through the legacy decoder SFT path that inserts `<|user|>`, `<|assistant|>`, `<|system|>`, and `<|eos|>` tokens.
+
+1. Edit `configs/sft_qwen25_0p5b_instruct.yaml`.
+2. Set `train_file` and `eval_file` to your local JSON/JSONL/CSV files.
+3. Leave `model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct`, or point it at a Qwen2.5-Instruct-compatible local checkpoint.
+
+Full 8x H20 run with final five-pass eval:
+
+```bash
+./run_qwen25_instruct_sft_8gpu.sh
+```
+
+Train-only one-liner:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/sft_qwen25_instruct.py --config configs/sft_qwen25_0p5b_instruct.yaml
+```
+
+The Qwen data path builds prompts with `tokenizer.apply_chat_template(..., add_generation_prompt=True)`, appends `response + tokenizer.eos_token`, and masks all prompt and padding labels with `-100`. The evaluator uses the same Qwen chat template, decodes only continuation tokens, caps generation at `max_new_tokens=64`, and writes `qwen25_instruct_eval_summary.json`, `qwen25_instruct_predictions.jsonl`, `qwen25_instruct_prediction_debug.csv`, and `failed_examples_20.json`.
+
+Before trusting a full run, use the required overfit diagnostic:
+
+```bash
+python scripts/sft_qwen25_instruct.py \
+  --config configs/sft_qwen25_0p5b_instruct.yaml \
+  --debug-overfit-samples 20 \
+  --epochs 20 \
+  --output-dir outputs/debug_qwen25_instruct_overfit
+
+python scripts/eval_qwen25_instruct.py \
+  --model-path outputs/debug_qwen25_instruct_overfit/final \
+  --dataset-file /absolute/path/to/the/same/train.json \
+  --output-dir outputs/debug_qwen25_instruct_overfit/eval \
+  --limit 20 \
+  --max-new-tokens 64 \
+  --dtype bf16
+```
+
+The debug exact match should approach 100%. If it does not, treat any previous Qwen2.5-Instruct result, especially a 0% result from the legacy formatter, as invalid until the chat-template pipeline is fixed.
+
+For model comparison, keep the paths separate:
+
+- Qwen2.5-0.5B base using the legacy decoder SFT path: `scripts/sft.py` and `scripts/eval_prompt_response.py`.
+- Qwen2.5-0.5B-Instruct using the Qwen chat-template path: `scripts/sft_qwen25_instruct.py` and `scripts/eval_qwen25_instruct.py`.
+- LLaMA-style 0.2B using the legacy decoder SFT path: `scripts/sft.py` and `scripts/eval_prompt_response.py`.
+
 ## Train A 0.2B-ish Model
 
 Train a tokenizer first. This command automatically downloads every configured dataset source into the local cache, normalizes the cached/local records into one JSONL file, then trains the tokenizer from that merged file. The target vocab size is 29,298 to mirror ChatLM-mini-Chinese.

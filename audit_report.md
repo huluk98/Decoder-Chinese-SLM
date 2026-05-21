@@ -22,6 +22,8 @@ This audit checks whether a jump from about 83% to about 96% exact-match accurac
 
 8. The denominator is kept as the full eval set size. Empty predictions, invalid structured outputs, and generation errors are counted in `metrics.json`; they are not silently excluded.
 
+9. Qwen2.5-0.5B-Instruct now has a separate SFT/eval path. It uses `tokenizer.apply_chat_template(..., add_generation_prompt=True)` during both training and evaluation, saves only `output_dir/final/`, and rejects the legacy `<|user|>` / `<|assistant|>` / `<|system|>` / `<|eos|>` formatting tokens. Previous Qwen-Instruct scores from the legacy formatter should be treated as invalid until rerun through `scripts/sft_qwen25_instruct.py` and `scripts/eval_qwen25_instruct.py`.
+
 ## New Diagnostic Outputs
 
 Each eval run writes:
@@ -33,6 +35,13 @@ Each eval run writes:
 - `prompt_response_eval_predictions.jsonl`: full per-example records.
 
 For repeated benchmarks, `run_01`, `run_02`, etc. keep separate predictions, while the top-level eval folder also keeps the latest run's debug CSV and the aggregate metrics.
+
+The Qwen2.5-Instruct evaluator writes the Qwen-specific equivalents:
+
+- `qwen25_instruct_eval_summary.json`
+- `qwen25_instruct_predictions.jsonl`
+- `qwen25_instruct_prediction_debug.csv`
+- `failed_examples_20.json`
 
 ## How To Compare 83% vs 96%
 

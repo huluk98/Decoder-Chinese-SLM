@@ -1,0 +1,42 @@
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+train_file: /path/to/train.json
+eval_file: /path/to/eval.json
+output_dir: outputs/qwen25_0p5b_instruct_sft
+
+system_prompt: "You are a strict smart-home command parser. Output only the normalized command response. Do not explain."
+
+max_seq_length: 256
+max_new_tokens: 64
+num_train_epochs: 3
+
+learning_rate: 2.0e-5
+warmup_ratio: 0.03
+weight_decay: 0.01
+lr_scheduler_type: cosine
+max_grad_norm: 1.0
+
+bf16: true
+fp16: false
+tf32: true
+
+per_device_train_batch_size: 16
+per_device_eval_batch_size: 16
+gradient_accumulation_steps: 1
+
+gradient_checkpointing: false
+flash_attention: true
+torch_compile: false
+
+logging_steps: 10
+save_strategy: epoch
+eval_strategy: none
+save_final_only: true
+save_total_limit: 1
+
+dataloader_num_workers: 8
+dataloader_pin_memory: true
+persistent_workers: true
+group_by_length: true
+remove_unused_columns: false
+
+benchmark_runs: 5
