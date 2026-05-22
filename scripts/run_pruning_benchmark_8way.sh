@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "This launcher requires bash. Run: bash scripts/run_pruning_benchmark_8way.sh" >&2
+  exit 2
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,7 +11,13 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 CONFIG_PATH="${CONFIG_PATH:-${1:-configs/pruning_benchmark.yaml}}"
-PYTHON_BIN="${PYTHON:-python}"
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="${PYTHON}"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  PYTHON_BIN="python"
+fi
 MODE="${MODE:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
 KEEP_GOING="${KEEP_GOING:-1}"
@@ -20,6 +31,12 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Config file not found: ${CONFIG_PATH}" >&2
   echo "Usage: CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh" >&2
+  exit 2
+fi
+
+if ! "${PYTHON_BIN}" -c "import yaml" >/dev/null 2>&1; then
+  echo "Python environment is missing PyYAML. Activate the training env, or set PYTHON=/path/to/env/bin/python." >&2
+  echo "Example: PYTHON=\$(command -v python3) CONFIG_PATH=${CONFIG_PATH} bash scripts/run_pruning_benchmark_8way.sh" >&2
   exit 2
 fi
 
