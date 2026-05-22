@@ -30,7 +30,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.command_eval import canonicalize_command_response
-from chatlm_decoder.pruning import apply_masks, mask_sparsity
+from chatlm_decoder.pruning import (
+    apply_masks,
+    mask_parameter_stats,
+    masked_weight_stats,
+    mask_sparsity,
+    layerwise_zero_fraction,
+    module_filter_report,
+    sparsity_accounting,
+    write_csv,
+    write_json,
+)
 from chatlm_decoder.qwen25_instruct_data import (
     DEFAULT_SYSTEM_PROMPT,
     assert_no_legacy_tokens,
@@ -188,19 +198,6 @@ def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
     return clean_masks
 
 
-def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
-    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
-    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
-    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
-    return {
-        "mask_parameter_count": mask_parameter_count,
-        "active_mask_parameters": active_mask_parameters,
-        "pruned_mask_parameters": pruned_mask_parameters,
-        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
-        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
-    }
-
-
 def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
     total_parameters = 0
     nonzero_parameters = 0
@@ -225,6 +222,9 @@ def write_pruning_report(
     step: int,
     pruning_mask_source: str | None = None,
 ) -> None:
+    mask_stats = mask_parameter_stats(pruning_masks)
+    model_stats = model_parameter_stats(model)
+    accounting = sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks))
     metadata = {
         "method": "qwen25_instruct_sft_retune_with_fixed_pruning_masks",
         "phase": "retuned_qwen25_instruct_sft",
@@ -233,8 +233,13 @@ def write_pruning_report(
         "pruning_mask_source": pruning_mask_source or "",
         "mask_preserved_during_sft": True,
         "uses_qwen_apply_chat_template": True,
-        **mask_parameter_stats(pruning_masks),
-        **model_parameter_stats(model),
+        "target_prunable_sparsity": accounting["target_prunable_sparsity"],
+        "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
+        "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
+        **mask_stats,
+        **model_stats,
+        **accounting,
+        **masked_weight_stats(unwrap_model(model), pruning_masks),
         "note": "Qwen2.5-Instruct SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
     }
     with (checkpoint_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
@@ -289,6 +294,28 @@ def save_final_checkpoint(
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
         write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
+        write_json(checkpoint_dir / "module_filter_report.json", module_filter_report(unwrap_model(model)))
+        write_json(
+            checkpoint_dir / "mask_validation.json",
+            {
+                "method": "qwen25_instruct_sft_retune_with_fixed_pruning_masks",
+                "phase": "retuned_qwen25_instruct_sft",
+                **sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks)),
+            },
+        )
+        write_csv(checkpoint_dir / "sparsity_by_module.csv", layerwise_zero_fraction(unwrap_model(model), pruning_masks))
+        write_csv(checkpoint_dir / "layerwise_zero_fraction.csv", layerwise_zero_fraction(unwrap_model(model), pruning_masks))
+        reload_model = AutoModelForCausalLM.from_pretrained(checkpoint_dir, trust_remote_code=False)
+        reload_validation = {
+            "method": "qwen25_instruct_sft_retune_with_fixed_pruning_masks",
+            "phase": "retuned_qwen25_instruct_sft",
+            "checkpoint_reloaded": str(checkpoint_dir),
+            **sparsity_accounting(reload_model, pruning_masks, target=mask_sparsity(pruning_masks)),
+        }
+        if int(reload_validation.get("masked_weight_violation_count", 0)) != 0:
+            raise RuntimeError(f"Pruned weights regrew after saving/reloading retuned Qwen checkpoint: {checkpoint_dir}")
+        write_json(checkpoint_dir / "checkpoint_reload_validation.json", reload_validation)
+        del reload_model
     manifest = {
         "checkpoint_path": str(checkpoint_dir),
         "resolved_checkpoint_path": str(checkpoint_dir.resolve()),
@@ -575,6 +602,7 @@ def main() -> None:
     first_batch_printed = False
     progress = trange(1, max_steps + 1, disable=(rank != 0), desc="qwen25-instruct-sft")
     start_time = time.perf_counter()
+    retune_loss_curve: list[dict[str, Any]] = []
     for step in progress:
         lr = lr_for_step(step - 1, max_steps, learning_rate, warmup_steps, str(config.get("lr_scheduler_type", "cosine")))
         set_lr(optimizer, lr)
@@ -615,6 +643,14 @@ def main() -> None:
         logged = torch.tensor(raw_loss_sum / grad_accum_steps, device=device)
         if is_dist():
             dist.all_reduce(logged, op=dist.ReduceOp.AVG)
+        if rank == 0 and pruning_masks is not None:
+            retune_loss_curve.append(
+                {
+                    "step": int(step),
+                    "loss": float(logged.detach().cpu()),
+                    "learning_rate": float(lr),
+                }
+            )
         if rank == 0 and (step == 1 or step % int(config.get("logging_steps", 10)) == 0):
             elapsed = max(1e-6, time.perf_counter() - start_time)
             progress.set_postfix(loss=f"{float(logged.detach().cpu()):.4f}", lr=f"{lr:.2e}", step_s=f"{elapsed / step:.2f}")
@@ -632,6 +668,8 @@ def main() -> None:
             pruning_mask_source=str(pruning_mask_path) if pruning_mask_path else None,
         )
         maybe_print(rank, f"Saved final Qwen2.5-Instruct SFT checkpoint: {checkpoint_dir}")
+        if pruning_masks is not None:
+            write_csv(output_dir / "retune_loss_curve.csv", retune_loss_curve)
     if is_dist():
         dist.barrier()
     if rank == 0 and args.debug_overfit_samples:

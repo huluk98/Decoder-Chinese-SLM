@@ -9,6 +9,13 @@ CONFIG_PATH="${CONFIG_PATH:-${1:-configs/pruning_benchmark.yaml}}"
 PYTHON_BIN="${PYTHON:-python}"
 MODE="${MODE:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
+KEEP_GOING="${KEEP_GOING:-1}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Config file not found: ${CONFIG_PATH}" >&2
@@ -53,11 +60,18 @@ ARGS=(--config "${CONFIG_PATH}")
 if [[ "${DRY_RUN}" == "1" ]]; then
   ARGS+=(--dry-run)
 fi
+if [[ "${KEEP_GOING}" == "1" ]]; then
+  ARGS+=(--continue-on-error)
+else
+  ARGS+=(--stop-on-error)
+fi
 
 echo "Sequential 8-way pruning benchmark"
 echo "  config: ${CONFIG_PATH}"
 echo "  mode:   ${RUN_KIND}"
 echo "  runner: ${RUNNER}"
+echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "  keep going after method failure: ${KEEP_GOING}"
 echo
 echo "Order inside the runner:"
 echo "  magnitude: one-shot prune -> eval -> retune -> eval"
@@ -72,4 +86,3 @@ echo
 echo "Done. The runner wrote its 8-row benchmark summary under benchmark.output_dir:"
 echo "  ${SUMMARY_CSV}"
 echo "  ${SUMMARY_JSON}"
-
