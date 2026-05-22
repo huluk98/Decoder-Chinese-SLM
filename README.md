@@ -787,11 +787,13 @@ Then run:
 ./run_qwen25_instruct_pruning_benchmark_8gpu.sh
 ```
 
-Or use the single YAML-driven sequential wrapper. It auto-detects Qwen configs by name/content:
+Or use the single YAML-driven sequential wrapper. It auto-detects Qwen2.5-Instruct configs by name/content:
 
 ```bash
 CONFIG_PATH=configs/qwen25_instruct_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
+
+Base `Qwen/Qwen2.5-0.5B` and custom decoder-only models should use the generic pruning benchmark, not the Qwen2.5-Instruct benchmark. If you want to force that path, run with `MODE=generic`.
 
 This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_eval.json`. It then runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for 50% prunable-transformer-Linear sparsity and zero mask violations, evaluates the reloaded one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
 
@@ -811,6 +813,8 @@ For a full pruning comparison, use the YAML-driven benchmark suite. It evaluates
 
 1. one-shot prune with no retuning, then exact-match generation benchmark;
 2. prune, SFT-retune on your dataset while reapplying the pruning mask after every optimizer step, then exact-match generation benchmark.
+
+Use this generic suite for your custom decoder-only model and for base `Qwen/Qwen2.5-0.5B`. The Qwen2.5-Instruct suite is only for checkpoints/configs that explicitly use the Instruct chat-template path.
 
 Edit `configs/pruning_benchmark.yaml`:
 

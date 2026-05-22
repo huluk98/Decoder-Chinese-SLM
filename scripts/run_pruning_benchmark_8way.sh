@@ -44,20 +44,30 @@ detect_mode() {
   local config_path="$1"
   local requested="$2"
   case "${requested}" in
-    generic|qwen)
+    generic)
       echo "${requested}"
       return
+      ;;
+    qwen-instruct|qwen_instruct)
+      echo "qwen_instruct"
+      return
+      ;;
+    qwen)
+      echo "MODE=qwen is ambiguous. Use MODE=generic for base Qwen/custom decoder-only models, or MODE=qwen-instruct for Qwen2.5-Instruct." >&2
+      exit 2
       ;;
     auto)
       ;;
     *)
-      echo "Unknown MODE=${requested}. Use MODE=auto, MODE=generic, or MODE=qwen." >&2
+      echo "Unknown MODE=${requested}. Use MODE=auto, MODE=generic, or MODE=qwen-instruct." >&2
       exit 2
       ;;
   esac
 
-  if [[ "$(basename "${config_path}")" == *qwen* ]] || grep -Eiq 'qwen|prune_qwen25|sft_qwen25' "${config_path}"; then
-    echo "qwen"
+  local config_name
+  config_name="$(basename "${config_path}")"
+  if [[ "${config_name}" == *qwen*instruct* ]] || [[ "${config_name}" == *qwen25_instruct* ]] || grep -Eiq 'qwen[^[:space:]]*instruct|qwen2\.?5[^[:space:]]*instruct|qwen25[_-]instruct|prune_qwen25|sft_qwen25|eval_qwen25|apply_chat_template|uses_qwen_apply_chat_template' "${config_path}"; then
+    echo "qwen_instruct"
   else
     echo "generic"
   fi
@@ -67,7 +77,7 @@ RUN_KIND="$(detect_mode "${CONFIG_PATH}" "${MODE}")"
 RUNNER="scripts/run_pruning_benchmark.py"
 SUMMARY_CSV="pruning_benchmark_summary.csv"
 SUMMARY_JSON="pruning_benchmark_summary.json"
-if [[ "${RUN_KIND}" == "qwen" ]]; then
+if [[ "${RUN_KIND}" == "qwen_instruct" ]]; then
   RUNNER="scripts/run_qwen25_instruct_pruning_benchmark.py"
   SUMMARY_CSV="qwen25_instruct_pruning_benchmark_summary.csv"
   SUMMARY_JSON="qwen25_instruct_pruning_benchmark_summary.json"
