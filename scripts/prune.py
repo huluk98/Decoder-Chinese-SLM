@@ -30,6 +30,7 @@ from chatlm_decoder.pruning import (
     module_filter_report,
     model_parameter_stats,
     protected_parameter_snapshot,
+    resolve_prunable_sparsity_for_target,
     sparsity_accounting,
     two_of_four_masks,
     validate_masks_match_prunable_scope,
@@ -75,20 +76,46 @@ def make_masks(
     device: torch.device,
     prune_config: dict[str, Any],
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    sparsity = float(prune_config.get("sparsity", 0.5))
+    requested_sparsity = float(prune_config.get("sparsity", 0.5))
     include_lm_head = bool(prune_config.get("include_lm_head", False))
     max_batches = int(prune_config.get("calibration_batches", 128))
+    target_resolution = resolve_prunable_sparsity_for_target(
+        model,
+        target_sparsity=requested_sparsity,
+        denominator=str(prune_config.get("sparsity_denominator", "prunable")),
+        include_lm_head=include_lm_head,
+    )
+    sparsity = float(target_resolution["target_prunable_sparsity"])
+    prune_config["_target_resolution"] = target_resolution
+    prune_config["_resolved_prunable_sparsity"] = sparsity
 
     if method == "2of4":
+        if str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
+            raise ValueError(
+                "Pure NVIDIA 2:4 pruning cannot satisfy whole-model sparsity "
+                f"{requested_sparsity:.6f} with protected parameters unchanged. "
+                "Vanilla 2:4 is exactly 50% sparsity inside each prunable Linear weight group, "
+                f"which would give about {0.5 * float(target_resolution['percentage_of_model_in_pruning_mask']):.6f} "
+                "whole-model sparsity for this checkpoint. Use denominator='prunable' for vanilla 2:4, "
+                "or add a separately labeled 2:4 + top-up method."
+            )
         masks = two_of_four_masks(model, include_lm_head=include_lm_head)
         validation = validate_two_of_four_masks(masks)
         if not validation["valid"]:
             raise ValueError(f"Invalid NVIDIA 2:4 mask: {validation['total_invalid_2of4_groups']} invalid groups")
-        return masks, {"pruning_granularity": "per_group_of_4_input_weights", "nvidia_2of4_validation": validation}
+        return masks, {
+            "pruning_granularity": "per_group_of_4_input_weights",
+            "score_definition": "in each group of 4 weights, keep top 2 by abs(weight)",
+            "method_variant": "vanilla_nvidia_2of4",
+            "target_resolution": target_resolution,
+            "nvidia_2of4_validation": validation,
+        }
     if method == "magnitude":
         return global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head), {
             "pruning_granularity": "global_prunable_linear_weight",
             "score_definition": "abs(weight)",
+            "method_variant": "vanilla_global_magnitude",
+            "target_resolution": target_resolution,
         }
     if calibration_loader is None:
         raise ValueError(f"Pruning method {method} requires prune.calibration_data_path.")
@@ -112,6 +139,8 @@ def make_masks(
         return masks, {
             "pruning_granularity": "per_output_row_prunable_linear_weight",
             "score_definition": "abs(weight) * sqrt(mean(input_activation^2))",
+            "method_variant": "vanilla_wanda",
+            "target_resolution": target_resolution,
             "wanda_activation_report": report,
         }
     if method == "gradient":
@@ -133,6 +162,8 @@ def make_masks(
         ), {
             "pruning_granularity": "global_prunable_linear_weight",
             "score_definition": "abs(weight * gradient)",
+            "method_variant": "vanilla_gradient_saliency",
+            "target_resolution": target_resolution,
             "gradient_saliency_report": report,
         }
     raise ValueError(f"Unknown pruning method: {method}")
@@ -197,13 +228,20 @@ def save_pruned_model(
     tokenizer.save_pretrained(output_dir)
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
-    target_sparsity = float(prune_config.get("sparsity", 0.5))
-    accounting = sparsity_accounting(model, masks, target=target_sparsity)
+    requested_sparsity = float(prune_config.get("sparsity", 0.5))
+    target_resolution = prune_config.get("_target_resolution") or resolve_prunable_sparsity_for_target(
+        model,
+        target_sparsity=requested_sparsity,
+        denominator=str(prune_config.get("sparsity_denominator", "prunable")),
+        include_lm_head=bool(prune_config.get("include_lm_head", False)),
+    )
+    target_prunable_sparsity = float(target_resolution["target_prunable_sparsity"])
+    accounting = sparsity_accounting(model, masks, target=target_prunable_sparsity)
     after_norms = collect_weight_norms(model, masks)
     reload_model = AutoModelForCausalLM.from_pretrained(str(output_dir)).to(device)
     reload_validation = {
         "checkpoint_reloaded": str(output_dir),
-        **sparsity_accounting(reload_model, masks, target=target_sparsity),
+        **sparsity_accounting(reload_model, masks, target=target_prunable_sparsity),
     }
     if int(reload_validation.get("masked_weight_violation_count", 0) or 0):
         raise ValueError(f"Pruned weights became nonzero after checkpoint reload: {output_dir}")
@@ -212,8 +250,12 @@ def save_pruned_model(
         "phase": "one_shot_prune",
         "base_checkpoint": checkpoint,
         "sparsity": mask_sparsity(masks),
-        "target_sparsity": target_sparsity,
-        "target_prunable_sparsity": target_sparsity,
+        "requested_sparsity": requested_sparsity,
+        "target_sparsity": requested_sparsity,
+        "target_sparsity_denominator": target_resolution["target_sparsity_denominator"],
+        "target_resolution": target_resolution,
+        "target_prunable_sparsity": target_prunable_sparsity,
+        "target_whole_model_sparsity": target_resolution.get("target_whole_model_sparsity"),
         "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
         "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
         "include_lm_head": bool(prune_config.get("include_lm_head", False)),

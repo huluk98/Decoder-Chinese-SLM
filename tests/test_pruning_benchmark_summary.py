@@ -162,3 +162,44 @@ def test_write_summary_has_eight_pruning_rows_with_missing_retuned(tmp_path: Pat
     }
     assert all(row["exact_match_accuracy"] != "" for row in csv_rows if row["phase"] == "one_shot")
     assert all(row["status"] == "missing" for row in csv_rows if row["phase"] == "retuned")
+
+
+def test_whole_model_target_resolves_to_higher_prunable_sparsity() -> None:
+    torch = pytest.importorskip("torch")
+    from chatlm_decoder.pruning import (
+        apply_masks,
+        global_magnitude_masks,
+        resolve_prunable_sparsity_for_target,
+        sparsity_accounting,
+    )
+
+    class TinyDecoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(2, 4)
+            self.block = torch.nn.Module()
+            self.block.self_attn = torch.nn.Module()
+            self.block.self_attn.q_proj = torch.nn.Linear(4, 4, bias=False)
+            self.block.self_attn.v_proj = torch.nn.Linear(4, 4, bias=False)
+            self.ln_f = torch.nn.LayerNorm(4)
+            self.lm_head = torch.nn.Linear(4, 2, bias=False)
+
+    model = TinyDecoder()
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.fill_(1.0)
+
+    resolution = resolve_prunable_sparsity_for_target(
+        model,
+        target_sparsity=0.5,
+        denominator="whole_model",
+    )
+    assert resolution["target_sparsity_denominator"] == "whole_model"
+    assert resolution["target_prunable_sparsity"] == pytest.approx(28 / 32)
+
+    masks = global_magnitude_masks(model, sparsity=resolution["target_prunable_sparsity"])
+    apply_masks(model, masks)
+    accounting = sparsity_accounting(model, masks, target=resolution["target_prunable_sparsity"])
+
+    assert accounting["achieved_prunable_sparsity"] == pytest.approx(28 / 32)
+    assert accounting["achieved_whole_model_sparsity"] == pytest.approx(0.5)

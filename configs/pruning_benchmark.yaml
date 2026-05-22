@@ -19,6 +19,11 @@ benchmark:
 
 prune:
   sparsity: 0.5
+  # whole_model targets real checkpoint-level sparsity while keeping protected
+  # embeddings, lm_head, norms, biases, and non-Linear parameters unchanged.
+  # Pure NVIDIA 2:4 remains a fixed 50% prunable-weight structural method and
+  # cannot reach 50% whole-model sparsity unless reported as a separate top-up variant.
+  sparsity_denominator: whole_model
   include_lm_head: false
   calibration_data_path: /path/to/calibration_or_sft.jsonl
   calibration_batches: 128

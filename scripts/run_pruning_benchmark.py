@@ -34,6 +34,7 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "active_prunable_parameters",
     "total_parameter_count",
     "real_sparsity",
+    "target_sparsity_denominator",
     "achieved_prunable_sparsity",
     "exact_match_accuracy",
     "correct_examples",
@@ -172,13 +173,22 @@ def validate_pruning_report(
     report = read_pruning_report(report_path)
     if not report:
         raise FileNotFoundError(f"Missing pruning report for {method} {phase}: {report_path}")
-    actual_sparsity = report.get("mask_sparsity", report.get("sparsity"))
-    if actual_sparsity is None:
-        raise ValueError(f"Pruning report does not contain mask_sparsity/sparsity: {report_path}")
-    if abs(float(actual_sparsity) - float(target_sparsity)) > float(tolerance):
+    denominator = str(report.get("target_sparsity_denominator", "prunable")).lower()
+    target_prunable = report.get("target_prunable_sparsity", target_sparsity)
+    if denominator == "whole_model":
+        actual_sparsity = report.get("achieved_whole_model_sparsity", report.get("model_zero_fraction"))
+        expected_sparsity = report.get("target_whole_model_sparsity", report.get("target_sparsity", target_sparsity))
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved whole-model sparsity: {report_path}")
+    else:
+        actual_sparsity = report.get("achieved_prunable_sparsity", report.get("mask_sparsity", report.get("sparsity")))
+        expected_sparsity = target_prunable
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved prunable sparsity: {report_path}")
+    if abs(float(actual_sparsity) - float(expected_sparsity)) > float(tolerance):
         raise ValueError(
-            f"{method} {phase} sparsity check failed: actual={float(actual_sparsity):.8f}, "
-            f"target={float(target_sparsity):.8f}, tolerance={float(tolerance):.8f}"
+            f"{method} {phase} {denominator} sparsity check failed: actual={float(actual_sparsity):.8f}, "
+            f"target={float(expected_sparsity):.8f}, tolerance={float(tolerance):.8f}"
         )
     violations = int(report.get("masked_weight_violation_count", 0) or 0)
     if violations:
@@ -189,7 +199,7 @@ def validate_pruning_report(
     nonzero_parameters = report.get("nonzero_parameters")
     if nonzero_parameters is not None and int(nonzero_parameters) <= 0:
         raise ValueError(f"{method} {phase} reports zero nonzero model parameters: {report_path}")
-    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_sparsity)) > float(tolerance):
+    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_prunable)) > float(tolerance):
         raise ValueError(f"{method} {phase} achieved_prunable_sparsity does not match target: {report_path}")
 
 
@@ -253,6 +263,7 @@ def print_plan(
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
+    print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)
     print(f"  retune.data_path: {retune.get('data_path')}", flush=True)
@@ -605,6 +616,8 @@ def read_pruning_stats(report_path: Path | None) -> dict[str, Any]:
     report = read_pruning_report(report_path)
     return {
         "target_prunable_sparsity": pruning_stat(report, "target_prunable_sparsity", "target_sparsity", "sparsity"),
+        "target_sparsity_denominator": pruning_stat(report, "target_sparsity_denominator"),
+        "target_whole_model_sparsity": pruning_stat(report, "target_whole_model_sparsity"),
         "achieved_prunable_sparsity": pruning_stat(report, "achieved_prunable_sparsity", "mask_sparsity", "sparsity"),
         "achieved_whole_model_sparsity": pruning_stat(report, "achieved_whole_model_sparsity", "model_zero_fraction"),
         "real_sparsity": pruning_stat(report, "model_zero_fraction", "achieved_whole_model_sparsity"),
@@ -715,6 +728,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "active_model_parameters",
         "real_sparsity",
         "target_prunable_sparsity",
+        "target_sparsity_denominator",
+        "target_whole_model_sparsity",
         "achieved_prunable_sparsity",
         "achieved_whole_model_sparsity",
         "prunable_parameter_count",
@@ -785,7 +800,12 @@ def cmc_comparability_report(
     non_blocking: list[str] = []
     if set(methods) != set(METHODS):
         blocking.append(f"methods differ from CMC reference: {methods}")
-    if float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
+    denominator = str(config.get("prune", {}).get("sparsity_denominator", "prunable")).lower()
+    if denominator not in {"prunable", "mask", "prunable_weights", "prunable_linear", "prunable_linears"}:
+        blocking.append(
+            "target sparsity denominator is whole-model; this is not the CMC0.2B 50% prunable-linear protocol"
+        )
+    elif float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
         blocking.append("target prunable sparsity is not 0.5")
     if bool(config.get("prune", {}).get("include_lm_head", False)):
         blocking.append("lm_head/output head pruning is enabled")
