@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import csv
 import copy
-import hashlib
 import json
 import math
 import os
@@ -36,6 +35,7 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "real_sparsity",
     "target_sparsity_denominator",
     "achieved_prunable_sparsity",
+    "method_target_note",
     "exact_match_accuracy",
     "correct_examples",
     "total_examples",
@@ -75,11 +75,6 @@ def write_json(path: str | Path, payload: Any) -> None:
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-
-
-def stable_config_hash(payload: Any) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def method_slug(method: str) -> str:
@@ -379,10 +374,7 @@ def run_eval(
     )
 
 
-def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any], comparable: bool, issues: list[str]) -> dict[str, Any]:
-    issue_text = "; ".join(issues)
-    if issues:
-        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
+def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
     result_eval_dir = resolve_eval_result_dir(eval_dir)
     return {
         "method": "dense_sft_baseline",
@@ -416,8 +408,6 @@ def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
-        "cmc_comparable": comparable,
-        "blocking_comparability_issues": issue_text,
         "error": "",
     }
 
@@ -618,6 +608,7 @@ def read_pruning_stats(report_path: Path | None) -> dict[str, Any]:
         "target_prunable_sparsity": pruning_stat(report, "target_prunable_sparsity", "target_sparsity", "sparsity"),
         "target_sparsity_denominator": pruning_stat(report, "target_sparsity_denominator"),
         "target_whole_model_sparsity": pruning_stat(report, "target_whole_model_sparsity"),
+        "method_target_note": pruning_stat(report, "method_target_note"),
         "achieved_prunable_sparsity": pruning_stat(report, "achieved_prunable_sparsity", "mask_sparsity", "sparsity"),
         "achieved_whole_model_sparsity": pruning_stat(report, "achieved_whole_model_sparsity", "model_zero_fraction"),
         "real_sparsity": pruning_stat(report, "model_zero_fraction", "achieved_whole_model_sparsity"),
@@ -654,8 +645,6 @@ def summary_row(
     error: str = "",
     pruning_report_path: Path | None = None,
     dense_exact_match: float | None = None,
-    cmc_comparable: bool = False,
-    comparability_issues: list[str] | None = None,
 ) -> dict[str, Any]:
     result_eval_dir = resolve_eval_result_dir(eval_dir)
     summary = read_eval_summary(eval_dir) if status == "ok" else {}
@@ -669,9 +658,6 @@ def summary_row(
     delta = None
     if exact_match is not None and dense_exact_match is not None:
         delta = float(exact_match) - float(dense_exact_match)
-    issue_text = "; ".join(comparability_issues or [])
-    if comparability_issues:
-        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
     checkpoint_evaluated = run_config.get("checkpoint_path_used_for_evaluation") or run_config.get("model_path") or str(checkpoint)
     return {
         "method": method,
@@ -698,8 +684,6 @@ def summary_row(
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
-        "cmc_comparable": cmc_comparable,
-        "blocking_comparability_issues": issue_text,
         "error": error,
     }
 
@@ -767,8 +751,6 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "avg_generated_tokens_mean",
         "avg_generated_tokens",
         "avg_generated_tokens_std",
-        "cmc_comparable",
-        "blocking_comparability_issues",
         "error",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
@@ -787,60 +769,6 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(handle, fieldnames=benchmark_fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(retuned_rows)
-
-
-def cmc_comparability_report(
-    config: dict[str, Any],
-    benchmark: dict[str, Any],
-    methods: list[str],
-    dense_checkpoint: Path,
-    pruned_checkpoint_paths: list[str],
-) -> dict[str, Any]:
-    blocking: list[str] = []
-    non_blocking: list[str] = []
-    if set(methods) != set(METHODS):
-        blocking.append(f"methods differ from CMC reference: {methods}")
-    denominator = str(config.get("prune", {}).get("sparsity_denominator", "prunable")).lower()
-    if denominator not in {"prunable", "mask", "prunable_weights", "prunable_linear", "prunable_linears"}:
-        blocking.append(
-            "target sparsity denominator is whole-model; this is not the CMC0.2B 50% prunable-linear protocol"
-        )
-    elif float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
-        blocking.append("target prunable sparsity is not 0.5")
-    if bool(config.get("prune", {}).get("include_lm_head", False)):
-        blocking.append("lm_head/output head pruning is enabled")
-    if int(benchmark.get("benchmark_runs", 1)) != 1:
-        non_blocking.append("benchmark repeats are enabled; CMC one-shot comparison should use one run per checkpoint")
-    if not benchmark.get("eval_file"):
-        blocking.append("benchmark eval_file is missing")
-    if not config.get("prune", {}).get("calibration_data_path") and any(method in {"wanda", "gradient"} for method in methods):
-        blocking.append("calibration_data_path is missing for Wanda/gradient")
-    retune_enabled = bool(config.get("retune", {}).get("enabled", False))
-    if retune_enabled:
-        non_blocking.append("retuned phase is enabled; keep it separate from primary CMC one-shot comparison")
-    return {
-        "comparable": not blocking,
-        "blocking_issues": blocking,
-        "non_blocking_differences": non_blocking,
-        "decoder_only_prunable_scope": "selected transformer attention/MLP torch.nn.Linear weights; embeddings/lm_head/norms/biases/non-Linears protected",
-        "cmc_prunable_scope": "selected prunable transformer Linear weights; embeddings/output head/norms/tokenizer/non-Linears protected",
-        "dense_baseline_checkpoint": str(dense_checkpoint),
-        "pruned_checkpoint_paths": pruned_checkpoint_paths,
-        "benchmark_config_hash": stable_config_hash(benchmark),
-        "tokenizer_config_hash": stable_config_hash({"tokenizer_path": str(dense_checkpoint)}),
-        "eval_config_hash": stable_config_hash(
-            {
-                "eval_file": benchmark.get("eval_file"),
-                "max_new_tokens": benchmark.get("max_new_tokens", 64),
-                "max_length": benchmark.get("max_length", benchmark.get("max_seq_length", 2048)),
-                "eval_batch_size": benchmark.get("eval_batch_size", 16),
-                "dtype": benchmark.get("dtype", "bf16"),
-                "comparison_mode": "whitespace",
-                "decoding": {"do_sample": False, "num_beams": 1, "temperature": 0},
-                "response_extraction": "decoder-only prompt/response exact-match evaluator",
-            }
-        ),
-    }
 
 
 def latest_checkpoint_or_default(output_dir: Path) -> Path:
@@ -871,8 +799,6 @@ def ensure_expected_pruning_rows(
     output_dir: Path,
     retune_enabled: bool,
     dense_exact_match: float | None,
-    cmc_comparable: bool,
-    comparability_issues: list[str],
 ) -> None:
     expected_phases = ["one_shot"]
     if retune_enabled:
@@ -897,10 +823,6 @@ def ensure_expected_pruning_rows(
                     error=f"{phase} row was expected by the pruning benchmark plan but no completed result was recorded.",
                     pruning_report_path=report_path,
                     dense_exact_match=dense_exact_match,
-                    cmc_comparable=cmc_comparable if phase == "one_shot" else False,
-                    comparability_issues=comparability_issues
-                    if phase == "one_shot"
-                    else ["retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"],
                 )
             )
 
@@ -954,9 +876,6 @@ def main() -> None:
         retune=retune,
         continue_on_error=continue_on_error,
     )
-    pruned_checkpoint_paths: list[str] = []
-    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
-    write_json(output_dir / "cmc_comparability_report.json", comparability)
     dense_exact_match: float | None = None
     dense_eval_dir = output_dir / "benchmarks" / "dense_baseline"
     if bool(benchmark.get("run_dense_baseline", True)):
@@ -995,12 +914,10 @@ def main() -> None:
                     base_checkpoint,
                     dense_eval_dir,
                     dense_summary,
-                    comparable=bool(comparability["comparable"]),
-                    issues=list(comparability["blocking_issues"]),
                 )
             )
     elif not args.dry_run:
-        raise RuntimeError("Dense baseline evaluation is required for CMC-compatible pruning comparison.")
+        raise RuntimeError("Dense baseline evaluation is required for pruning benchmark comparison.")
 
     for method in methods:
         print(f"\n=== Running pruning method: {method} ===", flush=True)
@@ -1037,7 +954,6 @@ def main() -> None:
                 if not args.dry_run:
                     validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
                     validate_eval_protocol_matches_dense(dense_eval_dir, one_shot_eval_dir)
-                pruned_checkpoint_paths.append(str(one_shot_dir))
                 rows.append(
                     summary_row(
                         method,
@@ -1047,8 +963,6 @@ def main() -> None:
                         "ok",
                         pruning_report_path=one_shot_dir / "pruning_report.json",
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=bool(comparability["comparable"]),
-                        comparability_issues=list(comparability["blocking_issues"]),
                     )
                 )
                 one_shot_completed = True
@@ -1063,8 +977,6 @@ def main() -> None:
                         error=str(exc),
                         pruning_report_path=one_shot_dir / "pruning_report.json",
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=bool(comparability["comparable"]),
-                        comparability_issues=list(comparability["blocking_issues"]),
                     )
                 )
                 write_summary(output_dir, rows)
@@ -1081,8 +993,6 @@ def main() -> None:
                     error="one_shot.enabled is false; one-shot pruning result was not produced.",
                     pruning_report_path=one_shot_dir / "pruning_report.json",
                     dense_exact_match=dense_exact_match,
-                    cmc_comparable=bool(comparability["comparable"]),
-                    comparability_issues=list(comparability["blocking_issues"]),
                 )
             )
 
@@ -1098,10 +1008,6 @@ def main() -> None:
                         error=f"retune.enabled=true but retune was skipped because {method} one-shot did not complete.",
                         pruning_report_path=None,
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=False,
-                        comparability_issues=[
-                            "retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"
-                        ],
                     )
                 )
                 write_summary(output_dir, rows)
@@ -1135,7 +1041,6 @@ def main() -> None:
                 if not args.dry_run:
                     validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
                     validate_eval_protocol_matches_dense(dense_eval_dir, retuned_eval_dir)
-                pruned_checkpoint_paths.append(str(retuned_checkpoint))
                 if args.dry_run or not retuned_report.exists():
                     retuned_report = one_shot_dir / "pruning_report.json"
                 rows.append(
@@ -1147,10 +1052,6 @@ def main() -> None:
                         "ok",
                         pruning_report_path=retuned_report,
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=False,
-                        comparability_issues=[
-                            "retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"
-                        ],
                     )
                 )
             except Exception as exc:
@@ -1167,25 +1068,17 @@ def main() -> None:
                         error=f"retune.enabled=true but retuned checkpoint/eval was not completed: {exc}",
                         pruning_report_path=retuned_report if retuned_report.exists() else None,
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=False,
-                        comparability_issues=[
-                            "retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"
-                        ],
                     )
                 )
                 write_summary(output_dir, rows)
                 if not continue_on_error:
                     raise
-    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
-    write_json(output_dir / "cmc_comparability_report.json", comparability)
     ensure_expected_pruning_rows(
         rows=rows,
         methods=methods,
         output_dir=output_dir,
         retune_enabled=bool(retune.get("enabled", True)),
         dense_exact_match=dense_exact_match,
-        cmc_comparable=bool(comparability["comparable"]),
-        comparability_issues=list(comparability["blocking_issues"]),
     )
     write_summary(output_dir, rows)
     print(f"\nWrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.csv'}")

@@ -90,14 +90,24 @@ def make_masks(
     prune_config["_resolved_prunable_sparsity"] = sparsity
 
     if method == "2of4":
+        method_target_note = ""
         if str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
-            raise ValueError(
-                "Pure NVIDIA 2:4 pruning cannot satisfy whole-model sparsity "
-                f"{requested_sparsity:.6f} with protected parameters unchanged. "
-                "Vanilla 2:4 is exactly 50% sparsity inside each prunable Linear weight group, "
-                f"which would give about {0.5 * float(target_resolution['percentage_of_model_in_pruning_mask']):.6f} "
-                "whole-model sparsity for this checkpoint. Use denominator='prunable' for vanilla 2:4, "
-                "or add a separately labeled 2:4 + top-up method."
+            requested_resolution = target_resolution
+            target_resolution = resolve_prunable_sparsity_for_target(
+                model,
+                target_sparsity=0.5,
+                denominator="prunable",
+                include_lm_head=include_lm_head,
+            )
+            sparsity = 0.5
+            prune_config["_target_resolution"] = target_resolution
+            prune_config["_resolved_prunable_sparsity"] = sparsity
+            method_target_note = (
+                "Pure NVIDIA 2:4 is a fixed vanilla method: exactly 50% sparsity within each prunable "
+                "Linear 4-weight group. It cannot also satisfy a 50% whole-model target while protected "
+                "parameters remain unchanged, so this method is run and reported as 50% prunable 2:4. "
+                f"The requested whole-model target would have required "
+                f"{float(requested_resolution['target_prunable_sparsity']):.8f} prunable sparsity."
             )
         masks = two_of_four_masks(model, include_lm_head=include_lm_head)
         validation = validate_two_of_four_masks(masks)
@@ -107,6 +117,7 @@ def make_masks(
             "pruning_granularity": "per_group_of_4_input_weights",
             "score_definition": "in each group of 4 weights, keep top 2 by abs(weight)",
             "method_variant": "vanilla_nvidia_2of4",
+            "method_target_note": method_target_note,
             "target_resolution": target_resolution,
             "nvidia_2of4_validation": validation,
         }
@@ -256,6 +267,8 @@ def save_pruned_model(
         "target_resolution": target_resolution,
         "target_prunable_sparsity": target_prunable_sparsity,
         "target_whole_model_sparsity": target_resolution.get("target_whole_model_sparsity"),
+        "method_variant": diagnostics.get("method_variant", ""),
+        "method_target_note": diagnostics.get("method_target_note", ""),
         "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
         "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
         "include_lm_head": bool(prune_config.get("include_lm_head", False)),

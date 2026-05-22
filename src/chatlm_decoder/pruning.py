@@ -97,13 +97,13 @@ def is_prunable_transformer_linear(name: str, module: torch.nn.Module) -> bool:
 
 def named_prunable_linears(model: torch.nn.Module, include_lm_head: bool = False) -> list[tuple[str, torch.nn.Linear]]:
     if include_lm_head:
-        raise ValueError("CMC-compatible pruning must not include lm_head/output-head parameters.")
+        raise ValueError("This pruning benchmark protects lm_head/output-head parameters.")
     modules: list[tuple[str, torch.nn.Linear]] = []
     for name, module in model.named_modules():
         if is_prunable_transformer_linear(name, module):
             modules.append((name, module))
     if not modules:
-        raise ValueError("No CMC-compatible prunable transformer Linear modules were found.")
+        raise ValueError("No prunable transformer Linear modules were found.")
     return modules
 
 
@@ -131,7 +131,7 @@ def module_filter_report(model: torch.nn.Module, include_lm_head: bool = False) 
         )
     protected_parameter_count = total_parameter_count - prunable_parameter_count
     return {
-        "protocol": "CMC0.2B-compatible decoder-only pruning scope",
+        "protocol": "decoder-only pruning scope",
         "prunable_scope": "attention and MLP torch.nn.Linear weights only",
         "prunable_module_names": prunable_module_names,
         "prunable_modules": [
@@ -235,10 +235,10 @@ def validate_masks_match_prunable_scope(model: torch.nn.Module, masks: dict[str,
     prunable_names = {name for name, _module in named_prunable_linears(model)}
     missing = sorted(prunable_names - set(masks))
     if missing:
-        raise ValueError(f"Pruning masks are missing CMC-prunable modules: {missing}")
+        raise ValueError(f"Pruning masks are missing prunable modules: {missing}")
     for name in masks:
         if name not in prunable_names:
-            raise ValueError(f"Mask includes non-CMC-prunable module: {name}")
+            raise ValueError(f"Mask includes non-prunable module: {name}")
         if is_protected_name(name):
             raise ValueError(f"Mask includes protected module name: {name}")
 

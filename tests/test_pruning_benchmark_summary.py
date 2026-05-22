@@ -148,15 +148,15 @@ def test_write_summary_has_eight_pruning_rows_with_missing_retuned(tmp_path: Pat
         output_dir=tmp_path,
         retune_enabled=True,
         dense_exact_match=0.923722,
-        cmc_comparable=True,
-        comparability_issues=[],
     )
     benchmark.write_summary(tmp_path, rows)
 
     with (tmp_path / "pruning_benchmark_summary.csv").open("r", encoding="utf-8", newline="") as handle:
-        csv_rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        csv_rows = list(reader)
 
     assert len(csv_rows) == 8
+    assert not any(str(field).endswith("_comparable") for field in (reader.fieldnames or []))
     assert {(row["method"], row["phase"]) for row in csv_rows} == {
         (method, phase) for method in benchmark.METHODS for phase in ("one_shot", "retuned")
     }
