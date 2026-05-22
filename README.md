@@ -891,7 +891,7 @@ Evaluate any dense, pruned, or retuned checkpoint on the final 200-example IoT b
 ```bash
 python scripts/eval_iot_benchmark.py \
   --model-path /absolute/path/to/checkpoint \
-  --benchmark-file "/Users/luke/Documents/SCENIC agent/generated/iot_instruction_benchmark_200.json" \
+  --benchmark-file data/benchmarks/iot_instruction_benchmark_200.json \
   --prompt-format legacy \
   --output-dir runs/iot-benchmark/my-model
 ```

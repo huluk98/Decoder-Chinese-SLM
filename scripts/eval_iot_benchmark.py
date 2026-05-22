@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BENCHMARK_FILE = Path("/Users/luke/Documents/SCENIC agent/generated/iot_instruction_benchmark_200.json")
+DEFAULT_BENCHMARK_FILE = PROJECT_ROOT / "data" / "benchmarks" / "iot_instruction_benchmark_200.json"
 LEGACY_USER_TOKEN = "<|user|>"
 LEGACY_ASSISTANT_TOKEN = "<|assistant|>"
 LEGACY_SYSTEM_TOKEN = "<|system|>"
