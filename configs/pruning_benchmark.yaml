@@ -4,8 +4,11 @@ benchmark:
   prune_config: configs/prune_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
   eval_file: /path/to/eval.json
+  run_dense_baseline: true
+  min_dense_exact_match_accuracy: 0.01
   benchmark_runs: 1
   max_new_tokens: 64
+  max_length: 128
   eval_batch_size: 16
   dtype: bf16
   nproc_per_node: 8

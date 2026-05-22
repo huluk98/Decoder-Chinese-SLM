@@ -18,16 +18,28 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.pruning import (
     apply_masks,
+    assert_protected_parameters_unchanged,
     collect_activation_scalers,
     collect_gradient_scores,
+    collect_weight_norms,
     global_magnitude_masks,
+    gradient_saliency_report,
     gradient_score_masks,
-    mask_implied_model_stats,
-    mask_parameter_stats,
     masked_weight_stats,
     mask_sparsity,
+    module_filter_report,
+    model_parameter_stats,
+    protected_parameter_snapshot,
+    sparsity_accounting,
     two_of_four_masks,
+    validate_masks_match_prunable_scope,
+    validate_two_of_four_masks,
+    wanda_activation_report,
     wanda_masks,
+    layerwise_zero_fraction,
+    weight_norms_before_after,
+    write_csv,
+    write_json,
 )
 from chatlm_decoder.qwen25_instruct_data import (
     DEFAULT_SYSTEM_PROMPT,
@@ -99,15 +111,22 @@ def make_masks(
     calibration_loader: Any,
     device: torch.device,
     prune_config: dict[str, Any],
-) -> dict[str, torch.Tensor]:
+) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     sparsity = float(prune_config.get("sparsity", 0.5))
     include_lm_head = bool(prune_config.get("include_lm_head", False))
     max_batches = int(prune_config.get("calibration_batches", 128))
 
     if method == "2of4":
-        return two_of_four_masks(model, include_lm_head=include_lm_head)
+        masks = two_of_four_masks(model, include_lm_head=include_lm_head)
+        validation = validate_two_of_four_masks(masks)
+        if not validation["valid"]:
+            raise ValueError(f"Invalid NVIDIA 2:4 mask: {validation['total_invalid_2of4_groups']} invalid groups")
+        return masks, {"pruning_granularity": "per_group_of_4_input_weights", "nvidia_2of4_validation": validation}
     if method == "magnitude":
-        return global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head)
+        return global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head), {
+            "pruning_granularity": "global_prunable_linear_weight",
+            "score_definition": "abs(weight)",
+        }
     if calibration_loader is None:
         raise ValueError(f"Qwen pruning method {method} requires prune.calibration_data_path or train_file.")
     if method == "wanda":
@@ -118,12 +137,20 @@ def make_masks(
             max_batches=max_batches,
             include_lm_head=include_lm_head,
         )
-        return wanda_masks(
+        masks = wanda_masks(
             model,
             activation_scalers=scalers,
             sparsity=sparsity,
             include_lm_head=include_lm_head,
         )
+        report = wanda_activation_report(scalers, masks)
+        if not report["all_modules_valid"]:
+            raise ValueError(f"Invalid Wanda activation statistics: {report['blocking_issues']}")
+        return masks, {
+            "pruning_granularity": "per_output_row_prunable_linear_weight",
+            "score_definition": "abs(weight) * sqrt(mean(input_activation^2))",
+            "wanda_activation_report": report,
+        }
     if method == "gradient":
         scores = collect_gradient_scores(
             model,
@@ -132,12 +159,19 @@ def make_masks(
             max_batches=max_batches,
             include_lm_head=include_lm_head,
         )
+        report = gradient_saliency_report(scores)
+        if not report["all_modules_valid"]:
+            raise ValueError(f"Invalid gradient saliency statistics: {report['blocking_issues']}")
         return gradient_score_masks(
             model,
             gradient_scores=scores,
             sparsity=sparsity,
             include_lm_head=include_lm_head,
-        )
+        ), {
+            "pruning_granularity": "global_prunable_linear_weight",
+            "score_definition": "abs(weight * gradient)",
+            "gradient_saliency_report": report,
+        }
     raise ValueError(f"Unknown pruning method: {method}")
 
 
@@ -181,23 +215,6 @@ def recovery_tune(
         apply_masks(model, masks)
 
 
-def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
-    total_parameters = 0
-    nonzero_parameters = 0
-    for parameter in model.parameters():
-        data = parameter.detach()
-        total_parameters += int(data.numel())
-        nonzero_parameters += int(torch.count_nonzero(data).item())
-    zero_parameters = total_parameters - nonzero_parameters
-    return {
-        "total_parameters": total_parameters,
-        "nonzero_parameters": nonzero_parameters,
-        "zero_parameters": zero_parameters,
-        "nonzero_fraction": nonzero_parameters / float(total_parameters or 1),
-        "model_zero_fraction": zero_parameters / float(total_parameters or 1),
-    }
-
-
 def save_pruned_model(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -206,6 +223,9 @@ def save_pruned_model(
     method: str,
     prune_config: dict[str, Any],
     checkpoint: str,
+    diagnostics: dict[str, Any],
+    before_norms: dict[str, dict[str, float | int]],
+    device: torch.device,
 ) -> None:
     if output_dir.exists() and bool(prune_config.get("overwrite", False)):
         shutil.rmtree(output_dir)
@@ -214,21 +234,31 @@ def save_pruned_model(
     tokenizer.save_pretrained(output_dir)
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
-    mask_stats = mask_parameter_stats(masks)
-    model_stats = model_parameter_stats(model)
+    target_sparsity = float(prune_config.get("sparsity", 0.5))
+    accounting = sparsity_accounting(model, masks, target=target_sparsity)
+    after_norms = collect_weight_norms(model, masks)
+    reload_model = AutoModelForCausalLM.from_pretrained(str(output_dir), trust_remote_code=False).to(device)
+    reload_validation = {
+        "checkpoint_reloaded": str(output_dir),
+        **sparsity_accounting(reload_model, masks, target=target_sparsity),
+    }
+    if int(reload_validation.get("masked_weight_violation_count", 0) or 0):
+        raise ValueError(f"Pruned weights became nonzero after checkpoint reload: {output_dir}")
     metadata = {
         "method": method,
         "phase": "one_shot_qwen25_instruct_prune",
         "base_checkpoint": checkpoint,
         "sparsity": mask_sparsity(masks),
-        "target_sparsity": float(prune_config.get("sparsity", 0.5)),
+        "target_sparsity": target_sparsity,
+        "target_prunable_sparsity": target_sparsity,
+        "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
+        "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
         "include_lm_head": bool(prune_config.get("include_lm_head", False)),
         "recovery_steps": int(prune_config.get("recovery_steps", 0)),
         "uses_qwen_apply_chat_template": True,
-        **mask_stats,
-        **model_stats,
-        **mask_implied_model_stats(int(model_stats["total_parameters"]), masks),
-        **masked_weight_stats(model, masks),
+        "checkpoint_evaluated": str(output_dir),
+        "checkpoint_reload_validation": reload_validation,
+        **accounting,
         "note": (
             "2of4 produces an NVIDIA semi-structured 2:4 zero pattern in Qwen linear weights. "
             "Actual sparse Tensor Core speedups require a runtime that dispatches 2:4 kernels."
@@ -236,9 +266,21 @@ def save_pruned_model(
             else "Qwen2.5-Instruct checkpoint with zeros applied according to pruning masks."
         ),
     }
-    with (output_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
-        json.dump(metadata, handle, indent=2, ensure_ascii=False)
-        handle.write("\n")
+    write_json(output_dir / "module_filter_report.json", module_filter_report(model))
+    write_json(output_dir / "pruning_report.json", metadata)
+    write_json(output_dir / "mask_validation.json", {"method": method, "phase": "one_shot_prune", **accounting})
+    write_json(output_dir / "checkpoint_reload_validation.json", reload_validation)
+    write_csv(output_dir / "sparsity_by_module.csv", layerwise_zero_fraction(model, masks))
+    write_csv(output_dir / "layerwise_zero_fraction.csv", layerwise_zero_fraction(model, masks))
+    write_csv(output_dir / "layerwise_weight_norms_before_after.csv", weight_norms_before_after(before_norms, after_norms))
+    if diagnostics.get("gradient_saliency_report"):
+        write_json(output_dir / "gradient_saliency_report.json", diagnostics["gradient_saliency_report"])
+    if diagnostics.get("wanda_activation_report"):
+        write_json(output_dir / "wanda_activation_report.json", diagnostics["wanda_activation_report"])
+    if diagnostics.get("nvidia_2of4_validation"):
+        write_json(output_dir / "nvidia_2of4_validation.json", diagnostics["nvidia_2of4_validation"])
+    if diagnostics.get("protected_parameter_validation"):
+        write_json(output_dir / "protected_parameter_validation.json", diagnostics["protected_parameter_validation"])
     print(json.dumps(metadata, indent=2, ensure_ascii=False))
     print(f"Saved Qwen2.5-Instruct pruned checkpoint: {output_dir}")
 
@@ -278,11 +320,16 @@ def main() -> None:
         model.config.use_cache = False
 
     calibration_loader = build_calibration_loader(tokenizer, config, prune_config)
-    masks = make_masks(method, model, calibration_loader, device, prune_config)
+    masks, diagnostics = make_masks(method, model, calibration_loader, device, prune_config)
+    validate_masks_match_prunable_scope(model, masks)
+    protected_snapshot = protected_parameter_snapshot(model, masks)
+    before_norms = collect_weight_norms(model, masks)
     print(f"Applying Qwen {method} masks with actual sparsity {mask_sparsity(masks):.4f}")
     apply_masks(model, masks)
     recovery_tune(model, masks, calibration_loader, device, prune_config)
-    save_pruned_model(model, tokenizer, masks, output_dir, method, prune_config, checkpoint)
+    protected_validation = assert_protected_parameters_unchanged(model, protected_snapshot)
+    diagnostics["protected_parameter_validation"] = protected_validation
+    save_pruned_model(model, tokenizer, masks, output_dir, method, prune_config, checkpoint, diagnostics, before_norms, device)
 
 
 if __name__ == "__main__":

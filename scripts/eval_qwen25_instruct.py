@@ -21,6 +21,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -37,6 +38,8 @@ from chatlm_decoder.qwen25_instruct_data import (
     DEFAULT_SYSTEM_PROMPT,
     assert_no_legacy_tokens,
     extract_instruction_response,
+    format_qwen_sft_example,
+    qwen25_instruct_collate,
     qwen_prompt_text,
     read_records,
 )
@@ -373,8 +376,10 @@ def audit_splits(dataset_file: Path, train_file: str | None) -> dict[str, Any]:
 def make_eval_examples(tokenizer: Any, records: list[dict[str, Any]], system_prompt: str) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     for index, record in enumerate(records):
-        instruction, response = extract_instruction_response(record)
-        prompt_text = qwen_prompt_text(tokenizer, instruction, system_prompt)
+        formatted = format_qwen_sft_example(tokenizer, record, system_prompt)
+        instruction = formatted["instruction"]
+        response = formatted["response"]
+        prompt_text = formatted["prompt_text"]
         assert_no_legacy_tokens(prompt_text, "Qwen eval prompt")
         examples.append(
             {
@@ -384,9 +389,52 @@ def make_eval_examples(tokenizer: Any, records: list[dict[str, Any]], system_pro
                 "instruction": instruction,
                 "prompt_text": prompt_text,
                 "response_text": response,
+                "response_with_eos": formatted["response_with_eos"],
+                "full_text": formatted["full_text"],
+                "prompt_token_count": len(tokenizer(prompt_text, add_special_tokens=False)["input_ids"]),
             }
         )
     return examples
+
+
+@torch.no_grad()
+def score_batch(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    examples: list[dict[str, Any]],
+    device: torch.device,
+    max_length: int,
+) -> list[dict[str, float | int]]:
+    batch = qwen25_instruct_collate(examples, tokenizer=tokenizer, max_seq_length=int(max_length))
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    labels = batch["labels"].to(device)
+    logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = labels[:, 1:].contiguous()
+
+    scores: list[dict[str, float | int]] = []
+    for row in range(shift_labels.shape[0]):
+        row_labels = shift_labels[row]
+        token_count = int((row_labels != -100).sum().detach().cpu())
+        if token_count == 0:
+            scores.append({"loss": math.nan, "token_count": 0, "loss_sum": 0.0})
+            continue
+        loss_sum = F.cross_entropy(
+            shift_logits[row].view(-1, shift_logits.shape[-1]).float(),
+            row_labels.view(-1),
+            ignore_index=-100,
+            reduction="sum",
+        )
+        loss_value = float((loss_sum / token_count).detach().cpu())
+        scores.append(
+            {
+                "loss": loss_value,
+                "token_count": token_count,
+                "loss_sum": float(loss_sum.detach().cpu()),
+            }
+        )
+    return scores
 
 
 @torch.no_grad()
@@ -489,6 +537,8 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             "exact_match",
             "command_exact_match",
             "generated_token_count",
+            "response_loss",
+            "response_token_count",
             "reached_max_new_tokens",
             "empty_prediction",
             "mismatch_reason",
@@ -499,6 +549,23 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             writer.writerow({field: result.get(field, "") for field in fieldnames})
     failed = [result for result in results if not bool(result.get("exact_match"))]
     write_json(output_dir / "failed_examples_20.json", failed[:20])
+    generation_samples = [
+        {
+            "raw_input_example": result.get("record", {}),
+            "formatted_prompt": result.get("prompt", ""),
+            "tokenized_prompt_length": result.get("tokenized_prompt_length"),
+            "gold_response": result.get("raw_label", ""),
+            "raw_generated_text": result.get("raw_prediction", ""),
+            "extracted_response": result.get("raw_prediction", ""),
+            "normalized_prediction": result.get("normalized_prediction", ""),
+            "normalized_gold": result.get("normalized_label", ""),
+            "exact_match": result.get("exact_match"),
+            "response_loss": result.get("response_loss"),
+        }
+        for result in results[:50]
+    ]
+    write_json(output_dir / "generation_samples.json", generation_samples)
+    write_json(output_dir / "exact_match_failure_cases.json", failed[:50])
 
 
 def mirror_summary_to_root(output_root: Path, output_dir: Path, summary: dict[str, Any], split_audit: dict[str, Any]) -> None:
@@ -551,6 +618,10 @@ def write_run_config(
             "eos_token_id": tokenizer.eos_token_id,
             "pad_token_id": tokenizer.pad_token_id,
         },
+        "scoring": {
+            "max_length": int(args.max_length),
+            "label_masking": "prompt tokens are -100; assistant response tokens only",
+        },
         "eval_args": vars(args),
         "split_audit_summary": {
             "has_suspicious_leakage": split_audit.get("has_suspicious_leakage"),
@@ -580,6 +651,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic-eval", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--benchmark-runs", type=int, default=1)
     parser.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
     parser.add_argument("--fail-on-leakage", action=argparse.BooleanOptionalAction, default=False)
@@ -651,6 +723,7 @@ def main() -> None:
             f"  parameter_count={parameter_count(model):,}\n"
             f"  git_commit={git_commit_hash()}\n"
             f"  seed={args.seed} deterministic={seed_info['deterministic_algorithms_enabled']}\n"
+            f"  max_length={int(args.max_length)}\n"
             f"  output_dir={output_dir}"
         )
         print(
@@ -673,8 +746,10 @@ def main() -> None:
             print(
                 f"[run {run_index + 1}/{benchmark_runs}] Fresh Qwen chat-template generation; writing: "
                 f"{run_output_dir / 'qwen25_instruct_predictions.jsonl'}"
-            )
+        )
         local_results: list[dict[str, Any]] = []
+        total_loss_sum = 0.0
+        total_tokens = 0
         progress = tqdm(
             range(0, len(indexed_examples), batch_size),
             desc=f"qwen25-instruct-eval-run{run_index + 1:02d}-rank{rank}",
@@ -682,6 +757,14 @@ def main() -> None:
         )
         for start in progress:
             batch_pairs = indexed_examples[start : start + batch_size]
+            batch_examples = [example for _, example in batch_pairs]
+            scores = score_batch(
+                model=model,
+                tokenizer=tokenizer,
+                examples=batch_examples,
+                device=device,
+                max_length=int(args.max_length),
+            )
             prompts = [example["prompt_text"] for _, example in batch_pairs]
             try:
                 generations = generate_batch(
@@ -696,6 +779,11 @@ def main() -> None:
                 generations = [("", 0, False) for _ in batch_pairs]
                 generation_errors = [repr(exc) for _ in batch_pairs]
             for offset, (index, example) in enumerate(batch_pairs):
+                score = scores[offset]
+                token_count = int(score["token_count"])
+                loss_sum = float(score["loss_sum"])
+                total_tokens += token_count
+                total_loss_sum += loss_sum
                 raw_prediction, generated_count, reached_max = generations[offset]
                 raw_label = str(example["response_text"])
                 normalized_prediction = normalize_qwen_text(raw_prediction, tokenizer=tokenizer)
@@ -710,6 +798,7 @@ def main() -> None:
                         "benchmark_run": run_index + 1,
                         "id": example["id"],
                         "index": index,
+                        "record": example["record"],
                         "prompt": example["prompt_text"],
                         "instruction": example["instruction"],
                         "raw_prediction": raw_prediction,
@@ -721,7 +810,11 @@ def main() -> None:
                         "exact_match": is_exact,
                         "command_exact_match": is_command_exact,
                         "generated_token_count": int(generated_count),
+                        "tokenized_prompt_length": int(example["prompt_token_count"]),
                         "label_token_count": int(label_count),
+                        "response_loss": score["loss"],
+                        "response_perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
+                        "response_token_count": token_count,
                         "generated_length": int(generated_count),
                         "label_length": int(label_count),
                         "reached_max_new_tokens": bool(reached_max),
@@ -737,14 +830,31 @@ def main() -> None:
                 )
 
         if is_dist():
-            gathered: list[list[dict[str, Any]] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
-            dist.gather_object(local_results, gathered, dst=0)
+            local_payload = {
+                "results": local_results,
+                "total_loss_sum": total_loss_sum,
+                "total_tokens": total_tokens,
+            }
+            gathered: list[dict[str, Any] | None] | None = [None for _ in range(world_size)] if rank == 0 else None
+            dist.gather_object(local_payload, gathered, dst=0)
         else:
-            gathered = [local_results]
+            gathered = [
+                {
+                    "results": local_results,
+                    "total_loss_sum": total_loss_sum,
+                    "total_tokens": total_tokens,
+                }
+            ]
         if rank != 0:
             continue
 
-        results = sorted([row for payload in gathered or [] for row in (payload or [])], key=lambda row: int(row["index"]))
+        payloads = [payload for payload in gathered or [] if payload is not None]
+        total_loss_sum = sum(float(payload["total_loss_sum"]) for payload in payloads)
+        total_tokens = sum(int(payload["total_tokens"]) for payload in payloads)
+        results = sorted(
+            [row for payload in payloads for row in payload["results"]],
+            key=lambda row: int(row["index"]),
+        )
         exact_correct = sum(1 for result in results if bool(result["exact_match"]))
         command_correct = sum(1 for result in results if bool(result["command_exact_match"]))
         empty_predictions = sum(1 for result in results if bool(result["empty_prediction"]))
@@ -752,6 +862,21 @@ def main() -> None:
         reached_max = sum(1 for result in results if bool(result["reached_max_new_tokens"]))
         avg_generated_tokens = sum(int(result["generated_token_count"]) for result in results) / max(1, len(results))
         avg_label_tokens = sum(int(result["label_token_count"]) for result in results) / max(1, len(results))
+        mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
+        generated_texts = [str(result.get("raw_prediction", "")).strip() for result in results]
+        nonempty_generated = [text for text in generated_texts if text]
+        prompt_copies = sum(
+            1
+            for result in results
+            if str(result.get("raw_prediction", "")).strip()
+            and str(result.get("raw_prediction", "")).strip().startswith(str(result.get("prompt", "")).strip())
+        )
+        if empty_predictions == len(results):
+            raise RuntimeError("Generated Qwen predictions are all empty; inspect tokenizer/EOS/max_new_tokens before trusting the benchmark.")
+        if len(nonempty_generated) > 1 and len(set(nonempty_generated)) == 1:
+            raise RuntimeError("Generated Qwen predictions are all identical; inspect generation/checkpoint loading before trusting the benchmark.")
+        if prompt_copies / max(1, len(results)) > 0.5:
+            raise RuntimeError("Generated Qwen predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
         warnings: list[str] = []
         if avg_generated_tokens >= 0.9 * int(args.max_new_tokens):
             warnings.append("Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
@@ -766,6 +891,10 @@ def main() -> None:
             "total_examples": len(results),
             "correct_examples": exact_correct,
             "incorrect_examples": len(results) - exact_correct,
+            "response_tokens": total_tokens,
+            "total_loss_sum": total_loss_sum,
+            "mean_response_loss": mean_loss,
+            "response_perplexity": math.exp(mean_loss) if total_tokens else math.nan,
             "exact_match_accuracy": exact_correct / max(1, len(results)),
             "exact_match_correct": exact_correct,
             "command_exact_match_accuracy": command_correct / max(1, len(results)),
@@ -776,6 +905,7 @@ def main() -> None:
             "avg_generated_tokens": avg_generated_tokens,
             "avg_label_tokens": avg_label_tokens,
             "max_new_tokens": int(args.max_new_tokens),
+            "max_length": int(args.max_length),
             "batch_size": batch_size,
             "world_size": world_size,
             "uses_qwen_apply_chat_template": True,
@@ -791,6 +921,7 @@ def main() -> None:
         print(
             f"[run {run_index + 1}/{benchmark_runs}] exact_match={summary['exact_match_accuracy']:.4f} "
             f"({exact_correct}/{len(results)}) command_match={summary['command_exact_match_accuracy']:.4f} "
+            f"loss={summary['mean_response_loss']:.4f} ppl={summary['response_perplexity']:.4f} "
             f"avg_generated_tokens={avg_generated_tokens:.2f}"
         )
         for warning in warnings:
@@ -810,6 +941,7 @@ def main() -> None:
             "benchmark_runs": benchmark_runs,
             "total_examples": len(records),
             "max_new_tokens": int(args.max_new_tokens),
+            "max_length": int(args.max_length),
             "batch_size": batch_size,
             "world_size": world_size,
             "output_dir": str(output_dir),
@@ -824,6 +956,9 @@ def main() -> None:
             "command_exact_match_accuracy",
             "avg_generated_tokens",
             "avg_label_tokens",
+            "mean_response_loss",
+            "response_perplexity",
+            "response_tokens",
             "empty_predictions",
             "generation_errors",
             "reached_max_new_tokens",
@@ -834,7 +969,13 @@ def main() -> None:
         write_json(output_dir / "qwen25_instruct_eval_summary.json", benchmark_summary)
         write_json(output_dir / "metrics.json", benchmark_summary)
         last_run_dir = output_dir / f"run_{benchmark_runs:02d}"
-        for filename in ("qwen25_instruct_predictions.jsonl", "qwen25_instruct_prediction_debug.csv", "failed_examples_20.json"):
+        for filename in (
+            "qwen25_instruct_predictions.jsonl",
+            "qwen25_instruct_prediction_debug.csv",
+            "failed_examples_20.json",
+            "generation_samples.json",
+            "exact_match_failure_cases.json",
+        ):
             source = last_run_dir / filename
             if source.exists():
                 shutil.copyfile(source, output_dir / filename)
@@ -843,6 +984,8 @@ def main() -> None:
             "Qwen2.5-Instruct benchmark summary:\n"
             f"  exact_match_accuracy={benchmark_summary['exact_match_accuracy_mean_pm_std']}\n"
             f"  command_exact_match_accuracy={benchmark_summary['command_exact_match_accuracy_mean_pm_std']}\n"
+            f"  loss={benchmark_summary['mean_response_loss_mean_pm_std']}\n"
+            f"  ppl={benchmark_summary['response_perplexity_mean_pm_std']}\n"
             f"  avg_generated_tokens={benchmark_summary['avg_generated_tokens_mean_pm_std']}"
         )
     elif run_summaries:

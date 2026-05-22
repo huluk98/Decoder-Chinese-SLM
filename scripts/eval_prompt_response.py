@@ -704,6 +704,23 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
                     "label_length": result.get("label_length", result.get("response_token_count", "")),
                 }
             )
+    generation_samples = [
+        {
+            "raw_input_example": result.get("record", {}),
+            "formatted_prompt": result.get("prompt", ""),
+            "tokenized_prompt_length": result.get("tokenized_prompt_length"),
+            "gold_response": result.get("raw_label", result.get("response", "")),
+            "raw_generated_text": result.get("raw_prediction", result.get("generated", "")),
+            "extracted_response": result.get("raw_prediction", result.get("generated", "")),
+            "normalized_prediction": result.get("normalized_prediction", ""),
+            "normalized_gold": result.get("normalized_label", ""),
+            "exact_match": result.get("exact_match"),
+            "response_loss": result.get("loss"),
+        }
+        for result in results[:50]
+    ]
+    write_json(output_dir / "generation_samples.json", generation_samples)
+    write_json(output_dir / "exact_match_failure_cases.json", [row for row in results if not bool(row.get("exact_match"))][:50])
 
 
 def write_eval_run_config(
@@ -1088,6 +1105,7 @@ def main() -> None:
                     "benchmark_run": run_index + 1,
                     "id": record_id(batch[offset]["record"], index),
                     "index": index,
+                    "record": batch[offset]["record"],
                     "prompt": batch[offset]["prompt_text"],
                     "response": batch[offset]["response_text"],
                     "raw_label": batch[offset]["response_text"],
@@ -1095,6 +1113,9 @@ def main() -> None:
                     "perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
                     "response_token_count": token_count,
                     "label_length": token_count,
+                    "tokenized_prompt_length": len(
+                        tokenizer(batch[offset]["prompt_text"], add_special_tokens=False)["input_ids"]
+                    ),
                 }
                 if bool(args.exact_match) or index < int(args.generate_samples):
                     generated, generated_token_count, generation_error = generation_by_index.get(index, ("", 0, ""))
@@ -1167,6 +1188,21 @@ def main() -> None:
         invalid_outputs = sum(1 for result in results if result.get("invalid_structured_output"))
         generation_errors = sum(1 for result in results if result.get("generation_error"))
         avg_label_length = sum(label_lengths) / max(1, len(label_lengths))
+        if args.exact_match and results:
+            generated_texts = [str(result.get("raw_prediction", "")).strip() for result in results]
+            nonempty_generated = [text for text in generated_texts if text]
+            prompt_copies = sum(
+                1
+                for result in results
+                if str(result.get("raw_prediction", "")).strip()
+                and str(result.get("raw_prediction", "")).strip().startswith(str(result.get("prompt", "")).strip())
+            )
+            if empty_predictions == len(results):
+                raise RuntimeError("Generated predictions are all empty; inspect tokenizer/EOS/max_new_tokens before trusting the benchmark.")
+            if len(nonempty_generated) > 1 and len(set(nonempty_generated)) == 1:
+                raise RuntimeError("Generated predictions are all identical; inspect generation/checkpoint loading before trusting the benchmark.")
+            if prompt_copies / max(1, len(results)) > 0.5:
+                raise RuntimeError("Generated predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
         incorrect = len(records) - exact_correct if args.exact_match else None
         summary = {
             "benchmark_run": run_index + 1,
@@ -1261,7 +1297,12 @@ def main() -> None:
         write_json(output_dir / "prompt_response_eval_summary.json", benchmark_summary)
         write_json(output_dir / "metrics.json", benchmark_summary)
         last_run_dir = output_dir / f"run_{benchmark_runs:02d}"
-        for filename in ("prompt_response_eval_predictions.jsonl", "prediction_debug.csv"):
+        for filename in (
+            "prompt_response_eval_predictions.jsonl",
+            "prediction_debug.csv",
+            "generation_samples.json",
+            "exact_match_failure_cases.json",
+        ):
             source = last_run_dir / filename
             if source.exists():
                 shutil.copyfile(source, output_dir / filename)

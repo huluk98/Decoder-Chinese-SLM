@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -45,6 +46,11 @@ def write_json(path: str | Path, payload: Any) -> None:
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+
+
+def stable_config_hash(payload: Any) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def as_path(value: Any) -> Path:
@@ -151,6 +157,8 @@ def validate_pruning_report(
     nonzero_parameters = report.get("nonzero_parameters")
     if nonzero_parameters is not None and int(nonzero_parameters) <= 0:
         raise ValueError(f"{method} {phase} reports zero nonzero model parameters: {report_path}")
+    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_sparsity)) > float(tolerance):
+        raise ValueError(f"{method} {phase} achieved_prunable_sparsity does not match target: {report_path}")
 
 
 def validate_benchmark_paths(
@@ -318,6 +326,8 @@ def run_eval(
         str(output_dir),
         "--max-new-tokens",
         str(int(benchmark.get("max_new_tokens", 64))),
+        "--max-length",
+        str(int(benchmark.get("max_length", benchmark.get("max_seq_length", 256)))),
         "--batch-size",
         str(int(benchmark.get("eval_batch_size", 16))),
         "--dtype",
@@ -375,6 +385,45 @@ def run_retune(
     run_command(cmd, env=env, dry_run=dry_run)
 
 
+def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any], comparable: bool, issues: list[str]) -> dict[str, Any]:
+    issue_text = "; ".join(issues)
+    if issues:
+        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
+    return {
+        "method": "dense_qwen25_instruct_sft_baseline",
+        "phase": "dense_baseline",
+        "status": "ok",
+        "checkpoint": str(checkpoint),
+        "checkpoint_evaluated": str(checkpoint),
+        "eval_dir": str(eval_dir),
+        "pruning_report": "",
+        "target_prunable_sparsity": 0.0,
+        "achieved_prunable_sparsity": 0.0,
+        "achieved_whole_model_sparsity": 0.0,
+        "prunable_parameter_count": "",
+        "protected_parameter_count": "",
+        "total_parameter_count": "",
+        "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
+        "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
+        "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "command_exact_match_accuracy_mean": metric(summary, "command_exact_match_accuracy"),
+        "command_exact_match_accuracy_std": metric_std(summary, "command_exact_match_accuracy"),
+        "delta_vs_dense_exact_match": 0.0,
+        "mean_response_loss_mean": metric(summary, "mean_response_loss"),
+        "mean_response_loss": metric(summary, "mean_response_loss"),
+        "mean_response_loss_std": metric_std(summary, "mean_response_loss"),
+        "response_perplexity_mean": metric(summary, "response_perplexity"),
+        "response_perplexity": metric(summary, "response_perplexity"),
+        "response_perplexity_std": metric_std(summary, "response_perplexity"),
+        "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
+        "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
+        "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
+        "cmc_comparable": comparable,
+        "blocking_comparability_issues": issue_text,
+        "error": "",
+    }
+
+
 def read_eval_summary(eval_dir: Path) -> dict[str, Any]:
     summary_path = eval_dir / "qwen25_instruct_eval_summary.json"
     if not summary_path.exists():
@@ -388,6 +437,41 @@ def read_pruning_report(report_path: Path | None) -> dict[str, Any]:
         return {}
     with report_path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def read_eval_run_config(eval_dir: Path) -> dict[str, Any]:
+    path = eval_dir / "run_config.json"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def validate_eval_protocol_matches_dense(dense_eval_dir: Path, eval_dir: Path) -> None:
+    dense = read_eval_run_config(dense_eval_dir)
+    current = read_eval_run_config(eval_dir)
+    if not dense or not current:
+        raise FileNotFoundError(f"Missing run_config.json for dense/pruned Qwen eval comparison: {dense_eval_dir} vs {eval_dir}")
+    checks = [
+        ("dataset_file", dense.get("dataset_file"), current.get("dataset_file")),
+        ("generation", dense.get("generation"), current.get("generation")),
+        ("scoring", dense.get("scoring"), current.get("scoring")),
+        ("tokenizer", dense.get("tokenizer"), current.get("tokenizer")),
+        ("system_prompt", dense.get("system_prompt"), current.get("system_prompt")),
+        ("uses_qwen_apply_chat_template", dense.get("uses_qwen_apply_chat_template"), current.get("uses_qwen_apply_chat_template")),
+    ]
+    mismatches = [f"{name}: dense={left!r} current={right!r}" for name, left, right in checks if left != right]
+    if mismatches:
+        raise RuntimeError("Pruned Qwen eval protocol differs from dense baseline: " + "; ".join(mismatches))
+
+
+def validate_eval_checkpoint(eval_dir: Path, expected_checkpoint: Path) -> None:
+    config = read_eval_run_config(eval_dir)
+    checkpoint = config.get("checkpoint_path_used_for_evaluation") or config.get("model_path")
+    if not checkpoint:
+        raise RuntimeError(f"Qwen eval run_config is missing checkpoint path: {eval_dir}")
+    if Path(checkpoint).expanduser().resolve() != expected_checkpoint.expanduser().resolve():
+        raise RuntimeError(f"Qwen eval used {checkpoint}, expected pruned checkpoint {expected_checkpoint}")
 
 
 def metric(summary: dict[str, Any], name: str) -> Any:
@@ -408,16 +492,36 @@ def summary_row(
     status: str,
     error: str = "",
     pruning_report_path: Path | None = None,
+    dense_exact_match: float | None = None,
+    cmc_comparable: bool = False,
+    comparability_issues: list[str] | None = None,
 ) -> dict[str, Any]:
     summary = read_eval_summary(eval_dir) if status == "ok" else {}
     pruning_report = read_pruning_report(pruning_report_path)
+    exact_match = metric(summary, "exact_match_accuracy")
+    delta = None
+    if exact_match is not None and dense_exact_match is not None:
+        delta = float(exact_match) - float(dense_exact_match)
+    issue_text = "; ".join(comparability_issues or [])
+    if comparability_issues:
+        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
     return {
         "method": method,
         "phase": phase,
         "status": status,
         "checkpoint": str(checkpoint),
+        "checkpoint_evaluated": str(checkpoint),
         "eval_dir": str(eval_dir),
         "pruning_report": str(pruning_report_path or ""),
+        "target_prunable_sparsity": pruning_report.get("target_prunable_sparsity", pruning_report.get("target_sparsity")),
+        "achieved_prunable_sparsity": pruning_report.get("achieved_prunable_sparsity", pruning_report.get("mask_sparsity", pruning_report.get("sparsity"))),
+        "achieved_whole_model_sparsity": pruning_report.get("achieved_whole_model_sparsity", pruning_report.get("model_zero_fraction")),
+        "prunable_parameter_count": pruning_report.get("prunable_parameter_count", pruning_report.get("mask_parameter_count")),
+        "protected_parameter_count": pruning_report.get("protected_parameter_count", pruning_report.get("protected_parameters")),
+        "total_parameter_count": pruning_report.get("total_parameter_count", pruning_report.get("total_parameters")),
+        "active_prunable_parameters": pruning_report.get("active_prunable_parameters", pruning_report.get("active_mask_parameters")),
+        "pruned_prunable_parameters": pruning_report.get("pruned_prunable_parameters", pruning_report.get("pruned_mask_parameters")),
+        "total_prunable_parameters": pruning_report.get("total_prunable_parameters", pruning_report.get("mask_parameter_count")),
         "mask_sparsity": pruning_report.get("mask_sparsity", pruning_report.get("sparsity")),
         "mask_parameter_count": pruning_report.get("mask_parameter_count"),
         "active_mask_parameters": pruning_report.get("active_mask_parameters"),
@@ -433,17 +537,33 @@ def summary_row(
         "nonzero_fraction": pruning_report.get("nonzero_fraction"),
         "masked_weight_violation_count": pruning_report.get("masked_weight_violation_count"),
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
+        "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "delta_vs_dense_exact_match": delta,
         "command_exact_match_accuracy_mean": metric(summary, "command_exact_match_accuracy"),
         "command_exact_match_accuracy_std": metric_std(summary, "command_exact_match_accuracy"),
+        "mean_response_loss_mean": metric(summary, "mean_response_loss"),
+        "mean_response_loss": metric(summary, "mean_response_loss"),
+        "mean_response_loss_std": metric_std(summary, "mean_response_loss"),
+        "response_perplexity_mean": metric(summary, "response_perplexity"),
+        "response_perplexity": metric(summary, "response_perplexity"),
+        "response_perplexity_std": metric_std(summary, "response_perplexity"),
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
+        "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
+        "cmc_comparable": cmc_comparable,
+        "blocking_comparability_issues": issue_text,
         "error": error,
     }
 
 
 def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
     write_json(output_dir / "qwen25_instruct_pruning_benchmark_summary.json", {"results": rows})
+    write_json(output_dir / "benchmark_summary.json", {"results": rows})
+    one_shot_rows = [row for row in rows if row.get("phase") in {"dense_baseline", "one_shot"}]
+    retuned_rows = [row for row in rows if str(row.get("phase", "")).startswith("retuned")]
+    write_json(output_dir / "benchmark_summary_one_shot.json", {"results": one_shot_rows})
+    write_json(output_dir / "benchmark_summary_retuned.json", {"results": retuned_rows})
     csv_path = output_dir / "qwen25_instruct_pruning_benchmark_summary.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -451,8 +571,18 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "phase",
         "status",
         "checkpoint",
+        "checkpoint_evaluated",
         "eval_dir",
         "pruning_report",
+        "target_prunable_sparsity",
+        "achieved_prunable_sparsity",
+        "achieved_whole_model_sparsity",
+        "prunable_parameter_count",
+        "protected_parameter_count",
+        "total_parameter_count",
+        "active_prunable_parameters",
+        "pruned_prunable_parameters",
+        "total_prunable_parameters",
         "mask_sparsity",
         "mask_parameter_count",
         "active_mask_parameters",
@@ -468,17 +598,88 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "nonzero_fraction",
         "masked_weight_violation_count",
         "exact_match_accuracy_mean",
+        "exact_match_accuracy",
         "exact_match_accuracy_std",
+        "delta_vs_dense_exact_match",
         "command_exact_match_accuracy_mean",
         "command_exact_match_accuracy_std",
+        "mean_response_loss_mean",
+        "mean_response_loss",
+        "mean_response_loss_std",
+        "response_perplexity_mean",
+        "response_perplexity",
+        "response_perplexity_std",
         "avg_generated_tokens_mean",
+        "avg_generated_tokens",
         "avg_generated_tokens_std",
+        "cmc_comparable",
+        "blocking_comparability_issues",
         "error",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    with (output_dir / "benchmark_summary.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    with (output_dir / "benchmark_summary_one_shot.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(one_shot_rows)
+    with (output_dir / "benchmark_summary_retuned.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(retuned_rows)
+
+
+def cmc_comparability_report(
+    config: dict[str, Any],
+    benchmark: dict[str, Any],
+    methods: list[str],
+    dense_checkpoint: Path,
+    pruned_checkpoint_paths: list[str],
+) -> dict[str, Any]:
+    blocking: list[str] = []
+    non_blocking: list[str] = []
+    if set(methods) != set(METHODS):
+        blocking.append(f"methods differ from CMC reference: {methods}")
+    if float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
+        blocking.append("target prunable sparsity is not 0.5")
+    if bool(config.get("prune", {}).get("include_lm_head", False)):
+        blocking.append("lm_head/output head pruning is enabled")
+    if int(benchmark.get("benchmark_runs", 1)) != 1:
+        non_blocking.append("benchmark repeats are enabled; CMC one-shot comparison should use one run per checkpoint")
+    if not benchmark.get("eval_file"):
+        blocking.append("benchmark eval_file is missing")
+    if not config.get("prune", {}).get("calibration_data_path") and any(method in {"wanda", "gradient"} for method in methods):
+        blocking.append("calibration_data_path is missing for Wanda/gradient")
+    if bool(config.get("retune", {}).get("enabled", False)):
+        non_blocking.append("retuned phase is enabled; keep it separate from primary CMC one-shot comparison")
+    return {
+        "comparable": not blocking,
+        "blocking_issues": blocking,
+        "non_blocking_differences": non_blocking,
+        "decoder_only_prunable_scope": "selected transformer attention/MLP torch.nn.Linear weights; embeddings/lm_head/norms/biases/non-Linears protected",
+        "cmc_prunable_scope": "selected prunable transformer Linear weights; embeddings/output head/norms/tokenizer/non-Linears protected",
+        "dense_baseline_checkpoint": str(dense_checkpoint),
+        "pruned_checkpoint_paths": pruned_checkpoint_paths,
+        "benchmark_config_hash": stable_config_hash(benchmark),
+        "tokenizer_config_hash": stable_config_hash({"tokenizer_path": str(dense_checkpoint)}),
+        "eval_config_hash": stable_config_hash(
+            {
+                "eval_file": benchmark.get("eval_file"),
+                "max_new_tokens": benchmark.get("max_new_tokens", 64),
+                "max_length": benchmark.get("max_length", benchmark.get("max_seq_length", 256)),
+                "eval_batch_size": benchmark.get("eval_batch_size", 16),
+                "dtype": benchmark.get("dtype", "bf16"),
+                "system_prompt": benchmark.get("system_prompt"),
+                "decoding": {"do_sample": False, "num_beams": 1},
+                "response_extraction": "Qwen chat-template response exact-match evaluator",
+            }
+        ),
+    }
 
 
 def main() -> None:
@@ -545,6 +746,53 @@ def main() -> None:
         retune=retune,
         continue_on_error=continue_on_error,
     )
+    pruned_checkpoint_paths: list[str] = []
+    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
+    write_json(output_dir / "cmc_comparability_report.json", comparability)
+    dense_exact_match: float | None = None
+    dense_eval_dir = output_dir / "benchmarks" / "dense_baseline"
+    if bool(benchmark.get("run_dense_baseline", True)):
+        run_eval(base_checkpoint, eval_file, dense_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run, train_file=train_file)
+        if not args.dry_run:
+            dense_summary = read_eval_summary(dense_eval_dir)
+            if not dense_summary:
+                raise FileNotFoundError(f"Dense baseline evaluation summary missing: {dense_eval_dir}")
+            dense_exact_value = metric(dense_summary, "exact_match_accuracy")
+            if dense_exact_value is None:
+                raise ValueError(f"Dense baseline exact-match accuracy missing: {dense_eval_dir}")
+            dense_exact_match = float(dense_exact_value)
+            min_dense = benchmark.get("min_dense_exact_match_accuracy", 0.01)
+            if min_dense is not None and dense_exact_match < float(min_dense):
+                raise RuntimeError(
+                    f"Dense baseline exact-match accuracy {dense_exact_match:.6f} is below "
+                    f"benchmark.min_dense_exact_match_accuracy={float(min_dense):.6f}; debug eval before pruning."
+                )
+            dense_payload = {
+                "checkpoint_path": str(base_checkpoint),
+                "tokenizer_path": str(base_checkpoint),
+                "dataset_path": str(eval_file),
+                "benchmark_split": str(eval_file),
+                "generation_config": {
+                    "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
+                    "num_beams": 1,
+                    "do_sample": False,
+                    "system_prompt": benchmark.get("system_prompt"),
+                },
+                "exact_match_normalization": {"comparison_mode": "qwen_normalized_and_command"},
+                **dense_summary,
+            }
+            write_json(output_dir / "dense_baseline_eval.json", dense_payload)
+            rows.append(
+                dense_baseline_row(
+                    base_checkpoint,
+                    dense_eval_dir,
+                    dense_summary,
+                    comparable=bool(comparability["comparable"]),
+                    issues=list(comparability["blocking_issues"]),
+                )
+            )
+    elif not args.dry_run:
+        raise RuntimeError("Dense baseline evaluation is required for CMC-compatible pruning comparison.")
 
     for method in methods:
         print(f"\n=== Running Qwen pruning method: {method} ===", flush=True)
@@ -582,6 +830,8 @@ def main() -> None:
                         target_sparsity=float(prune_config["prune"].get("sparsity", 0.5)),
                         tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
                     )
+                    if one_shot_dir.resolve() == base_checkpoint.resolve():
+                        raise RuntimeError("Refusing to evaluate dense checkpoint as one-shot pruned checkpoint.")
                 run_eval(
                     one_shot_dir,
                     eval_file,
@@ -591,6 +841,10 @@ def main() -> None:
                     dry_run=args.dry_run,
                     train_file=train_file,
                 )
+                if not args.dry_run:
+                    validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
+                    validate_eval_protocol_matches_dense(dense_eval_dir, one_shot_eval_dir)
+                pruned_checkpoint_paths.append(str(one_shot_dir))
                 rows.append(
                     summary_row(
                         method,
@@ -599,6 +853,9 @@ def main() -> None:
                         one_shot_eval_dir,
                         "ok",
                         pruning_report_path=one_shot_dir / "pruning_report.json",
+                        dense_exact_match=dense_exact_match,
+                        cmc_comparable=bool(comparability["comparable"]),
+                        comparability_issues=list(comparability["blocking_issues"]),
                     )
                 )
 
@@ -625,6 +882,8 @@ def main() -> None:
                         target_sparsity=float(config.get("prune", {}).get("sparsity", 0.5)),
                         tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
                     )
+                    if retuned_checkpoint.resolve() == base_checkpoint.resolve():
+                        raise RuntimeError("Refusing to evaluate dense checkpoint as retuned pruned checkpoint.")
                 retune_train_file = as_path(retune["data_path"]) if retune.get("data_path") else train_file
                 run_eval(
                     retuned_checkpoint,
@@ -635,6 +894,10 @@ def main() -> None:
                     dry_run=args.dry_run,
                     train_file=retune_train_file,
                 )
+                if not args.dry_run:
+                    validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
+                    validate_eval_protocol_matches_dense(dense_eval_dir, retuned_eval_dir)
+                pruned_checkpoint_paths.append(str(retuned_checkpoint))
                 if args.dry_run or not retuned_report.exists():
                     retuned_report = one_shot_dir / "pruning_report.json"
                 rows.append(
@@ -645,6 +908,9 @@ def main() -> None:
                         retuned_eval_dir,
                         "ok",
                         pruning_report_path=retuned_report,
+                        dense_exact_match=dense_exact_match,
+                        cmc_comparable=False,
+                        comparability_issues=["retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"],
                     )
                 )
         except subprocess.CalledProcessError as exc:
@@ -657,6 +923,8 @@ def main() -> None:
             write_summary(output_dir, rows)
             if not continue_on_error:
                 raise
+    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
+    write_json(output_dir / "cmc_comparability_report.json", comparability)
     write_summary(output_dir, rows)
     print(f"\nWrote Qwen pruning benchmark summary to {output_dir / 'qwen25_instruct_pruning_benchmark_summary.csv'}")
     print(f"Wrote Qwen pruning benchmark summary to {output_dir / 'qwen25_instruct_pruning_benchmark_summary.json'}")
