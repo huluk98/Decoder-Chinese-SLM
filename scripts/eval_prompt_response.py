@@ -512,6 +512,50 @@ def generate_completion(
     return completion, int(completion_ids.numel())
 
 
+@torch.no_grad()
+def generate_completions_batch(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt_texts: list[str],
+    device: torch.device,
+    max_new_tokens: int,
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    num_beams: int,
+    repetition_penalty: float,
+) -> list[tuple[str, int]]:
+    if not prompt_texts:
+        return []
+    previous_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    try:
+        inputs = tokenizer(prompt_texts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+    finally:
+        tokenizer.padding_side = previous_padding_side
+    prompt_width = int(inputs["input_ids"].shape[-1])
+    generation_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": bool(do_sample),
+        "num_beams": int(num_beams),
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "repetition_penalty": float(repetition_penalty),
+    }
+    if do_sample:
+        generation_kwargs["temperature"] = temperature
+        generation_kwargs["top_p"] = top_p
+        generation_kwargs["top_k"] = int(top_k)
+    output_ids = model.generate(**inputs, **generation_kwargs)
+    completions: list[tuple[str, int]] = []
+    for row in range(int(output_ids.shape[0])):
+        completion_ids = output_ids[row, prompt_width:]
+        completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
+        completions.append((completion, int(completion_ids.numel())))
+    return completions
+
+
 def normalize_whitespace_exact(text: str, tokenizer: Any | None = None) -> str:
     text = unicodedata.normalize("NFKC", str(text))
     text = ZERO_WIDTH_PATTERN.sub("", text)
@@ -660,6 +704,23 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
                     "label_length": result.get("label_length", result.get("response_token_count", "")),
                 }
             )
+    generation_samples = [
+        {
+            "raw_input_example": result.get("record", {}),
+            "formatted_prompt": result.get("prompt", ""),
+            "tokenized_prompt_length": result.get("tokenized_prompt_length"),
+            "gold_response": result.get("raw_label", result.get("response", "")),
+            "raw_generated_text": result.get("raw_prediction", result.get("generated", "")),
+            "extracted_response": result.get("raw_prediction", result.get("generated", "")),
+            "normalized_prediction": result.get("normalized_prediction", ""),
+            "normalized_gold": result.get("normalized_label", ""),
+            "exact_match": result.get("exact_match"),
+            "response_loss": result.get("loss"),
+        }
+        for result in results[:50]
+    ]
+    write_json(output_dir / "generation_samples.json", generation_samples)
+    write_json(output_dir / "exact_match_failure_cases.json", [row for row in results if not bool(row.get("exact_match"))][:50])
 
 
 def write_eval_run_config(
@@ -1000,6 +1061,40 @@ def main() -> None:
             batch_pairs = indexed_examples[start : start + batch_size]
             batch = [example for _, example in batch_pairs]
             scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
+            generation_by_index: dict[int, tuple[str, int, str]] = {}
+            needs_generation = [
+                (offset, index, batch[offset])
+                for offset, (index, _example) in enumerate(batch_pairs)
+                if bool(args.exact_match) or index < int(args.generate_samples)
+            ]
+            if needs_generation:
+                if args.use_cached_predictions:
+                    for _offset, index, _example in needs_generation:
+                        generated = cached_predictions[index]
+                        generated_token_count = len(tokenizer(generated, add_special_tokens=False)["input_ids"])
+                        generation_by_index[index] = (generated, generated_token_count, "")
+                else:
+                    try:
+                        generated_batch = generate_completions_batch(
+                            model=model,
+                            tokenizer=tokenizer,
+                            prompt_texts=[example["prompt_text"] for _offset, _index, example in needs_generation],
+                            device=device,
+                            max_new_tokens=int(args.max_new_tokens),
+                            do_sample=bool(args.do_sample),
+                            temperature=float(args.temperature),
+                            top_p=float(args.top_p),
+                            top_k=int(args.top_k),
+                            num_beams=int(args.num_beams),
+                            repetition_penalty=float(args.repetition_penalty),
+                        )
+                        for (_offset, index, _example), (generated, generated_token_count) in zip(
+                            needs_generation, generated_batch
+                        ):
+                            generation_by_index[index] = (generated, generated_token_count, "")
+                    except Exception as exc:
+                        for _offset, index, _example in needs_generation:
+                            generation_by_index[index] = ("", 0, repr(exc))
             for offset, score in enumerate(scores):
                 index = batch_pairs[offset][0]
                 token_count = int(score["token_count"])
@@ -1010,6 +1105,7 @@ def main() -> None:
                     "benchmark_run": run_index + 1,
                     "id": record_id(batch[offset]["record"], index),
                     "index": index,
+                    "record": batch[offset]["record"],
                     "prompt": batch[offset]["prompt_text"],
                     "response": batch[offset]["response_text"],
                     "raw_label": batch[offset]["response_text"],
@@ -1017,34 +1113,12 @@ def main() -> None:
                     "perplexity": math.exp(float(score["loss"])) if token_count > 0 else math.nan,
                     "response_token_count": token_count,
                     "label_length": token_count,
+                    "tokenized_prompt_length": len(
+                        tokenizer(batch[offset]["prompt_text"], add_special_tokens=False)["input_ids"]
+                    ),
                 }
                 if bool(args.exact_match) or index < int(args.generate_samples):
-                    if args.use_cached_predictions:
-                        generated = cached_predictions[index]
-                        generated_token_count = len(
-                            tokenizer(generated, add_special_tokens=False)["input_ids"]
-                        )
-                        generation_error = ""
-                    else:
-                        try:
-                            generated, generated_token_count = generate_completion(
-                                model=model,
-                                tokenizer=tokenizer,
-                                prompt_text=batch[offset]["prompt_text"],
-                                device=device,
-                                max_new_tokens=int(args.max_new_tokens),
-                                do_sample=bool(args.do_sample),
-                                temperature=float(args.temperature),
-                                top_p=float(args.top_p),
-                                top_k=int(args.top_k),
-                                num_beams=int(args.num_beams),
-                                repetition_penalty=float(args.repetition_penalty),
-                            )
-                            generation_error = ""
-                        except Exception as exc:
-                            generated = ""
-                            generated_token_count = 0
-                            generation_error = repr(exc)
+                    generated, generated_token_count, generation_error = generation_by_index.get(index, ("", 0, ""))
                     normalized_generated = normalize_whitespace_exact(generated, tokenizer=tokenizer)
                     normalized_target = normalize_whitespace_exact(batch[offset]["response_text"], tokenizer=tokenizer)
                     comparison_generated = comparison_text(generated, tokenizer=tokenizer, comparison_mode=args.comparison_mode)
@@ -1114,6 +1188,21 @@ def main() -> None:
         invalid_outputs = sum(1 for result in results if result.get("invalid_structured_output"))
         generation_errors = sum(1 for result in results if result.get("generation_error"))
         avg_label_length = sum(label_lengths) / max(1, len(label_lengths))
+        if args.exact_match and results:
+            generated_texts = [str(result.get("raw_prediction", "")).strip() for result in results]
+            nonempty_generated = [text for text in generated_texts if text]
+            prompt_copies = sum(
+                1
+                for result in results
+                if str(result.get("raw_prediction", "")).strip()
+                and str(result.get("raw_prediction", "")).strip().startswith(str(result.get("prompt", "")).strip())
+            )
+            if empty_predictions == len(results):
+                raise RuntimeError("Generated predictions are all empty; inspect tokenizer/EOS/max_new_tokens before trusting the benchmark.")
+            if len(nonempty_generated) > 1 and len(set(nonempty_generated)) == 1:
+                raise RuntimeError("Generated predictions are all identical; inspect generation/checkpoint loading before trusting the benchmark.")
+            if prompt_copies / max(1, len(results)) > 0.5:
+                raise RuntimeError("Generated predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
         incorrect = len(records) - exact_correct if args.exact_match else None
         summary = {
             "benchmark_run": run_index + 1,
@@ -1208,7 +1297,12 @@ def main() -> None:
         write_json(output_dir / "prompt_response_eval_summary.json", benchmark_summary)
         write_json(output_dir / "metrics.json", benchmark_summary)
         last_run_dir = output_dir / f"run_{benchmark_runs:02d}"
-        for filename in ("prompt_response_eval_predictions.jsonl", "prediction_debug.csv"):
+        for filename in (
+            "prompt_response_eval_predictions.jsonl",
+            "prediction_debug.csv",
+            "generation_samples.json",
+            "exact_match_failure_cases.json",
+        ):
             source = last_run_dir / filename
             if source.exists():
                 shutil.copyfile(source, output_dir / filename)

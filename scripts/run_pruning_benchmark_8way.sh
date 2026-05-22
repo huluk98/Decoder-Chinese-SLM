@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "This launcher requires bash. Run: bash scripts/run_pruning_benchmark_8way.sh" >&2
+  exit 2
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -6,13 +11,32 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 CONFIG_PATH="${CONFIG_PATH:-${1:-configs/pruning_benchmark.yaml}}"
-PYTHON_BIN="${PYTHON:-python}"
+if [[ -n "${PYTHON:-}" ]]; then
+  PYTHON_BIN="${PYTHON}"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON_BIN="python3"
+else
+  PYTHON_BIN="python"
+fi
 MODE="${MODE:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
+KEEP_GOING="${KEEP_GOING:-1}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Config file not found: ${CONFIG_PATH}" >&2
   echo "Usage: CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh" >&2
+  exit 2
+fi
+
+if ! "${PYTHON_BIN}" -c "import yaml" >/dev/null 2>&1; then
+  echo "Python environment is missing PyYAML. Activate the training env, or set PYTHON=/path/to/env/bin/python." >&2
+  echo "Example: PYTHON=\$(command -v python3) CONFIG_PATH=${CONFIG_PATH} bash scripts/run_pruning_benchmark_8way.sh" >&2
   exit 2
 fi
 
@@ -53,11 +77,18 @@ ARGS=(--config "${CONFIG_PATH}")
 if [[ "${DRY_RUN}" == "1" ]]; then
   ARGS+=(--dry-run)
 fi
+if [[ "${KEEP_GOING}" == "1" ]]; then
+  ARGS+=(--continue-on-error)
+else
+  ARGS+=(--stop-on-error)
+fi
 
 echo "Sequential 8-way pruning benchmark"
 echo "  config: ${CONFIG_PATH}"
 echo "  mode:   ${RUN_KIND}"
 echo "  runner: ${RUNNER}"
+echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "  keep going after method failure: ${KEEP_GOING}"
 echo
 echo "Order inside the runner:"
 echo "  magnitude: one-shot prune -> eval -> retune -> eval"
@@ -72,4 +103,3 @@ echo
 echo "Done. The runner wrote its 8-row benchmark summary under benchmark.output_dir:"
 echo "  ${SUMMARY_CSV}"
 echo "  ${SUMMARY_JSON}"
-

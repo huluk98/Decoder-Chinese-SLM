@@ -29,7 +29,17 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
 from chatlm_decoder.command_eval import canonicalize_command_response
-from chatlm_decoder.pruning import apply_masks, mask_sparsity
+from chatlm_decoder.pruning import (
+    apply_masks,
+    mask_parameter_stats,
+    masked_weight_stats,
+    mask_sparsity,
+    layerwise_zero_fraction,
+    module_filter_report,
+    sparsity_accounting,
+    write_csv,
+    write_json,
+)
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
 
 try:
@@ -211,6 +221,29 @@ def save_checkpoint(
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
         write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
+        write_json(checkpoint_dir / "module_filter_report.json", module_filter_report(unwrap_model(model)))
+        write_json(
+            checkpoint_dir / "mask_validation.json",
+            {
+                "method": "sft_retune_with_fixed_pruning_masks",
+                "phase": "retuned_sft",
+                **sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks)),
+            },
+        )
+        write_csv(checkpoint_dir / "sparsity_by_module.csv", layerwise_zero_fraction(unwrap_model(model), pruning_masks))
+        write_csv(checkpoint_dir / "layerwise_zero_fraction.csv", layerwise_zero_fraction(unwrap_model(model), pruning_masks))
+        if checkpoint_name == "final":
+            reload_model = AutoModelForCausalLM.from_pretrained(checkpoint_dir)
+            reload_validation = {
+                "method": "sft_retune_with_fixed_pruning_masks",
+                "phase": "retuned_sft",
+                "checkpoint_reloaded": str(checkpoint_dir),
+                **sparsity_accounting(reload_model, pruning_masks, target=mask_sparsity(pruning_masks)),
+            }
+            if int(reload_validation.get("masked_weight_violation_count", 0)) != 0:
+                raise RuntimeError(f"Pruned weights regrew after saving/reloading retuned checkpoint: {checkpoint_dir}")
+            write_json(checkpoint_dir / "checkpoint_reload_validation.json", reload_validation)
+            del reload_model
     manifest = {
         **state,
         "checkpoint_path": str(checkpoint_dir),
@@ -280,19 +313,6 @@ def count_all_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in unwrap_model(model).parameters())
 
 
-def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
-    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
-    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
-    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
-    return {
-        "mask_parameter_count": mask_parameter_count,
-        "active_mask_parameters": active_mask_parameters,
-        "pruned_mask_parameters": pruned_mask_parameters,
-        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
-        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
-    }
-
-
 def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
     total_parameters = 0
     nonzero_parameters = 0
@@ -317,6 +337,9 @@ def write_pruning_report(
     step: int,
     pruning_mask_source: str | None = None,
 ) -> None:
+    mask_stats = mask_parameter_stats(pruning_masks)
+    model_stats = model_parameter_stats(model)
+    accounting = sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks))
     metadata = {
         "method": "sft_retune_with_fixed_pruning_masks",
         "phase": "retuned_sft",
@@ -324,8 +347,13 @@ def write_pruning_report(
         "sparsity": mask_sparsity(pruning_masks),
         "pruning_mask_source": pruning_mask_source or "",
         "mask_preserved_during_sft": True,
-        **mask_parameter_stats(pruning_masks),
-        **model_parameter_stats(model),
+        "target_prunable_sparsity": accounting["target_prunable_sparsity"],
+        "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
+        "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
+        **mask_stats,
+        **model_stats,
+        **accounting,
+        **masked_weight_stats(unwrap_model(model), pruning_masks),
         "note": "SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
     }
     with (checkpoint_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
@@ -1005,6 +1033,7 @@ def main(argv: list[str] | None = None) -> None:
     run_start = time.perf_counter()
     first_batch_debugged = False
     high_loss_checked = False
+    retune_loss_curve: list[dict[str, Any]] = []
 
     for step in progress:
         total_loss_value = 0.0
@@ -1075,6 +1104,16 @@ def main(argv: list[str] | None = None) -> None:
         if is_dist():
             dist.all_reduce(logged, op=dist.ReduceOp.AVG)
         logged_loss = float(logged[0].detach().cpu())
+        if rank == 0 and pruning_masks is not None:
+            retune_loss_curve.append(
+                {
+                    "step": int(step),
+                    "loss": logged_loss,
+                    "gen_loss": float(logged[1].detach().cpu()),
+                    "align_loss": float(logged[2].detach().cpu()),
+                    "learning_rate": float(lr),
+                }
+            )
         if rank == 0 and not high_loss_checked:
             high_loss_checked = True
             vocab_size = int(unwrap_model(model).config.vocab_size)
@@ -1148,6 +1187,8 @@ def main(argv: list[str] | None = None) -> None:
             if is_dist():
                 dist.barrier()
 
+    if rank == 0 and pruning_masks is not None:
+        write_csv(output_dir / "retune_loss_curve.csv", retune_loss_curve)
     if is_dist():
         dist.destroy_process_group()
 

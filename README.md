@@ -732,7 +732,7 @@ If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and
 
 ## 50% Pruning
 
-Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model.
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The CMC-comparable path prunes 50% of selected transformer attention/MLP `torch.nn.Linear` weights only. Embeddings, positional embeddings, `lm_head`/output heads, tied output embeddings, norms, biases, tokenizer-related parameters, and non-Linear modules are protected.
 
 Run one pruning method:
 
@@ -746,9 +746,9 @@ python scripts/prune.py \
 
 Available methods:
 
-- `magnitude`: global unstructured 50% magnitude pruning.
+- `magnitude`: global unstructured 50% pruning by `abs(weight)`.
 - `2of4`: NVIDIA-style semi-structured 2:4 pruning, two zeros in each group of four linear weights.
-- `wanda`: activation-aware 50% pruning using calibration data.
+- `wanda`: activation-aware 50% pruning using calibration data and `abs(weight) * input_activation_norm`.
 - `gradient`: gradient-score pruning using `abs(weight * grad)` on calibration batches.
 
 Run all four:
@@ -757,7 +757,7 @@ Run all four:
 CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
 ```
 
-Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. To do sparse recovery tuning after any pruning method, set `prune.recovery_steps` above `0`. The script reapplies masks after each optimizer step so pruned weights stay zero.
+Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for the one-shot CMC comparison. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
@@ -777,6 +777,8 @@ prune:
 
 retune:
   data_path: /absolute/path/to/retune_sft.json
+  epochs: 3
+  max_steps: null
 ```
 
 Then run:
@@ -791,7 +793,7 @@ Or use the single YAML-driven sequential wrapper. It auto-detects Qwen configs b
 CONFIG_PATH=configs/qwen25_instruct_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
 
-This runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, evaluates one-shot pruned checkpoints with `scripts/eval_qwen25_instruct.py`, then retunes with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
+This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_eval.json`. It then runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for 50% prunable-transformer-Linear sparsity and zero mask violations, evaluates the reloaded one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
 
 - `one_shot/<method>/`
 - `retuned/<method>/final/`
@@ -799,10 +801,13 @@ This runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, eval
 - `benchmarks/retuned/<method>/`
 - `qwen25_instruct_pruning_benchmark_summary.csv`
 - `qwen25_instruct_pruning_benchmark_summary.json`
+- `benchmark_summary_one_shot.csv`
+- `benchmark_summary_retuned.csv`
+- `cmc_comparability_report.json`
 
 ### Pruning Benchmark Suite
 
-For a full pruning comparison, use the YAML-driven benchmark suite. It runs all four pruning methods in two phases:
+For a full pruning comparison, use the YAML-driven benchmark suite. It evaluates the dense SFT baseline first, then runs all four pruning methods in two separate phases:
 
 1. one-shot prune with no retuning, then exact-match generation benchmark;
 2. prune, SFT-retune on your dataset while reapplying the pruning mask after every optimizer step, then exact-match generation benchmark.
@@ -820,7 +825,8 @@ prune:
 
 retune:
   data_path: /absolute/path/to/retune_sft.jsonl
-  max_steps: 300
+  epochs: 3
+  max_steps: null
 ```
 
 Then run:
@@ -841,7 +847,7 @@ Preview the commands without running them:
 DRY_RUN=1 CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
 
-It runs in this order: `magnitude` one-shot prune and eval, optional retune and eval; then `2of4`; then `wanda`; then `gradient`. The final CSV has the 8 accuracy rows from four methods times one-shot/retuned phases.
+It runs in this order: `magnitude` one-shot prune and eval, optional 3-epoch masked retune and eval; then `2of4`; then `wanda`; then `gradient`. By default `KEEP_GOING=1`, so a failed method is recorded in the summary and the next method still runs. Set `KEEP_GOING=0` if you want fail-fast behavior. The final CSV has the 8 accuracy rows from four methods times one-shot/retuned phases when all phases succeed.
 
 Or point at another config file or a directory containing `pruning_benchmark.yaml`:
 
@@ -861,7 +867,18 @@ pruning_benchmark_summary.csv
 pruning_benchmark_summary.json
 ```
 
-That gives 8 model outputs total and 8 benchmark output folders total. Each one-shot checkpoint writes its own `pruning_report.json`; each retuned checkpoint also writes a retuned `pruning_report.json` when the fixed pruning mask is saved. The CSV includes mean and standard deviation for exact-match accuracy, loss, perplexity, generated length, and active/nonzero parameter counts from those reports. By default, each eval runs three benchmark passes; set `benchmark.benchmark_runs` to change the ± sample size.
+That gives 8 model outputs total and 8 benchmark output folders total, plus the dense baseline eval folder. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json` and `exact_match_failure_cases.json`.
+
+Use `benchmark_summary_one_shot.csv` for the primary CMC comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; a 50% run means 50% sparsity over selected prunable transformer Linear weights unless whole-model sparsity is also 0.5. `cmc_comparability_report.json` records blocking issues and the table marks rows as `not directly comparable to CMC0.2B yet` whenever a blocking protocol mismatch exists.
+
+The runner checks each report before evaluation and fails the phase if prunable sparsity is not 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, protected parameters changed during pruning, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+
+Inspect any one-shot or retuned pruning report:
+
+```bash
+python scripts/inspect_pruning_report.py runs/pruning-benchmark-0p2b/one_shot/magnitude
+python scripts/inspect_pruning_report.py runs/pruning-benchmark-0p2b/retuned/magnitude/final
+```
 
 ## Add More Public Sources
 
