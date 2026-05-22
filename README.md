@@ -884,6 +884,20 @@ Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retune
 
 The runner checks each report before evaluation and fails the phase if prunable sparsity is not 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, protected parameters changed during pruning, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
+### Final IoT Benchmark Eval
+
+Evaluate any dense, pruned, or retuned checkpoint on the final 200-example IoT benchmark:
+
+```bash
+python scripts/eval_iot_benchmark.py \
+  --model-path /absolute/path/to/checkpoint \
+  --benchmark-file "/Users/luke/Documents/SCENIC agent/generated/iot_instruction_benchmark_200.json" \
+  --prompt-format legacy \
+  --output-dir runs/iot-benchmark/my-model
+```
+
+Use `--prompt-format legacy` for checkpoints trained with `<|user|>` / `<|assistant|>` formatting, `--prompt-format qwen-instruct` for Qwen-Instruct chat-template checkpoints, and `--prompt-format raw` for plain prompt-only models. The script writes `iot_benchmark_summary.json`, `iot_benchmark_predictions.jsonl`, `iot_benchmark_predictions.csv`, `generation_samples.json`, and `exact_match_failure_cases.json`.
+
 Inspect any one-shot or retuned pruning report:
 
 ```bash
