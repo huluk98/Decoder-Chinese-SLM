@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BENCHMARK_FILE = PROJECT_ROOT / "data" / "benchmarks" / "iot_instruction_benchmark_200.json"
+DEFAULT_CONFIG_FILE = PROJECT_ROOT / "configs" / "iot_benchmark_eval.yaml"
 LEGACY_USER_TOKEN = "<|user|>"
 LEGACY_ASSISTANT_TOKEN = "<|assistant|>"
 LEGACY_SYSTEM_TOKEN = "<|system|>"
@@ -47,6 +48,105 @@ STOP_MARKERS = (
     "<|im_start|>user",
     "<|im_start|>system",
 )
+
+
+def parse_simple_yaml_scalar(value: str) -> Any:
+    value = value.strip()
+    if not value:
+        return None
+    lower = value.lower()
+    if lower in {"null", "none", "~"}:
+        return None
+    if lower in {"true", "yes", "on"}:
+        return True
+    if lower in {"false", "no", "off"}:
+        return False
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        return value[1:-1]
+    if re.fullmatch(r"[-+]?\d+", value):
+        return int(value)
+    if re.fullmatch(r"[-+]?(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?", value) or re.fullmatch(
+        r"[-+]?\d+[eE][-+]?\d+", value
+    ):
+        return float(value)
+    return value
+
+
+def strip_simple_yaml_comment(value: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            continue
+        if char == "#" and quote is None and (index == 0 or value[index - 1].isspace()):
+            return value[:index].rstrip()
+    return value
+
+
+def load_simple_yaml(path: Path) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("- "):
+            raise ValueError(f"{path}:{line_number}: list syntax requires PyYAML; use flat key: value entries here.")
+        if ":" not in line:
+            raise ValueError(f"{path}:{line_number}: expected key: value.")
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"{path}:{line_number}: empty key.")
+        data[key] = parse_simple_yaml_scalar(strip_simple_yaml_comment(value))
+    return data
+
+
+def load_eval_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import-not-found]
+
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except ModuleNotFoundError:
+        payload = load_simple_yaml(path)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain a YAML mapping.")
+    for section in ("iot_benchmark_eval", "iot_benchmark", "benchmark"):
+        value = payload.get(section)
+        if isinstance(value, dict):
+            return dict(value)
+    return dict(payload)
+
+
+def choose_setting(args: argparse.Namespace, config: dict[str, Any], name: str, default: Any = None) -> Any:
+    value = getattr(args, name)
+    if value is not None:
+        return value
+    config_value = config.get(name, default)
+    if config_value is None:
+        return default
+    return config_value
+
+
+def resolve_project_path(value: str | Path | None, default: str | Path | None = None) -> Path:
+    path_value = value if value not in (None, "") else default
+    if path_value in (None, ""):
+        raise ValueError("Missing required path value.")
+    path = Path(str(path_value)).expanduser()
+    if not path.is_absolute():
+        path = (PROJECT_ROOT / path).resolve()
+    return path
 
 
 def read_json_records(path: Path) -> list[dict[str, Any]]:
@@ -340,43 +440,73 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a model on the final 200-example IoT instruction benchmark.")
-    parser.add_argument("--model-path", "--checkpoint", required=True, dest="model_path")
-    parser.add_argument("--benchmark-file", default=str(DEFAULT_BENCHMARK_FILE))
+    parser.add_argument(
+        "--config",
+        default=str(DEFAULT_CONFIG_FILE),
+        help="Flat YAML config. Edit configs/iot_benchmark_eval.yaml for the one-link workflow.",
+    )
+    parser.add_argument("--model-path", "--checkpoint", default=None, dest="model_path")
+    parser.add_argument("--benchmark-file", default=None)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--prompt-format", choices=("auto", "legacy", "raw", "qwen-instruct"), default="auto")
-    parser.add_argument("--system-prompt", default="")
-    parser.add_argument("--comparison-mode", choices=("exact", "normalized"), default="normalized")
-    parser.add_argument("--max-length", type=int, default=256)
-    parser.add_argument("--max-new-tokens", type=int, default=64)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-beams", type=int, default=1)
-    parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"), default="bf16")
-    parser.add_argument("--device", default="auto")
+    parser.add_argument("--prompt-format", choices=("auto", "legacy", "raw", "qwen-instruct"), default=None)
+    parser.add_argument("--system-prompt", default=None)
+    parser.add_argument("--comparison-mode", choices=("exact", "normalized"), default=None)
+    parser.add_argument("--max-length", type=int, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-beams", type=int, default=None)
+    parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"), default=None)
+    parser.add_argument("--device", default=None)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--trust-remote-code", action="store_true", default=None)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    benchmark_file = Path(args.benchmark_file).expanduser()
+    config_path = Path(args.config).expanduser() if args.config else DEFAULT_CONFIG_FILE
+    if not config_path.is_absolute():
+        config_path = (PROJECT_ROOT / config_path).resolve()
+    config = load_eval_config(config_path)
+
+    model_path = str(choose_setting(args, config, "model_path", "") or "").strip()
+    if not model_path:
+        raise ValueError(
+            "Set model_path in configs/iot_benchmark_eval.yaml, or pass --model-path /path/or/hf-model-id."
+        )
+    benchmark_file = resolve_project_path(choose_setting(args, config, "benchmark_file", None), DEFAULT_BENCHMARK_FILE)
     if not benchmark_file.exists():
         raise FileNotFoundError(f"Benchmark file not found: {benchmark_file}")
-    model_path = str(args.model_path)
+
+    output_dir_value = choose_setting(args, config, "output_dir", None)
     output_dir = Path(
-        args.output_dir
+        output_dir_value
         or PROJECT_ROOT
         / "runs"
         / "iot-benchmark"
         / f"{benchmark_file.stem}__{Path(model_path).name or 'model'}__{dt.datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}"
     ).expanduser()
+    if not output_dir.is_absolute():
+        output_dir = (PROJECT_ROOT / output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = select_device(args.device)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=bool(args.trust_remote_code))
+    prompt_format_requested = str(choose_setting(args, config, "prompt_format", "auto"))
+    system_prompt = str(choose_setting(args, config, "system_prompt", "") or "")
+    comparison_mode = str(choose_setting(args, config, "comparison_mode", "normalized"))
+    max_length = int(choose_setting(args, config, "max_length", 256))
+    max_new_tokens = int(choose_setting(args, config, "max_new_tokens", 64))
+    batch_size = int(choose_setting(args, config, "batch_size", 16))
+    num_beams = int(choose_setting(args, config, "num_beams", 1))
+    dtype_name = str(choose_setting(args, config, "dtype", "bf16"))
+    device_name = str(choose_setting(args, config, "device", "auto"))
+    limit = choose_setting(args, config, "limit", None)
+    trust_remote_code = bool(choose_setting(args, config, "trust_remote_code", False))
+
+    device = select_device(device_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     configure_tokenizer(tokenizer)
-    dtype = dtype_for(args.dtype, device)
-    model_kwargs: dict[str, Any] = {"trust_remote_code": bool(args.trust_remote_code)}
+    dtype = dtype_for(dtype_name, device)
+    model_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote_code}
     if dtype != "auto":
         model_kwargs["torch_dtype"] = dtype
     model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs).to(device)
@@ -384,17 +514,17 @@ def main() -> None:
     if len(tokenizer) > int(model.get_input_embeddings().weight.shape[0]):
         model.resize_token_embeddings(len(tokenizer))
 
-    prompt_format = resolve_prompt_format(args.prompt_format, model_path=model_path, tokenizer=tokenizer)
+    prompt_format = resolve_prompt_format(prompt_format_requested, model_path=model_path, tokenizer=tokenizer)
     records = read_json_records(benchmark_file)
-    if args.limit is not None:
-        records = records[: int(args.limit)]
+    if limit is not None:
+        records = records[: int(limit)]
     examples = [
         build_example(
             record,
             tokenizer=tokenizer,
             prompt_format=prompt_format,
-            system_prompt=str(args.system_prompt),
-            max_length=int(args.max_length),
+            system_prompt=system_prompt,
+            max_length=max_length,
         )
         for record in records
     ]
@@ -403,23 +533,23 @@ def main() -> None:
     total_loss_sum = 0.0
     total_tokens = 0
     correct = 0
-    for start in tqdm(range(0, len(examples), int(args.batch_size)), desc="iot-benchmark"):
-        batch = examples[start : start + int(args.batch_size)]
+    for start in tqdm(range(0, len(examples), batch_size), desc="iot-benchmark"):
+        batch = examples[start : start + batch_size]
         score_rows = score_batch(model, batch, pad_token_id=int(tokenizer.pad_token_id), device=device)
         generations = generate_batch(
             model,
             tokenizer,
             [example["prompt_text"] for example in batch],
             device=device,
-            max_new_tokens=int(args.max_new_tokens),
-            num_beams=int(args.num_beams),
+            max_new_tokens=max_new_tokens,
+            num_beams=num_beams,
         )
         for offset, example in enumerate(batch):
             record = example["record"]
             raw_prediction, generated_tokens = generations[offset]
             prediction = clean_generated_text(raw_prediction, tokenizer=tokenizer)
-            normalized_prediction = normalize_text(prediction, tokenizer=tokenizer, mode=args.comparison_mode)
-            normalized_gold = normalize_text(example["response_text"], tokenizer=tokenizer, mode=args.comparison_mode)
+            normalized_prediction = normalize_text(prediction, tokenizer=tokenizer, mode=comparison_mode)
+            normalized_gold = normalize_text(example["response_text"], tokenizer=tokenizer, mode=comparison_mode)
             exact = normalized_prediction == normalized_gold
             score = score_rows[offset]
             total_loss_sum += float(score["loss_sum"])
@@ -451,12 +581,14 @@ def main() -> None:
     mean_loss = total_loss_sum / total_tokens if total_tokens else math.nan
     summary = {
         "script": "scripts/eval_iot_benchmark.py",
+        "config_file": str(config_path),
         "model_path": model_path,
         "checkpoint_path_used_for_evaluation": model_path,
         "benchmark_file": str(benchmark_file),
         "output_dir": str(output_dir),
+        "prompt_format_requested": prompt_format_requested,
         "prompt_format": prompt_format,
-        "comparison_mode": args.comparison_mode,
+        "comparison_mode": comparison_mode,
         "total_examples": len(results),
         "correct_examples": correct,
         "exact_match_accuracy": correct / float(len(results) or 1),
@@ -468,10 +600,10 @@ def main() -> None:
         "by_difficulty": grouped_metrics(results, "difficulty"),
         "by_task_type": grouped_metrics(results, "task_type"),
         "generation_config": {
-            "max_new_tokens": int(args.max_new_tokens),
+            "max_new_tokens": max_new_tokens,
             "do_sample": False,
-            "num_beams": int(args.num_beams),
-            "max_length": int(args.max_length),
+            "num_beams": num_beams,
+            "max_length": max_length,
         },
     }
 

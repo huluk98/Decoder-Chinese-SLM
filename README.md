@@ -889,14 +889,17 @@ The runner checks each report before evaluation and fails the phase if prunable 
 Evaluate any dense, pruned, or retuned checkpoint on the final 200-example IoT benchmark:
 
 ```bash
-python scripts/eval_iot_benchmark.py \
-  --model-path /absolute/path/to/checkpoint \
-  --benchmark-file data/benchmarks/iot_instruction_benchmark_200.json \
-  --prompt-format legacy \
-  --output-dir runs/iot-benchmark/my-model
+# Edit only configs/iot_benchmark_eval.yaml:model_path for the normal path.
+bash run_iot_benchmark_eval.sh
 ```
 
-Use `--prompt-format legacy` for checkpoints trained with `<|user|>` / `<|assistant|>` formatting, `--prompt-format qwen-instruct` for Qwen-Instruct chat-template checkpoints, and `--prompt-format raw` for plain prompt-only models. The script writes `iot_benchmark_summary.json`, `iot_benchmark_predictions.jsonl`, `iot_benchmark_predictions.csv`, `generation_samples.json`, and `exact_match_failure_cases.json`.
+`model_path` can be either an absolute local checkpoint path or a Hugging Face model id. The default config uses `prompt_format: auto`, which uses the Qwen chat template only for `*Instruct*` checkpoints and otherwise uses the repo's decoder-only `<|user|>` / `<|assistant|>` format. You can still override any value for a single run:
+
+```bash
+bash run_iot_benchmark_eval.sh --model-path Qwen/Qwen2.5-0.5B --prompt-format raw
+```
+
+The script writes `iot_benchmark_summary.json`, `iot_benchmark_predictions.jsonl`, `iot_benchmark_predictions.csv`, `generation_samples.json`, and `exact_match_failure_cases.json`.
 
 Inspect any one-shot or retuned pruning report:
 

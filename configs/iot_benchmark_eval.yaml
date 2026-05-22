@@ -1,0 +1,23 @@
+# Change this one line to a local checkpoint path or Hugging Face model id.
+# Examples:
+# model_path: /absolute/path/to/runs/pruning-benchmark-0p2b/one_shot/magnitude
+# model_path: Qwen/Qwen2.5-0.5B
+model_path: ""
+
+benchmark_file: data/benchmarks/iot_instruction_benchmark_200.json
+output_dir: null
+
+# auto uses Qwen chat-template only for *instruct* checkpoints; otherwise it uses
+# the repo's decoder-only <|user|>/<|assistant|> prompt format.
+prompt_format: auto
+system_prompt: ""
+comparison_mode: normalized
+
+max_length: 256
+max_new_tokens: 64
+batch_size: 16
+num_beams: 1
+dtype: bf16
+device: auto
+limit: null
+trust_remote_code: false
