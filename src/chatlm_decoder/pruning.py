@@ -56,6 +56,8 @@ def _lower_name(name: str) -> str:
 
 def protected_reason(name: str, module: torch.nn.Module | None = None) -> str:
     lower = _lower_name(name)
+    if lower.endswith(".bias") or lower == "bias":
+        return "bias_parameter"
     if isinstance(module, torch.nn.Embedding) or "embed" in lower or "wte" in lower or "wpe" in lower:
         return "embedding_or_position_embedding"
     if "lm_head" in lower or "output_head" in lower:
@@ -82,6 +84,11 @@ def is_attention_or_mlp_linear_name(name: str) -> bool:
     return False
 
 
+def is_lm_head_name(name: str) -> bool:
+    lower = _lower_name(name)
+    return "lm_head" in lower or "output_head" in lower
+
+
 def is_protected_name(name: str) -> bool:
     lower = _lower_name(name)
     return any(pattern in lower for pattern in PROTECTED_NAME_PATTERNS)
@@ -92,14 +99,18 @@ def is_prunable_transformer_linear(name: str, module: torch.nn.Module) -> bool:
         return False
     if is_protected_name(name):
         return False
-    return is_attention_or_mlp_linear_name(name)
+    return True
 
 
 def named_prunable_linears(model: torch.nn.Module, include_lm_head: bool = False) -> list[tuple[str, torch.nn.Linear]]:
-    if include_lm_head:
-        raise ValueError("This pruning benchmark protects lm_head/output-head parameters.")
     modules: list[tuple[str, torch.nn.Linear]] = []
     for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if is_lm_head_name(name):
+            if include_lm_head:
+                modules.append((name, module))
+            continue
         if is_prunable_transformer_linear(name, module):
             modules.append((name, module))
     if not modules:
@@ -132,7 +143,7 @@ def module_filter_report(model: torch.nn.Module, include_lm_head: bool = False) 
     protected_parameter_count = total_parameter_count - prunable_parameter_count
     return {
         "protocol": "decoder-only pruning scope",
-        "prunable_scope": "attention and MLP torch.nn.Linear weights only",
+        "prunable_scope": "decoder torch.nn.Linear weights only; lm_head skipped unless include_lm_head=true",
         "prunable_module_names": prunable_module_names,
         "prunable_modules": [
             {
@@ -231,15 +242,20 @@ def resolve_prunable_sparsity_for_target(
     }
 
 
-def validate_masks_match_prunable_scope(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> None:
-    prunable_names = {name for name, _module in named_prunable_linears(model)}
+def validate_masks_match_prunable_scope(
+    model: torch.nn.Module,
+    masks: dict[str, torch.Tensor],
+    include_lm_head: bool = False,
+    allow_missing: bool = False,
+) -> None:
+    prunable_names = {name for name, _module in named_prunable_linears(model, include_lm_head=include_lm_head)}
     missing = sorted(prunable_names - set(masks))
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(f"Pruning masks are missing prunable modules: {missing}")
     for name in masks:
         if name not in prunable_names:
             raise ValueError(f"Mask includes non-prunable module: {name}")
-        if is_protected_name(name):
+        if is_protected_name(name) and not (include_lm_head and is_lm_head_name(name)):
             raise ValueError(f"Mask includes protected module name: {name}")
 
 
@@ -537,11 +553,29 @@ def wanda_activation_report(activation_scalers: dict[str, torch.Tensor], masks: 
     return {"modules": modules, "blocking_issues": blocking, "all_modules_valid": not blocking}
 
 
-def validate_two_of_four_masks(masks: dict[str, torch.Tensor]) -> dict[str, Any]:
+def validate_two_of_four_masks(
+    masks: dict[str, torch.Tensor],
+    model: torch.nn.Module | None = None,
+    include_lm_head: bool = False,
+) -> dict[str, Any]:
     modules = []
     total_valid_groups = 0
     total_invalid_groups = 0
     invalid_examples: list[dict[str, Any]] = []
+    skipped_modules: list[dict[str, Any]] = []
+    missing_eligible_modules: list[str] = []
+    if model is not None:
+        for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
+            if module.weight.shape[1] % 4 != 0:
+                skipped_modules.append(
+                    {
+                        "module": name,
+                        "shape": list(module.weight.shape),
+                        "reason": "in_features_not_divisible_by_4",
+                    }
+                )
+            elif name not in masks:
+                missing_eligible_modules.append(name)
     for name, mask in masks.items():
         if mask.shape[1] % 4 != 0:
             raise ValueError(f"2:4 validation requires in_features divisible by 4: {name} shape={tuple(mask.shape)}")
@@ -575,11 +609,13 @@ def validate_two_of_four_masks(masks: dict[str, torch.Tensor]) -> dict[str, Any]
             }
         )
     return {
-        "valid": total_invalid_groups == 0,
+        "valid": total_invalid_groups == 0 and not missing_eligible_modules and bool(masks),
         "total_valid_2of4_groups": total_valid_groups,
         "total_invalid_2of4_groups": total_invalid_groups,
         "invalid_group_examples": invalid_examples,
         "achieved_2of4_sparsity": 0.5 if total_valid_groups and total_invalid_groups == 0 else None,
+        "skipped_modules": skipped_modules,
+        "missing_eligible_modules": missing_eligible_modules,
         "modules": modules,
     }
 
@@ -611,7 +647,54 @@ def exact_global_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -
     return masks
 
 
+def exact_layerwise_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
+    if not 0.0 <= float(sparsity) <= 1.0:
+        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
+    if not scores:
+        raise ValueError("No prunable score tensors were provided.")
+    masks: dict[str, torch.Tensor] = {}
+    for name, score in scores.items():
+        flat_score = score.detach().float().flatten()
+        total = int(flat_score.numel())
+        keep_count = max(0, min(total, total - int(float(sparsity) * total)))
+        if keep_count <= 0:
+            masks[name] = torch.zeros_like(score, dtype=torch.bool)
+            continue
+        if keep_count >= total:
+            masks[name] = torch.ones_like(score, dtype=torch.bool)
+            continue
+        keep_indices = torch.topk(flat_score, k=keep_count, largest=True, sorted=False).indices
+        flat_mask = torch.zeros(total, dtype=torch.bool, device=score.device)
+        flat_mask[keep_indices.to(score.device)] = True
+        masks[name] = flat_mask.reshape_as(score)
+    return masks
+
+
 def exact_rowwise_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
+    if not 0.0 <= float(sparsity) <= 1.0:
+        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
+    if not scores:
+        raise ValueError("No prunable score tensors were provided.")
+    masks: dict[str, torch.Tensor] = {}
+    for name, score in scores.items():
+        if score.ndim != 2:
+            raise ValueError(f"Row-wise pruning expects 2D score tensors, got {name} shape={tuple(score.shape)}")
+        rows, cols = int(score.shape[0]), int(score.shape[1])
+        prune_count = max(0, min(cols, int(float(sparsity) * cols)))
+        if prune_count <= 0:
+            masks[name] = torch.ones_like(score, dtype=torch.bool)
+            continue
+        if prune_count >= cols:
+            masks[name] = torch.zeros_like(score, dtype=torch.bool)
+            continue
+        prune_idx = torch.topk(score.detach().float(), k=prune_count, dim=1, largest=False).indices
+        mask = torch.ones((rows, cols), device=score.device, dtype=torch.bool)
+        mask.scatter_(1, prune_idx, False)
+        masks[name] = mask
+    return masks
+
+
+def exact_rowwise_score_masks_with_global_total(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
     if not 0.0 <= float(sparsity) <= 1.0:
         raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
     if not scores:
@@ -671,19 +754,25 @@ def global_magnitude_masks(
     return exact_global_score_masks(scores, sparsity=sparsity)
 
 
+def layerwise_magnitude_masks(
+    model: torch.nn.Module,
+    sparsity: float = 0.5,
+    include_lm_head: bool = False,
+) -> dict[str, torch.Tensor]:
+    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+    scores = {name: module.weight.detach().abs() for name, module in layers}
+    return exact_layerwise_score_masks(scores, sparsity=sparsity)
+
+
 def two_of_four_masks(model: torch.nn.Module, include_lm_head: bool = False) -> dict[str, torch.Tensor]:
     masks: dict[str, torch.Tensor] = {}
     for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
         weight = module.weight.detach()
+        if weight.shape[1] % 4 != 0:
+            continue
         mask = torch.ones_like(weight, dtype=torch.bool)
         full_cols = (weight.shape[1] // 4) * 4
-        if full_cols != weight.shape[1]:
-            raise ValueError(
-                f"2of4 pruning requires in_features divisible by 4 for exact 50% sparsity; "
-                f"{name} has shape={tuple(weight.shape)}"
-            )
         if full_cols == 0:
-            masks[name] = mask
             continue
         view = weight[:, :full_cols].abs().reshape(weight.shape[0], full_cols // 4, 4)
         prune_idx = torch.topk(view, k=2, dim=-1, largest=False).indices
@@ -727,6 +816,20 @@ def gradient_score_masks(
         for name, module in layers
     }
     return exact_global_score_masks(scores, sparsity=sparsity)
+
+
+def layerwise_gradient_score_masks(
+    model: torch.nn.Module,
+    gradient_scores: dict[str, torch.Tensor],
+    sparsity: float = 0.5,
+    include_lm_head: bool = False,
+) -> dict[str, torch.Tensor]:
+    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+    scores = {
+        name: gradient_scores.get(name, torch.zeros_like(module.weight, device="cpu")).to(module.weight.device)
+        for name, module in layers
+    }
+    return exact_layerwise_score_masks(scores, sparsity=sparsity)
 
 
 def collect_activation_scalers(
