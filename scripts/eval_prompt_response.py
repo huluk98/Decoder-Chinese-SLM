@@ -512,6 +512,50 @@ def generate_completion(
     return completion, int(completion_ids.numel())
 
 
+@torch.no_grad()
+def generate_completions_batch(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt_texts: list[str],
+    device: torch.device,
+    max_new_tokens: int,
+    do_sample: bool,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    num_beams: int,
+    repetition_penalty: float,
+) -> list[tuple[str, int]]:
+    if not prompt_texts:
+        return []
+    previous_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    try:
+        inputs = tokenizer(prompt_texts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+    finally:
+        tokenizer.padding_side = previous_padding_side
+    prompt_width = int(inputs["input_ids"].shape[-1])
+    generation_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": bool(do_sample),
+        "num_beams": int(num_beams),
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "repetition_penalty": float(repetition_penalty),
+    }
+    if do_sample:
+        generation_kwargs["temperature"] = temperature
+        generation_kwargs["top_p"] = top_p
+        generation_kwargs["top_k"] = int(top_k)
+    output_ids = model.generate(**inputs, **generation_kwargs)
+    completions: list[tuple[str, int]] = []
+    for row in range(int(output_ids.shape[0])):
+        completion_ids = output_ids[row, prompt_width:]
+        completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
+        completions.append((completion, int(completion_ids.numel())))
+    return completions
+
+
 def normalize_whitespace_exact(text: str, tokenizer: Any | None = None) -> str:
     text = unicodedata.normalize("NFKC", str(text))
     text = ZERO_WIDTH_PATTERN.sub("", text)
@@ -1000,6 +1044,40 @@ def main() -> None:
             batch_pairs = indexed_examples[start : start + batch_size]
             batch = [example for _, example in batch_pairs]
             scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
+            generation_by_index: dict[int, tuple[str, int, str]] = {}
+            needs_generation = [
+                (offset, index, batch[offset])
+                for offset, (index, _example) in enumerate(batch_pairs)
+                if bool(args.exact_match) or index < int(args.generate_samples)
+            ]
+            if needs_generation:
+                if args.use_cached_predictions:
+                    for _offset, index, _example in needs_generation:
+                        generated = cached_predictions[index]
+                        generated_token_count = len(tokenizer(generated, add_special_tokens=False)["input_ids"])
+                        generation_by_index[index] = (generated, generated_token_count, "")
+                else:
+                    try:
+                        generated_batch = generate_completions_batch(
+                            model=model,
+                            tokenizer=tokenizer,
+                            prompt_texts=[example["prompt_text"] for _offset, _index, example in needs_generation],
+                            device=device,
+                            max_new_tokens=int(args.max_new_tokens),
+                            do_sample=bool(args.do_sample),
+                            temperature=float(args.temperature),
+                            top_p=float(args.top_p),
+                            top_k=int(args.top_k),
+                            num_beams=int(args.num_beams),
+                            repetition_penalty=float(args.repetition_penalty),
+                        )
+                        for (_offset, index, _example), (generated, generated_token_count) in zip(
+                            needs_generation, generated_batch
+                        ):
+                            generation_by_index[index] = (generated, generated_token_count, "")
+                    except Exception as exc:
+                        for _offset, index, _example in needs_generation:
+                            generation_by_index[index] = ("", 0, repr(exc))
             for offset, score in enumerate(scores):
                 index = batch_pairs[offset][0]
                 token_count = int(score["token_count"])
@@ -1019,32 +1097,7 @@ def main() -> None:
                     "label_length": token_count,
                 }
                 if bool(args.exact_match) or index < int(args.generate_samples):
-                    if args.use_cached_predictions:
-                        generated = cached_predictions[index]
-                        generated_token_count = len(
-                            tokenizer(generated, add_special_tokens=False)["input_ids"]
-                        )
-                        generation_error = ""
-                    else:
-                        try:
-                            generated, generated_token_count = generate_completion(
-                                model=model,
-                                tokenizer=tokenizer,
-                                prompt_text=batch[offset]["prompt_text"],
-                                device=device,
-                                max_new_tokens=int(args.max_new_tokens),
-                                do_sample=bool(args.do_sample),
-                                temperature=float(args.temperature),
-                                top_p=float(args.top_p),
-                                top_k=int(args.top_k),
-                                num_beams=int(args.num_beams),
-                                repetition_penalty=float(args.repetition_penalty),
-                            )
-                            generation_error = ""
-                        except Exception as exc:
-                            generated = ""
-                            generated_token_count = 0
-                            generation_error = repr(exc)
+                    generated, generated_token_count, generation_error = generation_by_index.get(index, ("", 0, ""))
                     normalized_generated = normalize_whitespace_exact(generated, tokenizer=tokenizer)
                     normalized_target = normalize_whitespace_exact(batch[offset]["response_text"], tokenizer=tokenizer)
                     comparison_generated = comparison_text(generated, tokenizer=tokenizer, comparison_mode=args.comparison_mode)

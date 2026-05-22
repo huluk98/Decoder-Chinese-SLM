@@ -317,7 +317,7 @@ def run_eval(
             "--dtype",
             str(benchmark.get("dtype", "bf16")),
             "--benchmark-runs",
-            str(int(benchmark.get("benchmark_runs", 3))),
+            str(int(benchmark.get("benchmark_runs", 1))),
         ],
         env=env,
         dry_run=dry_run,
