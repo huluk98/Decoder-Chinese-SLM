@@ -20,9 +20,9 @@ METHODS = ("magnitude", "2of4", "wanda", "gradient")
 def resolve_config_path(path: str | Path) -> Path:
     config_path = Path(path).expanduser()
     if config_path.is_dir():
-        config_path = config_path / "pruning_benchmark.yaml"
+        config_path = config_path / "qwen25_instruct_pruning_benchmark.yaml"
     if not config_path.exists():
-        raise FileNotFoundError(f"Pruning benchmark config not found: {config_path}")
+        raise FileNotFoundError(f"Qwen pruning benchmark config not found: {config_path}")
     return config_path.resolve()
 
 
@@ -47,10 +47,6 @@ def write_json(path: str | Path, payload: Any) -> None:
         handle.write("\n")
 
 
-def method_slug(method: str) -> str:
-    return "nvidia-2of4" if method == "2of4" else method
-
-
 def as_path(value: Any) -> Path:
     return Path(str(value)).expanduser()
 
@@ -62,17 +58,17 @@ def display_path(path: Path) -> str:
         return str(path)
 
 
+def method_slug(method: str) -> str:
+    return "nvidia-2of4" if method == "2of4" else method
+
+
 def latest_checkpoint(output_dir: Path) -> Path:
     final = output_dir / "final"
     if final.exists():
         return final
-    latest = output_dir / "latest"
-    if latest.exists():
-        return latest
-    checkpoints = sorted([path for path in output_dir.glob("step-*") if path.is_dir()], key=lambda path: path.name)
-    if not checkpoints:
-        raise FileNotFoundError(f"No final, latest, or step-* checkpoint found in {output_dir}")
-    return checkpoints[-1]
+    if output_dir.exists() and (output_dir / "config.json").exists():
+        return output_dir
+    raise FileNotFoundError(f"No Qwen final checkpoint found in {output_dir}")
 
 
 def command_env(benchmark: dict[str, Any]) -> dict[str, str]:
@@ -155,6 +151,7 @@ def validate_benchmark_paths(
     methods: list[str],
     base_checkpoint: Path,
     eval_file: Path,
+    train_file: Path | None,
     prune_config_path: Path,
     config: dict[str, Any],
     retune: dict[str, Any],
@@ -169,6 +166,8 @@ def validate_benchmark_paths(
         )
     if not eval_file.exists():
         problems.append(f"benchmark.eval_file does not exist: {eval_file}")
+    if train_file is not None and not train_file.exists():
+        problems.append(f"benchmark.train_file does not exist: {train_file}")
     if not prune_config_path.exists():
         problems.append(f"benchmark.prune_config does not exist: {prune_config_path}")
     calibration_data_path = config.get("prune", {}).get("calibration_data_path")
@@ -186,7 +185,7 @@ def validate_benchmark_paths(
     for warning in warnings:
         print(f"Warning: {warning}", flush=True)
     if problems:
-        message = "Invalid pruning benchmark YAML:\n  - " + "\n  - ".join(problems)
+        message = "Invalid Qwen pruning benchmark YAML:\n  - " + "\n  - ".join(problems)
         if strict:
             raise FileNotFoundError(message)
         print("Warning: " + message.replace("\n", "\nWarning: "), flush=True)
@@ -197,27 +196,31 @@ def print_plan(
     output_dir: Path,
     base_checkpoint: Path,
     eval_file: Path,
+    train_file: Path | None,
     prune_config_path: Path,
     config: dict[str, Any],
     benchmark: dict[str, Any],
     retune: dict[str, Any],
     continue_on_error: bool,
 ) -> None:
-    print("\nResolved generic pruning benchmark plan:", flush=True)
+    print("\nResolved Qwen2.5-Instruct pruning benchmark plan:", flush=True)
     print(f"  methods: {', '.join(methods)}", flush=True)
     print(f"  output_dir: {display_path(output_dir)}", flush=True)
     print(f"  base_checkpoint: {display_path(base_checkpoint)}", flush=True)
     print(f"  eval_file: {display_path(eval_file)}", flush=True)
+    print(f"  train_file: {display_path(train_file) if train_file is not None else None}", flush=True)
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
+    print(f"  system_prompt: {benchmark.get('system_prompt')}", flush=True)
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)
     print(f"  retune.data_path: {retune.get('data_path')}", flush=True)
     print(f"  retune.max_steps: {retune.get('max_steps')}", flush=True)
     print(f"  retune.epochs: {retune.get('epochs')}", flush=True)
-    print(f"  eval runner: scripts/eval_prompt_response.py", flush=True)
-    print(f"  retune runner: scripts/sft.py", flush=True)
+    print(f"  prune runner: scripts/prune_qwen25_instruct.py", flush=True)
+    print(f"  eval runner: scripts/eval_qwen25_instruct.py", flush=True)
+    print(f"  retune runner: scripts/sft_qwen25_instruct.py", flush=True)
     print(f"  nproc_per_node: {benchmark.get('nproc_per_node', 8)}", flush=True)
     print(f"  cuda_visible_devices: {benchmark.get('cuda_visible_devices')}", flush=True)
     print(f"  expected_gpu_count: {benchmark.get('expected_gpu_count', benchmark.get('nproc_per_node', 8))}", flush=True)
@@ -240,12 +243,13 @@ def generated_prune_config(
     recovery_steps: int,
 ) -> dict[str, Any]:
     config = copy.deepcopy(base_config)
-    config.setdefault("run", {})
-    config.setdefault("model", {})
-    config.setdefault("train", {})
+    benchmark = dict(benchmark_config.get("benchmark", {}) or {})
+    config["model_name_or_path"] = str(checkpoint)
+    config.setdefault("system_prompt", benchmark.get("system_prompt"))
+    config.setdefault("max_seq_length", benchmark.get("max_seq_length", 256))
+    config.setdefault("train_file", benchmark_config.get("prune", {}).get("calibration_data_path"))
     config.setdefault("prune", {})
-    prune_overrides = dict(benchmark_config.get("prune", {}) or {})
-    config["prune"].update(prune_overrides)
+    config["prune"].update(dict(benchmark_config.get("prune", {}) or {}))
     config["prune"].update(
         {
             "base_model": str(checkpoint),
@@ -263,25 +267,25 @@ def run_prune(
     checkpoint: Path,
     output_dir: Path,
     config_path: Path,
+    benchmark: dict[str, Any],
     env: dict[str, str],
     dry_run: bool,
 ) -> None:
-    run_command(
-        [
-            sys.executable,
-            "scripts/prune.py",
-            "--config",
-            str(config_path),
-            "--method",
-            method,
-            "--checkpoint",
-            str(checkpoint),
-            "--output-dir",
-            str(output_dir),
-        ],
-        env=env,
-        dry_run=dry_run,
-    )
+    cmd = [
+        sys.executable,
+        "scripts/prune_qwen25_instruct.py",
+        "--config",
+        str(config_path),
+        "--method",
+        method,
+        "--checkpoint",
+        str(checkpoint),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if benchmark.get("prune_dtype"):
+        cmd.extend(["--dtype", str(benchmark.get("prune_dtype"))])
+    run_command(cmd, env=env, dry_run=dry_run)
 
 
 def run_eval(
@@ -291,37 +295,35 @@ def run_eval(
     benchmark: dict[str, Any],
     env: dict[str, str],
     dry_run: bool,
+    train_file: Path | None = None,
 ) -> None:
     nproc = int(benchmark.get("nproc_per_node", 8))
-    run_command(
-        [
-            "torchrun",
-            "--standalone",
-            "--nproc_per_node",
-            str(nproc),
-            "scripts/eval_prompt_response.py",
-            "--model-path",
-            str(model_path),
-            "--dataset-file",
-            str(eval_file),
-            "--output-dir",
-            str(output_dir),
-            "--max-new-tokens",
-            str(int(benchmark.get("max_new_tokens", 64))),
-            "--temperature",
-            "0",
-            "--num-beams",
-            "1",
-            "--batch-size",
-            str(int(benchmark.get("eval_batch_size", 16))),
-            "--dtype",
-            str(benchmark.get("dtype", "bf16")),
-            "--benchmark-runs",
-            str(int(benchmark.get("benchmark_runs", 3))),
-        ],
-        env=env,
-        dry_run=dry_run,
-    )
+    cmd = [
+        "torchrun",
+        "--standalone",
+        "--nproc_per_node",
+        str(nproc),
+        "scripts/eval_qwen25_instruct.py",
+        "--model-path",
+        str(model_path),
+        "--dataset-file",
+        str(eval_file),
+        "--output-dir",
+        str(output_dir),
+        "--max-new-tokens",
+        str(int(benchmark.get("max_new_tokens", 64))),
+        "--batch-size",
+        str(int(benchmark.get("eval_batch_size", 16))),
+        "--dtype",
+        str(benchmark.get("dtype", "bf16")),
+        "--benchmark-runs",
+        str(int(benchmark.get("benchmark_runs", 3))),
+    ]
+    if benchmark.get("system_prompt"):
+        cmd.extend(["--system-prompt", str(benchmark["system_prompt"])])
+    if train_file is not None and train_file.exists() and train_file != eval_file:
+        cmd.extend(["--train-file", str(train_file)])
+    run_command(cmd, env=env, dry_run=dry_run)
 
 
 def run_retune(
@@ -342,11 +344,9 @@ def run_retune(
         "--standalone",
         "--nproc_per_node",
         str(nproc),
-        "scripts/sft.py",
+        "scripts/sft_qwen25_instruct.py",
         "--config",
-        str(retune.get("config", "configs/sft_0p2b_8gpu.yaml")),
-        "--mode",
-        str(retune.get("mode", "sft")),
+        str(retune.get("config", "configs/sft_qwen25_0p5b_instruct.yaml")),
         "--checkpoint",
         str(pruned_checkpoint),
         "--data-path",
@@ -357,20 +357,20 @@ def run_retune(
     if bool(retune.get("keep_pruning_masks", True)):
         cmd.extend(["--pruning-mask", str(masks_path)])
     if retune.get("max_steps") is not None:
-        cmd.extend(["--max_steps", str(int(retune["max_steps"]))])
+        cmd.extend(["--max-steps", str(int(retune["max_steps"]))])
     elif retune.get("epochs") is not None:
         cmd.extend(["--epochs", str(float(retune["epochs"]))])
     if retune.get("per_device_train_batch_size") is not None:
-        cmd.extend(["--per_device_train_batch_size", str(int(retune["per_device_train_batch_size"]))])
+        cmd.extend(["--per-device-train-batch-size", str(int(retune["per_device_train_batch_size"]))])
     if retune.get("gradient_accumulation_steps") is not None:
-        cmd.extend(["--gradient_accumulation_steps", str(int(retune["gradient_accumulation_steps"]))])
+        cmd.extend(["--gradient-accumulation-steps", str(int(retune["gradient_accumulation_steps"]))])
     if retune.get("max_seq_length") is not None:
-        cmd.extend(["--max_seq_length", str(int(retune["max_seq_length"]))])
+        cmd.extend(["--max-seq-length", str(int(retune["max_seq_length"]))])
     run_command(cmd, env=env, dry_run=dry_run)
 
 
 def read_eval_summary(eval_dir: Path) -> dict[str, Any]:
-    summary_path = eval_dir / "prompt_response_eval_summary.json"
+    summary_path = eval_dir / "qwen25_instruct_eval_summary.json"
     if not summary_path.exists():
         return {}
     with summary_path.open("r", encoding="utf-8") as handle:
@@ -424,10 +424,8 @@ def summary_row(
         "masked_weight_violation_count": pruning_report.get("masked_weight_violation_count"),
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
-        "mean_response_loss_mean": metric(summary, "mean_response_loss"),
-        "mean_response_loss_std": metric_std(summary, "mean_response_loss"),
-        "response_perplexity_mean": metric(summary, "response_perplexity"),
-        "response_perplexity_std": metric_std(summary, "response_perplexity"),
+        "command_exact_match_accuracy_mean": metric(summary, "command_exact_match_accuracy"),
+        "command_exact_match_accuracy_std": metric_std(summary, "command_exact_match_accuracy"),
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
         "error": error,
@@ -435,8 +433,8 @@ def summary_row(
 
 
 def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
-    write_json(output_dir / "pruning_benchmark_summary.json", {"results": rows})
-    csv_path = output_dir / "pruning_benchmark_summary.csv"
+    write_json(output_dir / "qwen25_instruct_pruning_benchmark_summary.json", {"results": rows})
+    csv_path = output_dir / "qwen25_instruct_pruning_benchmark_summary.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "method",
@@ -457,10 +455,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "masked_weight_violation_count",
         "exact_match_accuracy_mean",
         "exact_match_accuracy_std",
-        "mean_response_loss_mean",
-        "mean_response_loss_std",
-        "response_perplexity_mean",
-        "response_perplexity_std",
+        "command_exact_match_accuracy_mean",
+        "command_exact_match_accuracy_std",
         "avg_generated_tokens_mean",
         "avg_generated_tokens_std",
         "error",
@@ -472,8 +468,12 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run one-shot and SFT-retuned pruning benchmarks for all methods.")
-    parser.add_argument("--config", default="configs/pruning_benchmark.yaml", help="YAML file, or a directory containing pruning_benchmark.yaml.")
+    parser = argparse.ArgumentParser(description="Run Qwen2.5-Instruct one-shot and SFT-retuned pruning benchmarks.")
+    parser.add_argument(
+        "--config",
+        default="configs/qwen25_instruct_pruning_benchmark.yaml",
+        help="YAML file, or a directory containing qwen25_instruct_pruning_benchmark.yaml.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     errors = parser.add_mutually_exclusive_group()
     errors.add_argument("--continue-on-error", action="store_true", help="Record a failed method and continue with the next method.")
@@ -490,7 +490,7 @@ def main() -> None:
     if unknown_methods:
         raise ValueError(f"Unknown pruning methods: {unknown_methods}. Expected any of {METHODS}.")
 
-    output_dir = as_path(benchmark.get("output_dir", "runs/pruning-benchmark-0p2b"))
+    output_dir = as_path(benchmark.get("output_dir", "runs/qwen25-instruct-pruning-benchmark"))
     generated_config_dir = output_dir / "generated_configs"
     base_checkpoint_value = benchmark.get("base_checkpoint", config.get("prune", {}).get("base_model"))
     eval_file_value = benchmark.get("eval_file")
@@ -500,20 +500,31 @@ def main() -> None:
         raise ValueError("Set benchmark.eval_file.")
     base_checkpoint = as_path(base_checkpoint_value)
     eval_file = as_path(eval_file_value)
+    train_file = as_path(benchmark.get("train_file")) if benchmark.get("train_file") else None
 
-    prune_config_path = as_path(benchmark.get("prune_config", "configs/prune_50.yaml"))
+    prune_config_path = as_path(benchmark.get("prune_config", "configs/prune_qwen25_50.yaml"))
     base_prune_config = load_yaml(prune_config_path)
     env = command_env(benchmark)
     continue_on_error = should_continue_on_error(args, benchmark)
     rows: list[dict[str, Any]] = []
     output_dir.mkdir(parents=True, exist_ok=True)
     validate_gpu_launch_config(benchmark, strict=not args.dry_run)
-    validate_benchmark_paths(methods, base_checkpoint, eval_file, prune_config_path, config, retune, strict=not args.dry_run)
+    validate_benchmark_paths(
+        methods,
+        base_checkpoint,
+        eval_file,
+        train_file,
+        prune_config_path,
+        config,
+        retune,
+        strict=not args.dry_run,
+    )
     print_plan(
         methods=methods,
         output_dir=output_dir,
         base_checkpoint=base_checkpoint,
         eval_file=eval_file,
+        train_file=train_file,
         prune_config_path=prune_config_path,
         config=config,
         benchmark=benchmark,
@@ -522,7 +533,7 @@ def main() -> None:
     )
 
     for method in methods:
-        print(f"\n=== Running pruning method: {method} ===", flush=True)
+        print(f"\n=== Running Qwen pruning method: {method} ===", flush=True)
         slug = method_slug(method)
         one_shot_dir = output_dir / "one_shot" / slug
         one_shot_eval_dir = output_dir / "benchmarks" / "one_shot" / slug
@@ -538,9 +549,17 @@ def main() -> None:
                     output_dir=one_shot_dir,
                     recovery_steps=0,
                 )
-                prune_config_path = generated_config_dir / f"prune_{slug}_one_shot.yaml"
-                write_yaml(prune_config_path, prune_config)
-                run_prune(method, base_checkpoint, one_shot_dir, prune_config_path, env=env, dry_run=args.dry_run)
+                generated_path = generated_config_dir / f"prune_qwen25_{slug}_one_shot.yaml"
+                write_yaml(generated_path, prune_config)
+                run_prune(
+                    method,
+                    base_checkpoint,
+                    one_shot_dir,
+                    generated_path,
+                    benchmark=benchmark,
+                    env=env,
+                    dry_run=args.dry_run,
+                )
                 if not args.dry_run:
                     validate_pruning_report(
                         one_shot_dir / "pruning_report.json",
@@ -549,7 +568,15 @@ def main() -> None:
                         target_sparsity=float(prune_config["prune"].get("sparsity", 0.5)),
                         tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
                     )
-                run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                run_eval(
+                    one_shot_dir,
+                    eval_file,
+                    one_shot_eval_dir,
+                    benchmark=benchmark,
+                    env=env,
+                    dry_run=args.dry_run,
+                    train_file=train_file,
+                )
                 rows.append(
                     summary_row(
                         method,
@@ -564,7 +591,7 @@ def main() -> None:
             if bool(retune.get("enabled", True)):
                 masks_path = one_shot_dir / "pruning_masks.pt"
                 if not args.dry_run and not masks_path.exists():
-                    raise FileNotFoundError(f"Missing pruning mask for retune: {masks_path}")
+                    raise FileNotFoundError(f"Missing pruning mask for Qwen retune: {masks_path}")
                 run_retune(
                     pruned_checkpoint=one_shot_dir,
                     masks_path=masks_path,
@@ -580,17 +607,26 @@ def main() -> None:
                     validate_pruning_report(
                         retuned_report,
                         method=method,
-                        phase="retuned_sft",
+                        phase="retuned_qwen25_instruct_sft",
                         target_sparsity=float(config.get("prune", {}).get("sparsity", 0.5)),
                         tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
                     )
-                run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                retune_train_file = as_path(retune["data_path"]) if retune.get("data_path") else train_file
+                run_eval(
+                    retuned_checkpoint,
+                    eval_file,
+                    retuned_eval_dir,
+                    benchmark=benchmark,
+                    env=env,
+                    dry_run=args.dry_run,
+                    train_file=retune_train_file,
+                )
                 if args.dry_run or not retuned_report.exists():
                     retuned_report = one_shot_dir / "pruning_report.json"
                 rows.append(
                     summary_row(
                         method,
-                        "retuned_sft",
+                        "retuned_qwen25_instruct_sft",
                         retuned_checkpoint,
                         retuned_eval_dir,
                         "ok",
@@ -608,8 +644,8 @@ def main() -> None:
             if not continue_on_error:
                 raise
     write_summary(output_dir, rows)
-    print(f"\nWrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.csv'}")
-    print(f"Wrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.json'}")
+    print(f"\nWrote Qwen pruning benchmark summary to {output_dir / 'qwen25_instruct_pruning_benchmark_summary.csv'}")
+    print(f"Wrote Qwen pruning benchmark summary to {output_dir / 'qwen25_instruct_pruning_benchmark_summary.json'}")
 
 
 if __name__ == "__main__":

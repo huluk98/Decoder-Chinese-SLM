@@ -21,7 +21,14 @@ def apply_masks(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> None:
     module_lookup = dict(model.named_modules())
     with torch.no_grad():
         for name, mask in masks.items():
+            if name not in module_lookup:
+                raise KeyError(f"Pruning mask references unknown module: {name}")
             module = module_lookup[name]
+            if mask.shape != module.weight.shape:
+                raise ValueError(
+                    f"Pruning mask shape mismatch for {name}: mask={tuple(mask.shape)} "
+                    f"weight={tuple(module.weight.shape)}"
+                )
             module.weight.mul_(mask.to(device=module.weight.device, dtype=module.weight.dtype))
 
 
@@ -31,8 +38,36 @@ def mask_sparsity(masks: dict[str, torch.Tensor]) -> float:
     return zeros / float(total or 1)
 
 
+def masked_weight_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    module_lookup = dict(model.named_modules())
+    masked_weight_count = 0
+    masked_weight_violation_count = 0
+    for name, mask in masks.items():
+        if name not in module_lookup:
+            raise KeyError(f"Pruning mask references unknown module: {name}")
+        module = module_lookup[name]
+        if mask.shape != module.weight.shape:
+            raise ValueError(
+                f"Pruning mask shape mismatch for {name}: mask={tuple(mask.shape)} "
+                f"weight={tuple(module.weight.shape)}"
+            )
+        mask_on_device = mask.to(device=module.weight.device, dtype=torch.bool)
+        pruned_values = module.weight.detach().masked_select(~mask_on_device)
+        masked_weight_count += int(pruned_values.numel())
+        masked_weight_violation_count += int(torch.count_nonzero(pruned_values).item())
+    return {
+        "masked_weight_count": masked_weight_count,
+        "masked_weight_violation_count": masked_weight_violation_count,
+        "masked_weight_violation_fraction": masked_weight_violation_count / float(masked_weight_count or 1),
+    }
+
+
 def exact_global_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
+    if not 0.0 <= float(sparsity) <= 1.0:
+        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
     names = list(scores)
+    if not names:
+        raise ValueError("No prunable score tensors were provided.")
     flat_scores = torch.cat([scores[name].detach().float().flatten().cpu() for name in names])
     total = flat_scores.numel()
     keep_count = max(0, min(total, total - int(float(sparsity) * total)))
@@ -70,6 +105,11 @@ def two_of_four_masks(model: torch.nn.Module, include_lm_head: bool = False) -> 
         weight = module.weight.detach()
         mask = torch.ones_like(weight, dtype=torch.bool)
         full_cols = (weight.shape[1] // 4) * 4
+        if full_cols != weight.shape[1]:
+            raise ValueError(
+                f"2of4 pruning requires in_features divisible by 4 for exact 50% sparsity; "
+                f"{name} has shape={tuple(weight.shape)}"
+            )
         if full_cols == 0:
             masks[name] = mask
             continue
@@ -88,6 +128,8 @@ def wanda_masks(
     sparsity: float = 0.5,
     include_lm_head: bool = False,
 ) -> dict[str, torch.Tensor]:
+    if not 0.0 <= float(sparsity) <= 1.0:
+        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
     masks: dict[str, torch.Tensor] = {}
     for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
         scaler = activation_scalers.get(name)

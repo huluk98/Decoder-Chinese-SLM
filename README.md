@@ -761,6 +761,47 @@ Wanda and gradient pruning require `prune.calibration_data_path`; the default co
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
+### Qwen2.5-Instruct Pruning
+
+Qwen2.5-0.5B-Instruct has a separate pruning path because Wanda/gradient calibration and prune+retune must use the same Qwen chat template as Qwen SFT. Do not use `scripts/run_pruning_benchmark.py` for Qwen-Instruct comparisons.
+
+Edit `configs/qwen25_instruct_pruning_benchmark.yaml`:
+
+```yaml
+benchmark:
+  base_checkpoint: outputs/qwen25_0p5b_instruct_sft/final
+  eval_file: /absolute/path/to/eval.json
+
+prune:
+  calibration_data_path: /absolute/path/to/calibration_or_sft.json
+
+retune:
+  data_path: /absolute/path/to/retune_sft.json
+  epochs: 3
+  max_steps: null
+```
+
+Then run:
+
+```bash
+./run_qwen25_instruct_pruning_benchmark_8gpu.sh
+```
+
+Or use the single YAML-driven sequential wrapper. It auto-detects Qwen configs by name/content:
+
+```bash
+CONFIG_PATH=configs/qwen25_instruct_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+This runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for 50% mask sparsity and zero mask violations, evaluates the one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
+
+- `one_shot/<method>/`
+- `retuned/<method>/final/`
+- `benchmarks/one_shot/<method>/`
+- `benchmarks/retuned/<method>/`
+- `qwen25_instruct_pruning_benchmark_summary.csv`
+- `qwen25_instruct_pruning_benchmark_summary.json`
+
 ### Pruning Benchmark Suite
 
 For a full pruning comparison, use the YAML-driven benchmark suite. It runs all four pruning methods in two phases:
@@ -781,7 +822,8 @@ prune:
 
 retune:
   data_path: /absolute/path/to/retune_sft.jsonl
-  max_steps: 300
+  epochs: 3
+  max_steps: null
 ```
 
 Then run:
@@ -789,6 +831,20 @@ Then run:
 ```bash
 ./run_pruning_benchmark_suite.sh
 ```
+
+Or use the single YAML-driven sequential wrapper:
+
+```bash
+CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+Preview the commands without running them:
+
+```bash
+DRY_RUN=1 CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+It runs in this order: `magnitude` one-shot prune and eval, optional 3-epoch masked retune and eval; then `2of4`; then `wanda`; then `gradient`. By default `KEEP_GOING=1`, so a failed method is recorded in the summary and the next method still runs. Set `KEEP_GOING=0` if you want fail-fast behavior. The final CSV has the 8 accuracy rows from four methods times one-shot/retuned phases when all phases succeed.
 
 Or point at another config file or a directory containing `pruning_benchmark.yaml`:
 
@@ -808,7 +864,7 @@ pruning_benchmark_summary.csv
 pruning_benchmark_summary.json
 ```
 
-That gives 8 model outputs total and 8 benchmark output folders total. Each one-shot checkpoint writes its own `pruning_report.json`; each retuned checkpoint also writes a retuned `pruning_report.json` when the fixed pruning mask is saved. The CSV includes mean and standard deviation for exact-match accuracy, loss, perplexity, generated length, and active/nonzero parameter counts from those reports. By default, each eval runs three benchmark passes; set `benchmark.benchmark_runs` to change the ± sample size.
+That gives 8 model outputs total and 8 benchmark output folders total. Each one-shot checkpoint writes its own `pruning_report.json`; each retuned checkpoint also writes a retuned `pruning_report.json` when the fixed pruning mask is saved. The runner checks each report before evaluation and fails the phase if mask sparsity is not 50% within `benchmark.sparsity_tolerance` or if any masked weight is nonzero. The CSV includes exact-match accuracy, loss, perplexity, generated length, active/nonzero parameter counts, and mask violation counts from those reports. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
 ## Add More Public Sources
 

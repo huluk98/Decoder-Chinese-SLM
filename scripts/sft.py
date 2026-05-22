@@ -29,7 +29,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
 from chatlm_decoder.command_eval import canonicalize_command_response
-from chatlm_decoder.pruning import apply_masks, mask_sparsity
+from chatlm_decoder.pruning import apply_masks, masked_weight_stats, mask_sparsity
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
 
 try:
@@ -326,6 +326,7 @@ def write_pruning_report(
         "mask_preserved_during_sft": True,
         **mask_parameter_stats(pruning_masks),
         **model_parameter_stats(model),
+        **masked_weight_stats(unwrap_model(model), pruning_masks),
         "note": "SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
     }
     with (checkpoint_dir / "pruning_report.json").open("w", encoding="utf-8") as handle:
