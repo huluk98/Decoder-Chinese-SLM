@@ -66,7 +66,7 @@ detect_mode() {
 
   local config_name
   config_name="$(basename "${config_path}")"
-  if [[ "${config_name}" == *qwen*instruct* ]] || [[ "${config_name}" == *qwen25_instruct* ]] || grep -Eiq 'qwen[^[:space:]]*instruct|qwen2\.?5[^[:space:]]*instruct|qwen25[_-]instruct|prune_qwen25|sft_qwen25|eval_qwen25|apply_chat_template|uses_qwen_apply_chat_template' "${config_path}"; then
+  if [[ "${config_name}" == *qwen*instruct* ]] || [[ "${config_name}" == *qwen25_instruct* ]] || grep -Eiq 'qwen[^[:space:]]*instruct|qwen2\.?5[^[:space:]]*instruct|qwen25[_-]instruct|sft_qwen25|eval_qwen25|apply_chat_template|uses_qwen_apply_chat_template' "${config_path}"; then
     echo "qwen_instruct"
   else
     echo "generic"

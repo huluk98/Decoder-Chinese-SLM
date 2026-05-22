@@ -815,6 +815,14 @@ For a full pruning comparison, use the YAML-driven benchmark suite. It evaluates
 
 Use this generic suite for your custom decoder-only model and for base `Qwen/Qwen2.5-0.5B`. The Qwen2.5-Instruct suite is only for checkpoints/configs that explicitly use the Instruct chat-template path.
 
+For base Qwen2.5-0.5B, start from `configs/qwen25_0p5b_pruning_benchmark.yaml`:
+
+```bash
+MODE=generic CONFIG_PATH=configs/qwen25_0p5b_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+That config uses the generic decoder-only pruning code and writes one-shot pruned checkpoints under `runs/qwen25-0p5b-pruning-benchmark/one_shot/{magnitude,nvidia-2of4,wanda,gradient}/`.
+
 Edit `configs/pruning_benchmark.yaml`:
 
 ```yaml

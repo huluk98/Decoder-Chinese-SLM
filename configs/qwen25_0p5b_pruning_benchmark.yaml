@@ -1,7 +1,7 @@
 benchmark:
-  output_dir: runs/qwen25-instruct-pruning-benchmark
-  base_checkpoint: outputs/qwen25_0p5b_instruct_sft/final
-  prune_config: configs/prune_qwen25_50.yaml
+  output_dir: runs/qwen25-0p5b-pruning-benchmark
+  base_checkpoint: Qwen/Qwen2.5-0.5B
+  prune_config: configs/prune_qwen25_0p5b_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
   eval_file: /path/to/eval.json
   run_dense_baseline: true
@@ -11,13 +11,11 @@ benchmark:
   max_length: 256
   eval_batch_size: 16
   dtype: bf16
-  prune_dtype: auto
   nproc_per_node: 8
   expected_gpu_count: 8
   cuda_visible_devices: 0,1,2,3,4,5,6,7
   sparsity_tolerance: 0.000001
   continue_on_error: true
-  system_prompt: "You are a strict smart-home command parser. Output only the normalized command response. Do not explain."
 
 prune:
   sparsity: 0.5
@@ -29,14 +27,14 @@ prune:
   max_length: 256
   batch_size: 2
   num_workers: 0
-  dtype: auto
 
 one_shot:
   enabled: true
 
 retune:
   enabled: true
-  config: configs/sft_qwen25_0p5b_instruct.yaml
+  config: configs/sft_0p2b_8gpu.yaml
+  mode: sft
   data_path: /path/to/retune_sft.json
   max_steps: null
   epochs: 3

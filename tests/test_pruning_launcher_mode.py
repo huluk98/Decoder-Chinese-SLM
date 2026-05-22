@@ -63,6 +63,25 @@ retune:
     assert "run_qwen25_instruct_pruning_benchmark.py" not in output
 
 
+def test_base_qwen_named_config_with_qwen_prune_file_still_uses_generic_runner(tmp_path: Path) -> None:
+    config_path = tmp_path / "qwen25_0p5b_pruning_benchmark.yaml"
+    config_path.write_text(
+        """
+benchmark:
+  base_checkpoint: Qwen/Qwen2.5-0.5B
+  prune_config: configs/prune_qwen25_0p5b_50.yaml
+retune:
+  config: configs/sft_0p2b_8gpu.yaml
+""".strip(),
+        encoding="utf-8",
+    )
+
+    output = run_launcher(config_path)
+
+    assert "mode:   generic" in output
+    assert "runner: scripts/run_pruning_benchmark.py" in output
+
+
 def test_qwen_instruct_config_uses_instruct_runner(tmp_path: Path) -> None:
     config_path = tmp_path / "qwen25_instruct_pruning_benchmark.yaml"
     config_path.write_text(
