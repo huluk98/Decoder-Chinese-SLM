@@ -22,6 +22,8 @@ from chatlm_decoder.pruning import (
     collect_gradient_scores,
     global_magnitude_masks,
     gradient_score_masks,
+    mask_implied_model_stats,
+    mask_parameter_stats,
     masked_weight_stats,
     mask_sparsity,
     two_of_four_masks,
@@ -142,19 +144,6 @@ def recovery_tune(
         apply_masks(model, masks)
 
 
-def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
-    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
-    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
-    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
-    return {
-        "mask_parameter_count": mask_parameter_count,
-        "active_mask_parameters": active_mask_parameters,
-        "pruned_mask_parameters": pruned_mask_parameters,
-        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
-        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
-    }
-
-
 def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
     total_parameters = 0
     nonzero_parameters = 0
@@ -196,6 +185,7 @@ def save_pruned_model(
         "recovery_steps": int(prune_config.get("recovery_steps", 0)),
         **mask_stats,
         **model_stats,
+        **mask_implied_model_stats(int(model_stats["total_parameters"]), masks),
         **masked_weight_stats(model, masks),
         "note": (
             "2of4 produces an NVIDIA semi-structured 2:4 zero pattern in linear weights. "

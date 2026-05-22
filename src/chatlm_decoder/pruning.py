@@ -38,6 +38,31 @@ def mask_sparsity(masks: dict[str, torch.Tensor]) -> float:
     return zeros / float(total or 1)
 
 
+def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
+    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
+    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
+    return {
+        "mask_parameter_count": mask_parameter_count,
+        "active_mask_parameters": active_mask_parameters,
+        "pruned_mask_parameters": pruned_mask_parameters,
+        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
+        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
+    }
+
+
+def mask_implied_model_stats(total_parameters: int, masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
+    mask_stats = mask_parameter_stats(masks)
+    pruned_parameters = int(mask_stats["pruned_mask_parameters"])
+    active_parameters = max(0, int(total_parameters) - pruned_parameters)
+    return {
+        "mask_implied_active_parameters": active_parameters,
+        "mask_implied_pruned_parameters": pruned_parameters,
+        "mask_implied_active_fraction": active_parameters / float(total_parameters or 1),
+        "mask_implied_pruned_fraction": pruned_parameters / float(total_parameters or 1),
+    }
+
+
 def masked_weight_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
     module_lookup = dict(model.named_modules())
     masked_weight_count = 0

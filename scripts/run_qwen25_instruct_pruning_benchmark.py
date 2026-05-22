@@ -145,6 +145,12 @@ def validate_pruning_report(
     violations = int(report.get("masked_weight_violation_count", 0) or 0)
     if violations:
         raise ValueError(f"{method} {phase} has {violations} nonzero weights under the pruning mask: {report_path}")
+    active_mask_parameters = int(report.get("active_mask_parameters", 0) or 0)
+    if active_mask_parameters <= 0:
+        raise ValueError(f"{method} {phase} reports no active mask parameters: {report_path}")
+    nonzero_parameters = report.get("nonzero_parameters")
+    if nonzero_parameters is not None and int(nonzero_parameters) <= 0:
+        raise ValueError(f"{method} {phase} reports zero nonzero model parameters: {report_path}")
 
 
 def validate_benchmark_paths(
@@ -417,6 +423,10 @@ def summary_row(
         "active_mask_parameters": pruning_report.get("active_mask_parameters"),
         "pruned_mask_parameters": pruning_report.get("pruned_mask_parameters"),
         "active_mask_fraction": pruning_report.get("active_mask_fraction"),
+        "mask_implied_active_parameters": pruning_report.get("mask_implied_active_parameters"),
+        "mask_implied_pruned_parameters": pruning_report.get("mask_implied_pruned_parameters"),
+        "mask_implied_active_fraction": pruning_report.get("mask_implied_active_fraction"),
+        "mask_implied_pruned_fraction": pruning_report.get("mask_implied_pruned_fraction"),
         "total_parameters": pruning_report.get("total_parameters"),
         "nonzero_parameters": pruning_report.get("nonzero_parameters"),
         "zero_parameters": pruning_report.get("zero_parameters"),
@@ -448,6 +458,10 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "active_mask_parameters",
         "pruned_mask_parameters",
         "active_mask_fraction",
+        "mask_implied_active_parameters",
+        "mask_implied_pruned_parameters",
+        "mask_implied_active_fraction",
+        "mask_implied_pruned_fraction",
         "total_parameters",
         "nonzero_parameters",
         "zero_parameters",

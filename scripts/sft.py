@@ -29,7 +29,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.config import load_config
 from chatlm_decoder.command_eval import canonicalize_command_response
-from chatlm_decoder.pruning import apply_masks, masked_weight_stats, mask_sparsity
+from chatlm_decoder.pruning import (
+    apply_masks,
+    mask_implied_model_stats,
+    mask_parameter_stats,
+    masked_weight_stats,
+    mask_sparsity,
+)
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
 
 try:
@@ -280,19 +286,6 @@ def count_all_parameters(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in unwrap_model(model).parameters())
 
 
-def mask_parameter_stats(masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
-    mask_parameter_count = sum(int(mask.numel()) for mask in masks.values())
-    active_mask_parameters = sum(int(mask.bool().sum().item()) for mask in masks.values())
-    pruned_mask_parameters = mask_parameter_count - active_mask_parameters
-    return {
-        "mask_parameter_count": mask_parameter_count,
-        "active_mask_parameters": active_mask_parameters,
-        "pruned_mask_parameters": pruned_mask_parameters,
-        "active_mask_fraction": active_mask_parameters / float(mask_parameter_count or 1),
-        "mask_sparsity": pruned_mask_parameters / float(mask_parameter_count or 1),
-    }
-
-
 def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
     total_parameters = 0
     nonzero_parameters = 0
@@ -317,6 +310,8 @@ def write_pruning_report(
     step: int,
     pruning_mask_source: str | None = None,
 ) -> None:
+    mask_stats = mask_parameter_stats(pruning_masks)
+    model_stats = model_parameter_stats(model)
     metadata = {
         "method": "sft_retune_with_fixed_pruning_masks",
         "phase": "retuned_sft",
@@ -324,8 +319,9 @@ def write_pruning_report(
         "sparsity": mask_sparsity(pruning_masks),
         "pruning_mask_source": pruning_mask_source or "",
         "mask_preserved_during_sft": True,
-        **mask_parameter_stats(pruning_masks),
-        **model_parameter_stats(model),
+        **mask_stats,
+        **model_stats,
+        **mask_implied_model_stats(int(model_stats["total_parameters"]), pruning_masks),
         **masked_weight_stats(unwrap_model(model), pruning_masks),
         "note": "SFT checkpoint saved with pruning masks reapplied after every optimizer step.",
     }

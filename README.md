@@ -866,6 +866,13 @@ pruning_benchmark_summary.json
 
 That gives 8 model outputs total and 8 benchmark output folders total. Each one-shot checkpoint writes its own `pruning_report.json`; each retuned checkpoint also writes a retuned `pruning_report.json` when the fixed pruning mask is saved. The runner checks each report before evaluation and fails the phase if mask sparsity is not 50% within `benchmark.sparsity_tolerance` or if any masked weight is nonzero. The CSV includes exact-match accuracy, loss, perplexity, generated length, active/nonzero parameter counts, and mask violation counts from those reports. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
+Inspect any one-shot or retuned pruning report:
+
+```bash
+python scripts/inspect_pruning_report.py runs/pruning-benchmark-0p2b/one_shot/magnitude
+python scripts/inspect_pruning_report.py runs/pruning-benchmark-0p2b/retuned/magnitude/final
+```
+
 ## Add More Public Sources
 
 The preprocessing script can normalize each extra local source if it is JSONL with either:
