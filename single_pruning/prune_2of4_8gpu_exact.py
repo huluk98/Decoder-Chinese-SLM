@@ -59,7 +59,7 @@ BATCH_SIZE = 8
 MAX_INPUT_TOKENS = 2048
 MAX_NEW_TOKENS = 64
 TRUST_REMOTE_CODE = True
-INCLUDE_LM_HEAD = True
+INCLUDE_LM_HEAD = False
 SKIP_NON_DIVISIBLE_LINEAR = True
 NORMALIZE_WHITESPACE_FOR_EXACT = True
 SAVE_PRUNED_MODEL = True
@@ -71,6 +71,28 @@ USE_CHAT_TEMPLATE = False
 
 PROMPT_KEYS = ["prompt", "instruction", "input", "question", "query", "source", "text"]
 TARGET_KEYS = ["response", "output", "answer", "target", "completion", "label"]
+LEADING_MARKERS = (
+    "<|assistant|>",
+    "assistant:",
+    "Assistant:",
+    "ASSISTANT:",
+    "回答:",
+    "回答：",
+    "答案:",
+    "答案：",
+    "输出:",
+    "输出：",
+)
+STOP_MARKERS = (
+    "<|user|>",
+    "<|system|>",
+    "<|eos|>",
+    "<|im_start|>user",
+    "<|im_start|>system",
+    "<|im_end|>",
+    "\nUser:",
+    "\n用户:",
+)
 
 
 def fail(msg: str) -> None:
@@ -252,10 +274,38 @@ def make_target(row: Dict[str, Any]) -> Optional[str]:
     return first_existing(row, TARGET_KEYS)
 
 
+def strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    changed = True
+    while changed and len(text) >= 2:
+        changed = False
+        for left, right in (("`", "`"), ('"', '"'), ("'", "'")):
+            if text.startswith(left) and text.endswith(right):
+                text = text[1:-1].strip()
+                changed = True
+                break
+    return text
+
+
+def clean_prediction_text(text: Optional[str]) -> str:
+    text = "" if text is None else str(text)
+    for marker in STOP_MARKERS:
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    changed = True
+    while changed:
+        changed = False
+        stripped = text.strip()
+        for marker in LEADING_MARKERS:
+            if stripped.startswith(marker):
+                text = stripped[len(marker):]
+                changed = True
+                break
+    return strip_wrapping_quotes(text)
+
+
 def normalize_for_exact(s: Optional[str]) -> str:
-    if s is None:
-        return ""
-    text = str(s).strip()
+    text = clean_prediction_text(s)
     if NORMALIZE_WHITESPACE_FOR_EXACT:
         text = re.sub(r"\s+", "", text)
     return text
@@ -307,6 +357,40 @@ def generate_batch(
     return preds
 
 
+def exact_match_diagnostics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    predictions = [str(row.get("prediction", "")) for row in records]
+    normalized_predictions = [str(row.get("normalized_prediction", "")) for row in records]
+    prompts = [str(row.get("prompt", "")) for row in records]
+    nonempty_predictions = [text for text in predictions if text.strip()]
+    prompt_copy_count = sum(
+        1
+        for prompt, prediction in zip(prompts, predictions)
+        if prompt.strip()
+        and prediction.strip()
+        and (prediction.strip() in prompt.strip() or prediction.strip().startswith(prompt.strip()))
+    )
+    return {
+        "empty_predictions": len(predictions) - len(nonempty_predictions),
+        "unique_normalized_predictions": len(set(normalized_predictions)),
+        "prompt_copy_predictions": prompt_copy_count,
+        "total_generation_records": len(records),
+    }
+
+
+def generation_warnings(tag: str, diagnostics: Dict[str, Any]) -> List[str]:
+    total = int(diagnostics.get("total_generation_records", 0))
+    if total <= 0:
+        return []
+    warnings: List[str] = []
+    if int(diagnostics.get("empty_predictions", 0)) == total:
+        warnings.append(f"{tag}: all generated predictions are empty; check tokenizer/EOS/max_new_tokens.")
+    if int(diagnostics.get("unique_normalized_predictions", 0)) <= 1 and total > 1:
+        warnings.append(f"{tag}: all generated predictions are identical; check checkpoint/generation settings.")
+    if int(diagnostics.get("prompt_copy_predictions", 0)) / float(total) > 0.8:
+        warnings.append(f"{tag}: most generations look like prompt copies; check response slicing/prompt format.")
+    return warnings
+
+
 def benchmark_exact(
     model: nn.Module,
     tokenizer: Any,
@@ -340,8 +424,13 @@ def benchmark_exact(
                 is_correct = None
             else:
                 target_count += 1
-                is_correct = normalize_for_exact(pred) == normalize_for_exact(target)
+                normalized_prediction = normalize_for_exact(pred)
+                normalized_target = normalize_for_exact(target)
+                is_correct = normalized_prediction == normalized_target
                 correct += int(is_correct)
+            if target is None:
+                normalized_prediction = normalize_for_exact(pred)
+                normalized_target = None
 
             local_predictions.append(
                 {
@@ -349,6 +438,8 @@ def benchmark_exact(
                     "prompt": prompt,
                     "target": target,
                     "prediction": pred,
+                    "normalized_prediction": normalized_prediction,
+                    "normalized_target": normalized_target,
                     "correct": is_correct,
                 }
             )
@@ -392,6 +483,8 @@ def benchmark_exact(
         all_preds.extend(item["predictions"])
 
     all_preds.sort(key=lambda x: int(x["row_id"]) if x.get("row_id") is not None else 0)
+    diagnostics = exact_match_diagnostics(all_preds)
+    warnings = generation_warnings(tag, diagnostics)
 
     return {
         "tag": tag,
@@ -402,6 +495,8 @@ def benchmark_exact(
         "elapsed_seconds": max_elapsed,
         "generated_tokens": total_tokens,
         "generated_tokens_per_second": total_tokens / max_elapsed if max_elapsed > 0 else None,
+        "exact_match_diagnostics": diagnostics,
+        "generation_warnings": warnings,
         "predictions": all_preds,
     }
 
@@ -689,6 +784,8 @@ def main() -> None:
                     "generated_tokens_per_second": dense_public.get("generated_tokens_per_second"),
                     "whole_model_sparsity": prune_report["whole_model_before"]["sparsity"],
                     "selected_linear_sparsity": 0.0,
+                    "checkpoint_evaluated": str(model_path),
+                    "generation_warnings": dense_public.get("generation_warnings"),
                 },
                 {
                     "tag": "nvidia_2of4",
@@ -700,6 +797,8 @@ def main() -> None:
                     "generated_tokens_per_second": pruned_public.get("generated_tokens_per_second"),
                     "whole_model_sparsity": prune_report["whole_model_after"]["sparsity"],
                     "selected_linear_sparsity": prune_report["selected_linear_mask_sparsity"],
+                    "checkpoint_evaluated": str(pruned_dir),
+                    "generation_warnings": pruned_public.get("generation_warnings"),
                 },
             ]
             save_csv(out_dir / "benchmark_summary.csv", rows_for_csv)

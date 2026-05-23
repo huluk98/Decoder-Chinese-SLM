@@ -59,10 +59,33 @@ TRUST_REMOTE_CODE = True
 COMPARISON_MODE = "whitespace"  # exact, whitespace, lower_whitespace
 SEED = 42
 MAX_GPUS = 8
+INCLUDE_LM_HEAD = False
 
 PROMPT_KEYS = ("prompt", "instruction", "input", "question", "query", "command", "source")
 RESPONSE_KEYS = ("response", "output", "answer", "target", "label", "completion")
 TEXT_KEYS = ("text", "content")
+LEADING_MARKERS = (
+    "<|assistant|>",
+    "assistant:",
+    "Assistant:",
+    "ASSISTANT:",
+    "回答:",
+    "回答：",
+    "答案:",
+    "答案：",
+    "输出:",
+    "输出：",
+)
+STOP_MARKERS = (
+    "<|user|>",
+    "<|system|>",
+    "<|eos|>",
+    "<|im_start|>user",
+    "<|im_start|>system",
+    "<|im_end|>",
+    "\nUser:",
+    "\n用户:",
+)
 
 
 @dataclass
@@ -175,8 +198,38 @@ def make_output_dir(model_path: Path) -> Path:
     return model_path.parent / f"{model_path.name}_magnitude50_8gpu_exact_{stamp}"
 
 
+def strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    changed = True
+    while changed and len(text) >= 2:
+        changed = False
+        for left, right in (("`", "`"), ('"', '"'), ("'", "'")):
+            if text.startswith(left) and text.endswith(right):
+                text = text[1:-1].strip()
+                changed = True
+                break
+    return text
+
+
+def clean_prediction_text(text: str) -> str:
+    text = "" if text is None else str(text)
+    for marker in STOP_MARKERS:
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    changed = True
+    while changed:
+        changed = False
+        stripped = text.strip()
+        for marker in LEADING_MARKERS:
+            if stripped.startswith(marker):
+                text = stripped[len(marker):]
+                changed = True
+                break
+    return strip_wrapping_quotes(text)
+
+
 def normalize_text(x: str, mode: str = COMPARISON_MODE) -> str:
-    x = "" if x is None else str(x)
+    x = clean_prediction_text("" if x is None else str(x))
     if mode == "exact":
         return x
     if mode == "whitespace":
@@ -325,6 +378,40 @@ def all_gather_list(obj: Any, world_size: int) -> List[Any]:
     return gathered
 
 
+def exact_match_diagnostics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    predictions = [str(row.get("prediction", "")) for row in records]
+    normalized_predictions = [str(row.get("normalized_prediction", "")) for row in records]
+    prompts = [str(row.get("prompt", "")) for row in records]
+    nonempty_predictions = [text for text in predictions if text.strip()]
+    prompt_copy_count = sum(
+        1
+        for prompt, prediction in zip(prompts, predictions)
+        if prompt.strip()
+        and prediction.strip()
+        and (prediction.strip() in prompt.strip() or prediction.strip().startswith(prompt.strip()))
+    )
+    return {
+        "empty_predictions": len(predictions) - len(nonempty_predictions),
+        "unique_normalized_predictions": len(set(normalized_predictions)),
+        "prompt_copy_predictions": prompt_copy_count,
+        "total_generation_records": len(records),
+    }
+
+
+def generation_warnings(tag: str, diagnostics: Dict[str, Any]) -> List[str]:
+    total = int(diagnostics.get("total_generation_records", 0))
+    if total <= 0:
+        return []
+    warnings: List[str] = []
+    if int(diagnostics.get("empty_predictions", 0)) == total:
+        warnings.append(f"{tag}: all generated predictions are empty; check tokenizer/EOS/max_new_tokens.")
+    if int(diagnostics.get("unique_normalized_predictions", 0)) <= 1 and total > 1:
+        warnings.append(f"{tag}: all generated predictions are identical; check checkpoint/generation settings.")
+    if int(diagnostics.get("prompt_copy_predictions", 0)) / float(total) > 0.8:
+        warnings.append(f"{tag}: most generations look like prompt copies; check response slicing/prompt format.")
+    return warnings
+
+
 def benchmark_model(
     model,
     tokenizer,
@@ -380,7 +467,9 @@ def benchmark_model(
                 preds = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
                 for ex, pred in zip(prompt_response_batch, preds):
                     gold = str(ex.response)
-                    is_correct = normalize_text(pred) == normalize_text(gold)
+                    normalized_prediction = normalize_text(pred)
+                    normalized_gold = normalize_text(gold)
+                    is_correct = normalized_prediction == normalized_gold
                     correct += int(is_correct)
                     exact_total += 1
                     gen_records.append(
@@ -389,6 +478,8 @@ def benchmark_model(
                             "prompt": ex.prompt,
                             "gold": gold,
                             "prediction": pred,
+                            "normalized_prediction": normalized_prediction,
+                            "normalized_gold": normalized_gold,
                             "correct": bool(is_correct),
                         }
                     )
@@ -416,6 +507,8 @@ def benchmark_model(
     for x in gathered:
         records.extend(x["records"])
     records.sort(key=lambda r: r["idx"])
+    diagnostics = exact_match_diagnostics(records)
+    warnings = generation_warnings(tag, diagnostics)
 
     avg_loss = loss_sum / float(label_tokens or 1)
     ppl = math.exp(avg_loss) if avg_loss < 80 else float("inf")
@@ -439,6 +532,8 @@ def benchmark_model(
         "examples_per_second": len(examples) / float(max_elapsed or 1),
         "tokens_per_second": label_tokens / float(max_elapsed or 1),
         "prediction_file": str(pred_path),
+        "exact_match_diagnostics": diagnostics,
+        "generation_warnings": warnings,
     }
 
 
@@ -473,6 +568,11 @@ def parameter_zero_stats(model: nn.Module) -> Dict[str, Any]:
     }
 
 
+def is_lm_head_name(name: str) -> bool:
+    leaf = name.lower().split(".")[-1]
+    return leaf in {"lm_head", "output_head"} or "lm_head" in name.lower()
+
+
 def magnitude_prune_per_layer(model: nn.Module, sparsity: float = SPARSITY) -> Tuple[Dict[str, torch.Tensor], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Same guideline as the uploaded magnitude script:
@@ -488,6 +588,9 @@ def magnitude_prune_per_layer(model: nn.Module, sparsity: float = SPARSITY) -> T
     for name, m in model.named_modules():
         if not isinstance(m, nn.Linear):
             continue
+        if not INCLUDE_LM_HEAD and is_lm_head_name(name):
+            skipped.append({"module": name, "reason": "lm_head_skipped_by_default"})
+            continue
         if m.weight is None or m.weight.ndim != 2:
             skipped.append({"module": name, "reason": "not_2d_linear_weight"})
             continue
@@ -502,8 +605,10 @@ def magnitude_prune_per_layer(model: nn.Module, sparsity: float = SPARSITY) -> T
             if keep >= scores.numel():
                 mask = torch.ones_like(W, dtype=torch.bool)
             else:
-                threshold = torch.topk(scores, keep, largest=True).values.min()
-                mask = W.abs() >= threshold
+                keep_idx = torch.topk(scores, keep, largest=True).indices
+                mask_flat = torch.zeros_like(scores, dtype=torch.bool)
+                mask_flat[keep_idx] = True
+                mask = mask_flat.reshape_as(W)
             W.mul_(mask.to(dtype=W.dtype, device=W.device))
 
         mask_cpu = mask.detach().cpu().bool()
@@ -550,6 +655,8 @@ def save_summary_csv(path: Path, dense: Dict[str, Any], pruned: Dict[str, Any]) 
         "examples_per_second",
         "tokens_per_second",
         "prediction_file",
+        "checkpoint_evaluated",
+        "generation_warnings",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -664,6 +771,7 @@ def main_worker() -> None:
             "eval_file": str(eval_path),
             "output_dir": str(output_dir),
             "sparsity_target": SPARSITY,
+            "include_lm_head": INCLUDE_LM_HEAD,
             "scope": "selected torch.nn.Linear weights in AutoModelForCausalLM",
             "rule": "per Linear layer, score=abs(weight), keep top 50%, zero remaining 50%",
             "selected_linear_modules": len(sparsity_rows),
