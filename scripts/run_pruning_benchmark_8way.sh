@@ -84,6 +84,9 @@ if [[ "${RUN_KIND}" == "qwen_instruct" ]]; then
 fi
 
 ARGS=(--config "${CONFIG_PATH}")
+if [[ -n "${EVAL_FILE:-}" ]]; then
+  ARGS+=(--eval-file "${EVAL_FILE}")
+fi
 if [[ "${DRY_RUN}" == "1" ]]; then
   ARGS+=(--dry-run)
 fi
@@ -97,6 +100,9 @@ echo "Sequential 8-way pruning benchmark"
 echo "  config: ${CONFIG_PATH}"
 echo "  mode:   ${RUN_KIND}"
 echo "  runner: ${RUNNER}"
+if [[ -n "${EVAL_FILE:-}" ]]; then
+  echo "  eval_file override: ${EVAL_FILE}"
+fi
 echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 echo "  keep going after method failure: ${KEEP_GOING}"
 echo
