@@ -156,6 +156,14 @@ def choose_dtype(device: torch.device) -> torch.dtype:
     return torch.float16
 
 
+def prepare_tokenizer(tokenizer: Any) -> Any:
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    return tokenizer
+
+
 def load_eval_file(eval_path: Path) -> List[Dict[str, Any]]:
     suffix = eval_path.suffix.lower()
     if not eval_path.exists():
@@ -268,9 +276,7 @@ def generate_batch(
     prompts: List[str],
     device: torch.device,
 ) -> List[str]:
-    tokenizer.padding_side = "left"
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = prepare_tokenizer(tokenizer)
 
     enc = tokenizer(
         prompts,
@@ -280,7 +286,7 @@ def generate_batch(
         max_length=MAX_INPUT_TOKENS,
     )
     enc = {k: v.to(device) for k, v in enc.items()}
-    input_lengths = enc["attention_mask"].sum(dim=1).tolist()
+    prompt_width = int(enc["input_ids"].shape[1])
 
     with torch.inference_mode():
         out = model.generate(
@@ -294,8 +300,8 @@ def generate_batch(
         )
 
     preds: List[str] = []
-    for seq, input_len in zip(out, input_lengths):
-        new_tokens = seq[int(input_len) :]
+    for seq in out:
+        new_tokens = seq[prompt_width:]
         pred = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
         preds.append(pred)
     return preds
@@ -580,7 +586,11 @@ def main() -> None:
         rank0_print(rank, f"Model path: {model_path}")
         rank0_print(rank, f"Eval file:  {eval_path}")
         rank0_print(rank, f"Output dir: {out_dir}")
-        rank0_print(rank, f"World size: {world_size}; dtype: {dtype}; device per rank: {device}")
+        rank0_print(
+            rank,
+            f"World size: {world_size}; batch_size_per_gpu: {BATCH_SIZE}; "
+            f"effective_batch_size: {BATCH_SIZE * world_size}; dtype: {dtype}; device per rank: {device}",
+        )
 
         rows = load_eval_file(eval_path)
         if not rows:
@@ -588,9 +598,7 @@ def main() -> None:
 
         rank0_print(rank, f"Loaded {len(rows)} eval rows.")
 
-        tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=TRUST_REMOTE_CODE)
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = prepare_tokenizer(AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=TRUST_REMOTE_CODE))
 
         model = AutoModelForCausalLM.from_pretrained(
             str(model_path),
@@ -632,9 +640,7 @@ def main() -> None:
             if device.type == "cuda":
                 torch.cuda.empty_cache()
             rank0_print(rank, f"\n[4/4] Reloading saved pruned checkpoint for evaluation: {pruned_dir}")
-            tokenizer = AutoTokenizer.from_pretrained(str(pruned_dir), trust_remote_code=TRUST_REMOTE_CODE)
-            if tokenizer.pad_token_id is None:
-                tokenizer.pad_token = tokenizer.eos_token
+            tokenizer = prepare_tokenizer(AutoTokenizer.from_pretrained(str(pruned_dir), trust_remote_code=TRUST_REMOTE_CODE))
             model = AutoModelForCausalLM.from_pretrained(
                 str(pruned_dir),
                 torch_dtype=dtype,
