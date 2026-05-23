@@ -772,13 +772,22 @@ def main_worker() -> None:
     if world_size > 1:
         dist.barrier()
 
-    log(rank, "[rank0] Benchmarking WANDA-pruned model...")
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    log(rank, f"[rank0] Reloading saved pruned checkpoint for evaluation: {pruned_model_dir}")
+    model, tokenizer = load_model_and_tokenizer(pruned_model_dir, device)
+    model.eval()
+
+    log(rank, "[rank0] Benchmarking reloaded WANDA-pruned model...")
     pruned_metrics = benchmark_model(model, tokenizer, examples, rank, world_size, device, "pruned", output_dir)
 
     if is_rank0(rank):
+        pruned_metrics["checkpoint_evaluated"] = str(pruned_model_dir)
         report = {
             "method": "wanda_activation_aware_per_row_decoder_only",
             "model_path": str(model_path),
+            "checkpoint_evaluated": str(pruned_model_dir),
             "eval_file": str(eval_path),
             "output_dir": str(output_dir),
             "sparsity_target": SPARSITY,

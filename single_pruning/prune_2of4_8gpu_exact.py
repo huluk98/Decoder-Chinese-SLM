@@ -626,11 +626,29 @@ def main() -> None:
 
         if world_size > 1:
             dist.barrier()
-        rank0_print(rank, "\n[4/4] Benchmarking pruned model...")
+
+        if SAVE_PRUNED_MODEL:
+            del model
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            rank0_print(rank, f"\n[4/4] Reloading saved pruned checkpoint for evaluation: {pruned_dir}")
+            tokenizer = AutoTokenizer.from_pretrained(str(pruned_dir), trust_remote_code=TRUST_REMOTE_CODE)
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = AutoModelForCausalLM.from_pretrained(
+                str(pruned_dir),
+                torch_dtype=dtype,
+                trust_remote_code=TRUST_REMOTE_CODE,
+                low_cpu_mem_usage=True,
+            ).to(device)
+            model.eval()
+
+        rank0_print(rank, "\n[4/4] Benchmarking reloaded pruned model...")
         pruned_metrics = benchmark_exact(model, tokenizer, rows, device, rank, world_size, tag="nvidia_2of4")
 
         if rank == 0:
             pruned_public = {k: v for k, v in pruned_metrics.items() if k != "predictions"}
+            pruned_public["checkpoint_evaluated"] = str(pruned_dir)
             rank0_print(rank, json.dumps(pruned_public, indent=2, ensure_ascii=False))
 
             summary = {
@@ -644,6 +662,7 @@ def main() -> None:
                 "dense": dense_public,
                 "nvidia_2of4": pruned_public,
                 "pruning": prune_report,
+                "checkpoint_evaluated": str(pruned_dir),
             }
 
             save_json(out_dir / "benchmark_summary.json", summary)
