@@ -836,6 +836,8 @@ MODE=generic CONFIG_PATH=configs/qwen25_0p5b_pruning_benchmark.yaml ./scripts/ru
 
 That config uses the generic decoder-only pruning code and writes one-shot pruned checkpoints under `runs/qwen25-0p5b-pruning-benchmark/one_shot/{magnitude,nvidia-2of4,wanda,gradient}/`.
 
+For the current pruning benchmark, use your own prompt/response eval file through `benchmark.eval_file` or the one-run `EVAL_FILE` override. The IoT benchmark launcher is separate and should only be used for the later final IoT command benchmark.
+
 Edit `configs/pruning_benchmark.yaml`:
 
 ```yaml
@@ -859,10 +861,18 @@ Then run:
 ./run_pruning_benchmark_suite.sh
 ```
 
+Or override only the eval file for one run:
+
+```bash
+EVAL_FILE=/absolute/path/to/your_eval.json ./run_pruning_benchmark_suite.sh
+EVAL_FILE=/absolute/path/to/your_eval.json CONFIG_PATH=configs/qwen25_0p5b_pruning_benchmark.yaml MODE=generic ./scripts/run_pruning_benchmark_8way.sh
+```
+
 Or use the single YAML-driven sequential wrapper:
 
 ```bash
 CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+CONFIG_PATH=configs/pruning_benchmark.yaml python scripts/run_pruning_benchmark.py --eval-file /absolute/path/to/your_eval.json
 ```
 
 Preview the commands without running them:

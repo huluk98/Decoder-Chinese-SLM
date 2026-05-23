@@ -860,6 +860,7 @@ def ensure_expected_pruning_rows(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one-shot and SFT-retuned pruning benchmarks for all methods.")
     parser.add_argument("--config", default="configs/pruning_benchmark.yaml", help="YAML file, or a directory containing pruning_benchmark.yaml.")
+    parser.add_argument("--eval-file", default=None, help="Override benchmark.eval_file with your prompt/response eval dataset.")
     parser.add_argument("--dry-run", action="store_true")
     errors = parser.add_mutually_exclusive_group()
     errors.add_argument("--continue-on-error", action="store_true", help="Record a failed method and continue with the next method.")
@@ -879,7 +880,7 @@ def main() -> None:
     output_dir = as_path(benchmark.get("output_dir", "runs/pruning-benchmark-0p2b"))
     generated_config_dir = output_dir / "generated_configs"
     base_checkpoint_value = benchmark.get("base_checkpoint", config.get("prune", {}).get("base_model"))
-    eval_file_value = benchmark.get("eval_file")
+    eval_file_value = args.eval_file or benchmark.get("eval_file")
     if not base_checkpoint_value:
         raise ValueError("Set benchmark.base_checkpoint.")
     if not eval_file_value:
