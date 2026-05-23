@@ -53,6 +53,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # User-editable constants
 # =========================
 MAX_GPUS = 8
+MODEL_PATH = ""  # Optional: set /path/to/local_model here, then run with no path args.
+EVAL_DATASET_PATH = ""  # Optional: set /path/to/eval.json here, then run with no path args.
 BATCH_SIZE = 8
 MAX_INPUT_TOKENS = 2048
 MAX_NEW_TOKENS = 64
@@ -76,15 +78,27 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
+def resolve_run_paths(script_name: str) -> Tuple[Path, Path]:
+    if len(sys.argv) == 3:
+        model_value = sys.argv[1]
+        eval_value = sys.argv[2]
+    elif len(sys.argv) == 1 and MODEL_PATH.strip() and EVAL_DATASET_PATH.strip():
+        model_value = MODEL_PATH
+        eval_value = EVAL_DATASET_PATH
+    else:
+        fail(
+            f"This script takes exactly two paths:\n"
+            f"  python {script_name} /path/to/local_model /path/to/eval_file\n"
+            "Or edit MODEL_PATH and EVAL_DATASET_PATH at the top of this script, then run it with no path args."
+        )
+    return Path(model_value).expanduser().resolve(), Path(eval_value).expanduser().resolve()
+
+
 def maybe_relaunch_with_torchrun() -> None:
     """Allow the user to run only: python script.py MODEL_PATH EVAL_FILE."""
     if "WORLD_SIZE" in os.environ:
         return
-    if len(sys.argv) != 3:
-        fail(
-            "This script takes exactly two paths:\n"
-            "  python prune_2of4_8gpu_exact.py /path/to/local_model /path/to/eval_file"
-        )
+    model_path, eval_path = resolve_run_paths("prune_2of4_8gpu_exact.py")
     if not torch.cuda.is_available():
         return
     gpu_count = torch.cuda.device_count()
@@ -101,8 +115,8 @@ def maybe_relaunch_with_torchrun() -> None:
         "--standalone",
         f"--nproc_per_node={nproc}",
         str(Path(__file__).resolve()),
-        sys.argv[1],
-        sys.argv[2],
+        str(model_path),
+        str(eval_path),
     ]
     print(f"Auto-launching distributed evaluation/pruning on {nproc} GPU(s)...")
     os.execvpe(sys.executable, cmd, env)
@@ -541,17 +555,19 @@ def derived_output_dir(model_path: Path) -> Path:
     return Path.cwd() / f"nvidia2of4_8gpu_exact_{stamp}"
 
 
+def format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def main() -> None:
     maybe_relaunch_with_torchrun()
 
-    if len(sys.argv) != 3:
-        fail(
-            "This script takes exactly two paths:\n"
-            "  python prune_2of4_8gpu_exact.py /path/to/local_model /path/to/eval_file"
-        )
-
-    model_path = Path(sys.argv[1]).expanduser().resolve()
-    eval_path = Path(sys.argv[2]).expanduser().resolve()
+    model_path, eval_path = resolve_run_paths("prune_2of4_8gpu_exact.py")
 
     if not model_path.exists():
         fail(f"Local model path does not exist: {model_path}")
@@ -600,9 +616,17 @@ def main() -> None:
         rank0_print(rank, "\n[2/4] Applying exact NVIDIA 2:4 pruning on each rank...")
         prune_report, module_rows = prune_model_2of4(model, rank)
 
+        pruned_dir = out_dir / "pruned_model"
+        if rank == 0 and SAVE_PRUNED_MODEL:
+            rank0_print(rank, f"\n[3/4] Saving pruned model before evaluation to {pruned_dir} ...")
+            model.save_pretrained(pruned_dir, safe_serialization=True)
+            tokenizer.save_pretrained(pruned_dir)
+            save_json(out_dir / "nvidia_2of4_pruning_report.json", prune_report)
+            save_csv(out_dir / "sparsity_by_module.csv", module_rows)
+
         if world_size > 1:
             dist.barrier()
-        rank0_print(rank, "\n[3/4] Benchmarking pruned model...")
+        rank0_print(rank, "\n[4/4] Benchmarking pruned model...")
         pruned_metrics = benchmark_exact(model, tokenizer, rows, device, rank, world_size, tag="nvidia_2of4")
 
         if rank == 0:
@@ -623,8 +647,9 @@ def main() -> None:
             }
 
             save_json(out_dir / "benchmark_summary.json", summary)
-            save_json(out_dir / "nvidia_2of4_pruning_report.json", prune_report)
-            save_csv(out_dir / "sparsity_by_module.csv", module_rows)
+            if not SAVE_PRUNED_MODEL:
+                save_json(out_dir / "nvidia_2of4_pruning_report.json", prune_report)
+                save_csv(out_dir / "sparsity_by_module.csv", module_rows)
             if SAVE_PREDICTIONS:
                 save_jsonl(out_dir / "predictions_pruned.jsonl", pruned_metrics["predictions"])
 
@@ -654,15 +679,15 @@ def main() -> None:
             ]
             save_csv(out_dir / "benchmark_summary.csv", rows_for_csv)
 
-            if SAVE_PRUNED_MODEL:
-                pruned_dir = out_dir / "pruned_model"
-                rank0_print(rank, f"\n[4/4] Saving pruned model to {pruned_dir} ...")
-                model.save_pretrained(pruned_dir, safe_serialization=True)
-                tokenizer.save_pretrained(pruned_dir)
-
-            rank0_print(rank, "\nDone.")
-            rank0_print(rank, f"Main summary: {out_dir / 'benchmark_summary.json'}")
-            rank0_print(rank, f"Pruned model:  {out_dir / 'pruned_model'}")
+            rank0_print(rank, "\nNVIDIA 2:4 pruning + exact benchmark complete")
+            rank0_print(rank, f"Output directory: {out_dir}")
+            rank0_print(rank, f"Pruned model:      {pruned_dir}")
+            rank0_print(rank, f"Dense exact:       {format_metric(dense_public.get('exact_match_accuracy'))}")
+            rank0_print(rank, f"Pruned exact:      {format_metric(pruned_public.get('exact_match_accuracy'))}")
+            rank0_print(rank, f"Real sparsity:     {format_metric(prune_report['whole_model_after']['sparsity'])}")
+            rank0_print(rank, f"Linear sparsity:   {format_metric(prune_report['selected_linear_mask_sparsity'])}")
+            rank0_print(rank, f"Valid 2:4:         {prune_report['valid_pruned_weights']}")
+            rank0_print(rank, f"Main summary:      {out_dir / 'benchmark_summary.json'}")
 
     finally:
         cleanup_distributed()

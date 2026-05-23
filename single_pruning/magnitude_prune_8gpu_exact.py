@@ -49,6 +49,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Fixed experiment defaults
 # -----------------------------
 SPARSITY = 0.50
+MODEL_PATH = ""  # Optional: set /path/to/local_model here, then run with no path args.
+EVAL_DATASET_PATH = ""  # Optional: set /path/to/eval.json here, then run with no path args.
 MAX_SEQ_LEN = 2048
 MAX_NEW_TOKENS = 64
 BATCH_SIZE = 4
@@ -75,14 +77,29 @@ def is_worker_process() -> bool:
     return "LOCAL_RANK" in os.environ or "RANK" in os.environ
 
 
+def resolve_run_paths(script_name: str) -> Tuple[Path, Path]:
+    if len(sys.argv) == 3:
+        model_value = sys.argv[1]
+        eval_value = sys.argv[2]
+    elif len(sys.argv) == 1 and MODEL_PATH.strip() and EVAL_DATASET_PATH.strip():
+        model_value = MODEL_PATH
+        eval_value = EVAL_DATASET_PATH
+    else:
+        print(
+            f"Usage: python {script_name} /path/to/local_model /path/to/eval_file\n"
+            "Or edit MODEL_PATH and EVAL_DATASET_PATH at the top of this script, then run it with no path args.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return Path(model_value).expanduser().resolve(), Path(eval_value).expanduser().resolve()
+
+
 def auto_launch_if_needed() -> None:
     """Relaunch with torchrun while keeping the user command to only two paths."""
     if is_worker_process():
         return
 
-    if len(sys.argv) != 3:
-        print("Usage: python magnitude_prune_8gpu_exact.py /path/to/local_model /path/to/eval_file")
-        sys.exit(2)
+    model_path, eval_path = resolve_run_paths("magnitude_prune_8gpu_exact.py")
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     nproc = min(MAX_GPUS, gpu_count) if gpu_count > 0 else 1
@@ -97,8 +114,8 @@ def auto_launch_if_needed() -> None:
         "--standalone",
         f"--nproc_per_node={nproc}",
         str(Path(__file__).resolve()),
-        sys.argv[1],
-        sys.argv[2],
+        str(model_path),
+        str(eval_path),
     ]
     print(f"[launcher] Starting distributed run with {nproc} GPU processes")
     print("[launcher] " + " ".join(cmd))
@@ -541,6 +558,15 @@ def save_summary_csv(path: Path, dense: Dict[str, Any], pruned: Dict[str, Any]) 
             writer.writerow({k: row.get(k) for k in fields})
 
 
+def format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def load_model_and_tokenizer(model_path: Path, device: torch.device):
     dtype = parse_dtype(DTYPE)
     kwargs: Dict[str, Any] = {"trust_remote_code": TRUST_REMOTE_CODE}
@@ -556,15 +582,10 @@ def load_model_and_tokenizer(model_path: Path, device: torch.device):
 
 
 def main_worker() -> None:
-    if len(sys.argv) != 3:
-        print("Usage: python magnitude_prune_8gpu_exact.py /path/to/local_model /path/to/eval_file")
-        sys.exit(2)
-
     torch.manual_seed(SEED)
     rank, world_size, local_rank, device = setup_distributed()
 
-    model_path = Path(sys.argv[1]).expanduser().resolve()
-    eval_path = Path(sys.argv[2]).expanduser().resolve()
+    model_path, eval_path = resolve_run_paths("magnitude_prune_8gpu_exact.py")
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model path does not exist: {model_path}")
@@ -610,6 +631,16 @@ def main_worker() -> None:
     selected_zeros = sum(int(r["zero_parameters"]) for r in sparsity_rows)
     selected_pruned = sum(int(r["mask_pruned_parameters"]) for r in sparsity_rows)
 
+    pruned_model_dir = output_dir / "pruned_model"
+    if is_rank0(rank):
+        log(rank, f"[rank0] Saving pruned model before evaluation: {pruned_model_dir}")
+        model.save_pretrained(pruned_model_dir, safe_serialization=True)
+        tokenizer.save_pretrained(pruned_model_dir)
+        torch.save(masks, output_dir / "magnitude_pruning_masks.pt")
+        write_csv(output_dir / "sparsity_by_module.csv", sparsity_rows)
+    if world_size > 1:
+        dist.barrier()
+
     log(rank, "[rank0] Benchmarking magnitude-pruned model...")
     pruned_metrics = benchmark_model(model, tokenizer, examples, rank, world_size, device, "pruned", output_dir)
 
@@ -638,22 +669,17 @@ def main_worker() -> None:
             ],
         }
 
-        pruned_model_dir = output_dir / "pruned_model"
-        model.save_pretrained(pruned_model_dir, safe_serialization=True)
-        tokenizer.save_pretrained(pruned_model_dir)
-        torch.save(masks, output_dir / "magnitude_pruning_masks.pt")
-        write_csv(output_dir / "sparsity_by_module.csv", sparsity_rows)
         save_json(output_dir / "magnitude_pruning_report.json", report)
         save_json(output_dir / "benchmark_summary.json", {"dense": dense_metrics, "pruned": pruned_metrics})
         save_summary_csv(output_dir / "benchmark_summary.csv", dense_metrics, pruned_metrics)
 
-        print("\n✅ Magnitude pruning + exact benchmark complete")
+        print("\nMagnitude pruning + exact benchmark complete")
         print(f"Output directory: {output_dir}")
         print(f"Pruned model:      {pruned_model_dir}")
-        if pruned_metrics.get("exact_match_accuracy") is not None:
-            print(f"Dense exact:       {dense_metrics.get('exact_match_accuracy'):.6f}")
-            print(f"Pruned exact:      {pruned_metrics.get('exact_match_accuracy'):.6f}")
-        print(f"Selected Linear sparsity: {report['selected_linear_mask_sparsity']:.6f}")
+        print(f"Dense exact:       {format_metric(dense_metrics.get('exact_match_accuracy'))}")
+        print(f"Pruned exact:      {format_metric(pruned_metrics.get('exact_match_accuracy'))}")
+        print(f"Real sparsity:     {format_metric(report['after']['whole_model_sparsity'])}")
+        print(f"Linear sparsity:   {format_metric(report['selected_linear_mask_sparsity'])}")
 
     cleanup_distributed()
 
