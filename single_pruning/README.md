@@ -12,7 +12,7 @@ Or edit `MODEL_PATH` and `EVAL_DATASET_PATH` near the top of the script and run 
 python single_pruning/<script>.py
 ```
 
-They auto-launch with `torchrun` on up to 8 visible GPUs, evaluate the dense model, prune, save the pruned checkpoint immediately, evaluate the pruned model, and print dense accuracy, pruned accuracy, whole-model sparsity, selected-linear sparsity, and output paths at the end.
+They auto-launch with `torchrun` on up to 8 visible GPUs, evaluate the dense model, prune, save the pruned checkpoint immediately, reload that saved `pruned_model/` checkpoint from disk for evaluation, and print dense accuracy, pruned accuracy, whole-model sparsity, selected-linear sparsity, and output paths at the end.
 
 ## Scripts
 

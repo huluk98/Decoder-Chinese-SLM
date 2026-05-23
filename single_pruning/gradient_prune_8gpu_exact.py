@@ -722,10 +722,23 @@ def main_worker() -> None:
     if is_dist:
         dist.barrier()
 
-    log(rank, "Benchmarking pruned model...")
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    log(rank, f"Reloading saved pruned checkpoint for evaluation: {pruned_model_dir}")
+    tokenizer = AutoTokenizer.from_pretrained(str(pruned_model_dir), trust_remote_code=TRUST_REMOTE_CODE)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.unk_token
+    dataset.tokenizer = tokenizer
+    model = AutoModelForCausalLM.from_pretrained(str(pruned_model_dir), **load_kwargs).to(device)
+    model.config.use_cache = False
+
+    log(rank, "Benchmarking reloaded pruned model...")
     pruned_metrics, pruned_preds = evaluate(model, tokenizer, dataset, rank, world_size, is_dist, device, "gradient_pruned_50")
 
     if is_main(rank):
+        if pruned_metrics is not None:
+            pruned_metrics["checkpoint_evaluated"] = str(pruned_model_dir)
         save_jsonl(out_dir / "predictions_pruned.jsonl", pruned_preds or [])
 
         selected_params = sum(int(r["weight_parameters"]) for r in prune_rows)
@@ -736,6 +749,7 @@ def main_worker() -> None:
             "score": "abs(weight * gradient)",
             "sparsity_target": SPARSITY,
             "model_path": str(model_path),
+            "checkpoint_evaluated": str(pruned_model_dir),
             "eval_file": str(eval_path),
             "output_dir": str(out_dir),
             "world_size": world_size,
