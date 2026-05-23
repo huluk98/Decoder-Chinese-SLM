@@ -732,7 +732,7 @@ If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and
 
 ## 50% Pruning
 
-Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The CMC-comparable path prunes 50% of selected transformer attention/MLP `torch.nn.Linear` weights only. Embeddings, positional embeddings, `lm_head`/output heads, tied output embeddings, norms, biases, tokenizer-related parameters, and non-Linear modules are protected.
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The generic decoder-only path prunes `torch.nn.Linear` weights only and skips `lm_head` by default. Embeddings, positional embeddings, output heads, tied output embeddings, norms, biases, tokenizer-related parameters, and non-Linear modules are protected.
 
 Run one pruning method:
 
@@ -746,10 +746,10 @@ python scripts/prune.py \
 
 Available methods:
 
-- `magnitude`: global unstructured 50% pruning by `abs(weight)`.
+- `magnitude`: per-layer unstructured 50% pruning by `abs(weight)`.
 - `2of4`: NVIDIA-style semi-structured 2:4 pruning, two zeros in each group of four linear weights.
-- `wanda`: activation-aware 50% pruning using calibration data and `abs(weight) * input_activation_norm`.
-- `gradient`: gradient-score pruning using `abs(weight * grad)` on calibration batches.
+- `wanda`: row-wise activation-aware 50% pruning using calibration data and `abs(weight) * input_activation_norm`.
+- `gradient`: per-layer gradient-score pruning using `abs(weight * grad)` on calibration batches.
 
 Run all four:
 
@@ -757,7 +757,7 @@ Run all four:
 CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
 ```
 
-Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for the one-shot CMC comparison. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
+Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for one-shot pruning. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
@@ -787,11 +787,13 @@ Then run:
 ./run_qwen25_instruct_pruning_benchmark_8gpu.sh
 ```
 
-Or use the single YAML-driven sequential wrapper. It auto-detects Qwen configs by name/content:
+Or use the single YAML-driven sequential wrapper. It auto-detects Qwen2.5-Instruct configs by name/content:
 
 ```bash
 CONFIG_PATH=configs/qwen25_instruct_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
+
+Base `Qwen/Qwen2.5-0.5B` and custom decoder-only models should use the generic pruning benchmark, not the Qwen2.5-Instruct benchmark. If you want to force that path, run with `MODE=generic`.
 
 This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_eval.json`. It then runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for 50% prunable-transformer-Linear sparsity and zero mask violations, evaluates the reloaded one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
 
@@ -803,7 +805,6 @@ This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_ev
 - `qwen25_instruct_pruning_benchmark_summary.json`
 - `benchmark_summary_one_shot.csv`
 - `benchmark_summary_retuned.csv`
-- `cmc_comparability_report.json`
 
 ### Pruning Benchmark Suite
 
@@ -811,6 +812,16 @@ For a full pruning comparison, use the YAML-driven benchmark suite. It evaluates
 
 1. one-shot prune with no retuning, then exact-match generation benchmark;
 2. prune, SFT-retune on your dataset while reapplying the pruning mask after every optimizer step, then exact-match generation benchmark.
+
+Use this generic suite for your custom decoder-only model and for base `Qwen/Qwen2.5-0.5B`. The Qwen2.5-Instruct suite is only for checkpoints/configs that explicitly use the Instruct chat-template path.
+
+For base Qwen2.5-0.5B, start from `configs/qwen25_0p5b_pruning_benchmark.yaml`:
+
+```bash
+MODE=generic CONFIG_PATH=configs/qwen25_0p5b_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+That config uses the generic decoder-only pruning code and writes one-shot pruned checkpoints under `runs/qwen25-0p5b-pruning-benchmark/one_shot/{magnitude,nvidia-2of4,wanda,gradient}/`.
 
 Edit `configs/pruning_benchmark.yaml`:
 
@@ -869,9 +880,26 @@ pruning_benchmark_summary.json
 
 That gives 8 model outputs total and 8 benchmark output folders total, plus the dense baseline eval folder. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json` and `exact_match_failure_cases.json`.
 
-Use `benchmark_summary_one_shot.csv` for the primary CMC comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; a 50% run means 50% sparsity over selected prunable transformer Linear weights unless whole-model sparsity is also 0.5. `cmc_comparability_report.json` records blocking issues and the table marks rows as `not directly comparable to CMC0.2B yet` whenever a blocking protocol mismatch exists.
+Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; a 50% run means 50% sparsity over the selected prunable Linear weights, while whole-model sparsity will be lower because protected parameters are intentionally left dense.
 
 The runner checks each report before evaluation and fails the phase if prunable sparsity is not 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, protected parameters changed during pruning, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+
+### Final IoT Benchmark Eval
+
+Evaluate any dense, pruned, or retuned checkpoint on the final 200-example IoT benchmark:
+
+```bash
+# Edit only configs/iot_benchmark_eval.yaml:model_path for the normal path.
+bash run_iot_benchmark_eval.sh
+```
+
+`model_path` can be either an absolute local checkpoint path or a Hugging Face model id. The default config uses `prompt_format: auto`, which uses the Qwen chat template only for `*Instruct*` checkpoints and otherwise uses the repo's decoder-only `<|user|>` / `<|assistant|>` format. You can still override any value for a single run:
+
+```bash
+bash run_iot_benchmark_eval.sh --model-path Qwen/Qwen2.5-0.5B --prompt-format raw
+```
+
+The script writes `iot_benchmark_summary.json`, `iot_benchmark_predictions.jsonl`, `iot_benchmark_predictions.csv`, `generation_samples.json`, and `exact_match_failure_cases.json`.
 
 Inspect any one-shot or retuned pruning report:
 

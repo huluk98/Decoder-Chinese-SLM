@@ -25,6 +25,8 @@ from chatlm_decoder.pruning import (
     global_magnitude_masks,
     gradient_saliency_report,
     gradient_score_masks,
+    layerwise_gradient_score_masks,
+    layerwise_magnitude_masks,
     masked_weight_stats,
     mask_sparsity,
     module_filter_report,
@@ -115,17 +117,37 @@ def make_masks(
     sparsity = float(prune_config.get("sparsity", 0.5))
     include_lm_head = bool(prune_config.get("include_lm_head", False))
     max_batches = int(prune_config.get("calibration_batches", 128))
+    granularity = str(prune_config.get("granularity", prune_config.get("pruning_granularity", "layer"))).lower()
+    if granularity in {"per_layer", "layerwise", "per-module", "per_module"}:
+        granularity = "layer"
+    if granularity not in {"layer", "global"}:
+        raise ValueError(f"prune.granularity must be 'layer' or 'global', got {granularity!r}.")
 
     if method == "2of4":
         masks = two_of_four_masks(model, include_lm_head=include_lm_head)
-        validation = validate_two_of_four_masks(masks)
+        validation = validate_two_of_four_masks(masks, model=model, include_lm_head=include_lm_head)
         if not validation["valid"]:
-            raise ValueError(f"Invalid NVIDIA 2:4 mask: {validation['total_invalid_2of4_groups']} invalid groups")
-        return masks, {"pruning_granularity": "per_group_of_4_input_weights", "nvidia_2of4_validation": validation}
+            raise ValueError(
+                "Invalid NVIDIA 2:4 mask: "
+                f"{validation['total_invalid_2of4_groups']} invalid groups, "
+                f"missing eligible modules={validation.get('missing_eligible_modules', [])}"
+            )
+        return masks, {
+            "pruning_granularity": "per_group_of_4_input_weights",
+            "score_definition": "in each group of 4 weights, keep top 2 by abs(weight)",
+            "method_variant": "vanilla_nvidia_2of4",
+            "nvidia_2of4_validation": validation,
+        }
     if method == "magnitude":
-        return global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head), {
-            "pruning_granularity": "global_prunable_linear_weight",
+        masks = (
+            global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head)
+            if granularity == "global"
+            else layerwise_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head)
+        )
+        return masks, {
+            "pruning_granularity": "global_prunable_linear_weight" if granularity == "global" else "per_layer_linear_weight",
             "score_definition": "abs(weight)",
+            "method_variant": "vanilla_global_magnitude" if granularity == "global" else "vanilla_per_layer_magnitude",
         }
     if calibration_loader is None:
         raise ValueError(f"Qwen pruning method {method} requires prune.calibration_data_path or train_file.")
@@ -162,14 +184,25 @@ def make_masks(
         report = gradient_saliency_report(scores)
         if not report["all_modules_valid"]:
             raise ValueError(f"Invalid gradient saliency statistics: {report['blocking_issues']}")
-        return gradient_score_masks(
-            model,
-            gradient_scores=scores,
-            sparsity=sparsity,
-            include_lm_head=include_lm_head,
-        ), {
-            "pruning_granularity": "global_prunable_linear_weight",
+        masks = (
+            gradient_score_masks(
+                model,
+                gradient_scores=scores,
+                sparsity=sparsity,
+                include_lm_head=include_lm_head,
+            )
+            if granularity == "global"
+            else layerwise_gradient_score_masks(
+                model,
+                gradient_scores=scores,
+                sparsity=sparsity,
+                include_lm_head=include_lm_head,
+            )
+        )
+        return masks, {
+            "pruning_granularity": "global_prunable_linear_weight" if granularity == "global" else "per_layer_linear_weight",
             "score_definition": "abs(weight * gradient)",
+            "method_variant": "vanilla_global_gradient_saliency" if granularity == "global" else "vanilla_per_layer_gradient_saliency",
             "gradient_saliency_report": report,
         }
     raise ValueError(f"Unknown pruning method: {method}")
@@ -237,6 +270,7 @@ def save_pruned_model(
     target_sparsity = float(prune_config.get("sparsity", 0.5))
     accounting = sparsity_accounting(model, masks, target=target_sparsity)
     after_norms = collect_weight_norms(model, masks)
+    per_layer_sparsity = layerwise_zero_fraction(model, masks)
     reload_model = AutoModelForCausalLM.from_pretrained(str(output_dir), trust_remote_code=False).to(device)
     reload_validation = {
         "checkpoint_reloaded": str(output_dir),
@@ -250,7 +284,11 @@ def save_pruned_model(
         "base_checkpoint": checkpoint,
         "sparsity": mask_sparsity(masks),
         "target_sparsity": target_sparsity,
+        "target_sparsity_denominator": "prunable",
         "target_prunable_sparsity": target_sparsity,
+        "method_variant": diagnostics.get("method_variant", ""),
+        "pruning_granularity": diagnostics.get("pruning_granularity", ""),
+        "score_definition": diagnostics.get("score_definition", ""),
         "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
         "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
         "include_lm_head": bool(prune_config.get("include_lm_head", False)),
@@ -258,6 +296,7 @@ def save_pruned_model(
         "uses_qwen_apply_chat_template": True,
         "checkpoint_evaluated": str(output_dir),
         "checkpoint_reload_validation": reload_validation,
+        "per_layer_sparsity": per_layer_sparsity,
         **accounting,
         "note": (
             "2of4 produces an NVIDIA semi-structured 2:4 zero pattern in Qwen linear weights. "
@@ -266,12 +305,12 @@ def save_pruned_model(
             else "Qwen2.5-Instruct checkpoint with zeros applied according to pruning masks."
         ),
     }
-    write_json(output_dir / "module_filter_report.json", module_filter_report(model))
+    write_json(output_dir / "module_filter_report.json", module_filter_report(model, include_lm_head=bool(prune_config.get("include_lm_head", False))))
     write_json(output_dir / "pruning_report.json", metadata)
     write_json(output_dir / "mask_validation.json", {"method": method, "phase": "one_shot_prune", **accounting})
     write_json(output_dir / "checkpoint_reload_validation.json", reload_validation)
-    write_csv(output_dir / "sparsity_by_module.csv", layerwise_zero_fraction(model, masks))
-    write_csv(output_dir / "layerwise_zero_fraction.csv", layerwise_zero_fraction(model, masks))
+    write_csv(output_dir / "sparsity_by_module.csv", per_layer_sparsity)
+    write_csv(output_dir / "layerwise_zero_fraction.csv", per_layer_sparsity)
     write_csv(output_dir / "layerwise_weight_norms_before_after.csv", weight_norms_before_after(before_norms, after_norms))
     if diagnostics.get("gradient_saliency_report"):
         write_json(output_dir / "gradient_saliency_report.json", diagnostics["gradient_saliency_report"])
@@ -321,7 +360,12 @@ def main() -> None:
 
     calibration_loader = build_calibration_loader(tokenizer, config, prune_config)
     masks, diagnostics = make_masks(method, model, calibration_loader, device, prune_config)
-    validate_masks_match_prunable_scope(model, masks)
+    validate_masks_match_prunable_scope(
+        model,
+        masks,
+        include_lm_head=bool(prune_config.get("include_lm_head", False)),
+        allow_missing=method == "2of4",
+    )
     protected_snapshot = protected_parameter_snapshot(model, masks)
     before_norms = collect_weight_norms(model, masks)
     print(f"Applying Qwen {method} masks with actual sparsity {mask_sparsity(masks):.4f}")

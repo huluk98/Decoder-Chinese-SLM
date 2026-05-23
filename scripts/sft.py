@@ -226,7 +226,7 @@ def save_checkpoint(
             checkpoint_dir / "mask_validation.json",
             {
                 "method": "sft_retune_with_fixed_pruning_masks",
-                "phase": "retuned_sft",
+                "phase": "retuned",
                 **sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks)),
             },
         )
@@ -234,10 +234,13 @@ def save_checkpoint(
         write_csv(checkpoint_dir / "layerwise_zero_fraction.csv", layerwise_zero_fraction(unwrap_model(model), pruning_masks))
         if checkpoint_name == "final":
             reload_model = AutoModelForCausalLM.from_pretrained(checkpoint_dir)
+            source_report = load_pruning_source_report(pruning_mask_source)
             reload_validation = {
                 "method": "sft_retune_with_fixed_pruning_masks",
-                "phase": "retuned_sft",
+                "phase": "retuned",
                 "checkpoint_reloaded": str(checkpoint_dir),
+                "target_sparsity_denominator": source_report.get("target_sparsity_denominator", "prunable"),
+                "target_whole_model_sparsity": source_report.get("target_whole_model_sparsity"),
                 **sparsity_accounting(reload_model, pruning_masks, target=mask_sparsity(pruning_masks)),
             }
             if int(reload_validation.get("masked_weight_violation_count", 0)) != 0:
@@ -301,6 +304,23 @@ def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
     return clean_masks
 
 
+def load_pruning_source_report(path: str | Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    mask_path = Path(path).expanduser()
+    candidates = []
+    if mask_path.name == "pruning_masks.pt":
+        candidates.append(mask_path.with_name("pruning_report.json"))
+    candidates.append(mask_path.parent / "pruning_report.json")
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        with candidate.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
 def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device, non_blocking=(device.type == "cuda")) for key, value in batch.items()}
 
@@ -340,11 +360,22 @@ def write_pruning_report(
     mask_stats = mask_parameter_stats(pruning_masks)
     model_stats = model_parameter_stats(model)
     accounting = sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks))
+    source_report = load_pruning_source_report(pruning_mask_source)
+    target_denominator = source_report.get("target_sparsity_denominator", "prunable")
+    target_whole_model_sparsity = source_report.get("target_whole_model_sparsity")
+    requested_sparsity = source_report.get("requested_sparsity", source_report.get("target_sparsity", mask_sparsity(pruning_masks)))
     metadata = {
         "method": "sft_retune_with_fixed_pruning_masks",
-        "phase": "retuned_sft",
+        "phase": "retuned",
         "step": int(step),
         "sparsity": mask_sparsity(pruning_masks),
+        "requested_sparsity": requested_sparsity,
+        "target_sparsity": requested_sparsity,
+        "target_sparsity_denominator": target_denominator,
+        "target_whole_model_sparsity": target_whole_model_sparsity,
+        "source_pruning_method": source_report.get("method"),
+        "source_pruning_phase": source_report.get("phase"),
+        "source_target_resolution": source_report.get("target_resolution", {}),
         "pruning_mask_source": pruning_mask_source or "",
         "mask_preserved_during_sft": True,
         "target_prunable_sparsity": accounting["target_prunable_sparsity"],

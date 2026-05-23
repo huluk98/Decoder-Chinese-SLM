@@ -4,8 +4,8 @@ from __future__ import annotations
 import argparse
 import csv
 import copy
-import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -16,6 +16,35 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 METHODS = ("magnitude", "2of4", "wanda", "gradient")
+EVAL_SUMMARY_FILENAMES = (
+    "prompt_response_eval_benchmark_summary.json",
+    "prompt_response_eval_summary.json",
+    "metrics.json",
+)
+PRUNING_ROW_PHASES = {"one_shot", "retuned"}
+PRUNING_SUMMARY_CSV_FIELDS = [
+    "method",
+    "phase",
+    "status",
+    "checkpoint",
+    "checkpoint_evaluated",
+    "eval_output_dir",
+    "active_model_parameters",
+    "active_prunable_parameters",
+    "total_parameter_count",
+    "real_sparsity",
+    "target_sparsity_denominator",
+    "achieved_prunable_sparsity",
+    "method_target_note",
+    "exact_match_accuracy",
+    "correct_examples",
+    "total_examples",
+    "mean_response_loss",
+    "response_perplexity",
+    "avg_generated_tokens",
+    "pruning_report",
+    "error",
+]
 
 
 def resolve_config_path(path: str | Path) -> Path:
@@ -46,11 +75,6 @@ def write_json(path: str | Path, payload: Any) -> None:
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-
-
-def stable_config_hash(payload: Any) -> str:
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def method_slug(method: str) -> str:
@@ -144,13 +168,22 @@ def validate_pruning_report(
     report = read_pruning_report(report_path)
     if not report:
         raise FileNotFoundError(f"Missing pruning report for {method} {phase}: {report_path}")
-    actual_sparsity = report.get("mask_sparsity", report.get("sparsity"))
-    if actual_sparsity is None:
-        raise ValueError(f"Pruning report does not contain mask_sparsity/sparsity: {report_path}")
-    if abs(float(actual_sparsity) - float(target_sparsity)) > float(tolerance):
+    denominator = str(report.get("target_sparsity_denominator", "prunable")).lower()
+    target_prunable = report.get("target_prunable_sparsity", target_sparsity)
+    if denominator == "whole_model":
+        actual_sparsity = report.get("achieved_whole_model_sparsity", report.get("model_zero_fraction"))
+        expected_sparsity = report.get("target_whole_model_sparsity", report.get("target_sparsity", target_sparsity))
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved whole-model sparsity: {report_path}")
+    else:
+        actual_sparsity = report.get("achieved_prunable_sparsity", report.get("mask_sparsity", report.get("sparsity")))
+        expected_sparsity = target_prunable
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved prunable sparsity: {report_path}")
+    if abs(float(actual_sparsity) - float(expected_sparsity)) > float(tolerance):
         raise ValueError(
-            f"{method} {phase} sparsity check failed: actual={float(actual_sparsity):.8f}, "
-            f"target={float(target_sparsity):.8f}, tolerance={float(tolerance):.8f}"
+            f"{method} {phase} {denominator} sparsity check failed: actual={float(actual_sparsity):.8f}, "
+            f"target={float(expected_sparsity):.8f}, tolerance={float(tolerance):.8f}"
         )
     violations = int(report.get("masked_weight_violation_count", 0) or 0)
     if violations:
@@ -161,7 +194,7 @@ def validate_pruning_report(
     nonzero_parameters = report.get("nonzero_parameters")
     if nonzero_parameters is not None and int(nonzero_parameters) <= 0:
         raise ValueError(f"{method} {phase} reports zero nonzero model parameters: {report_path}")
-    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_sparsity)) > float(tolerance):
+    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_prunable)) > float(tolerance):
         raise ValueError(f"{method} {phase} achieved_prunable_sparsity does not match target: {report_path}")
 
 
@@ -225,6 +258,7 @@ def print_plan(
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
+    print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)
     print(f"  retune.data_path: {retune.get('data_path')}", flush=True)
@@ -340,18 +374,19 @@ def run_eval(
     )
 
 
-def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any], comparable: bool, issues: list[str]) -> dict[str, Any]:
-    issue_text = "; ".join(issues)
-    if issues:
-        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
+def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    result_eval_dir = resolve_eval_result_dir(eval_dir)
     return {
         "method": "dense_sft_baseline",
         "phase": "dense_baseline",
         "status": "ok",
         "checkpoint": str(checkpoint),
         "checkpoint_evaluated": str(checkpoint),
-        "eval_dir": str(eval_dir),
+        "eval_dir": str(result_eval_dir),
+        "eval_output_dir": str(result_eval_dir),
         "pruning_report": "",
+        "active_model_parameters": "",
+        "real_sparsity": 0.0,
         "target_prunable_sparsity": 0.0,
         "achieved_prunable_sparsity": 0.0,
         "achieved_whole_model_sparsity": 0.0,
@@ -361,6 +396,8 @@ def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "correct_examples": metric_count(summary, "correct_examples", "exact_match_correct"),
+        "total_examples": metric_count(summary, "total_examples"),
         "delta_vs_dense_exact_match": 0.0,
         "mean_response_loss_mean": metric(summary, "mean_response_loss"),
         "mean_response_loss": metric(summary, "mean_response_loss"),
@@ -371,8 +408,6 @@ def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
-        "cmc_comparable": comparable,
-        "blocking_comparability_issues": issue_text,
         "error": "",
     }
 
@@ -422,9 +457,50 @@ def run_retune(
     run_command(cmd, env=env, dry_run=dry_run)
 
 
+def eval_summary_path(eval_dir: Path) -> Path | None:
+    for filename in EVAL_SUMMARY_FILENAMES:
+        path = eval_dir / filename
+        if path.exists():
+            return path
+    return None
+
+
+def has_eval_result(eval_dir: Path) -> bool:
+    return (eval_dir / "run_config.json").exists() and eval_summary_path(eval_dir) is not None
+
+
+def resolve_latest_eval_marker(eval_dir: Path) -> Path | None:
+    marker = eval_dir / "latest_eval_dir.txt"
+    if not marker.exists():
+        return None
+    text = marker.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    marked = Path(text).expanduser()
+    if not marked.is_absolute():
+        marked = PROJECT_ROOT / marked
+    return marked
+
+
+def resolve_eval_result_dir(eval_dir: Path) -> Path:
+    eval_dir = Path(eval_dir)
+    if has_eval_result(eval_dir):
+        return eval_dir
+    marked = resolve_latest_eval_marker(eval_dir)
+    if marked is not None and has_eval_result(marked):
+        return marked
+    if not eval_dir.exists():
+        return eval_dir
+    candidates = [child for child in eval_dir.iterdir() if child.is_dir() and has_eval_result(child)]
+    if not candidates:
+        return eval_dir
+    return sorted(candidates, key=lambda path: (path.stat().st_mtime, path.name))[-1]
+
+
 def read_eval_summary(eval_dir: Path) -> dict[str, Any]:
-    summary_path = eval_dir / "prompt_response_eval_summary.json"
-    if not summary_path.exists():
+    result_dir = resolve_eval_result_dir(eval_dir)
+    summary_path = eval_summary_path(result_dir)
+    if summary_path is None:
         return {}
     with summary_path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
@@ -438,7 +514,7 @@ def read_pruning_report(report_path: Path | None) -> dict[str, Any]:
 
 
 def read_eval_run_config(eval_dir: Path) -> dict[str, Any]:
-    path = eval_dir / "run_config.json"
+    path = resolve_eval_result_dir(eval_dir) / "run_config.json"
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as handle:
@@ -478,11 +554,86 @@ def validate_eval_checkpoint(eval_dir: Path, expected_checkpoint: Path) -> None:
 def metric(summary: dict[str, Any], name: str) -> Any:
     if f"{name}_mean" in summary:
         return summary.get(f"{name}_mean")
-    return summary.get(name)
+    if summary.get(name) is not None:
+        return summary.get(name)
+    values = []
+    for run_summary in summary.get("per_run_summaries", []) or []:
+        value = run_summary.get(name)
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            values.append(numeric)
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def metric_std(summary: dict[str, Any], name: str) -> Any:
     return summary.get(f"{name}_std")
+
+
+def metric_count(summary: dict[str, Any], *names: str) -> Any:
+    for name in names:
+        if summary.get(name) is not None:
+            return summary.get(name)
+        if summary.get(f"{name}_mean") is not None:
+            return summary.get(f"{name}_mean")
+    run_summaries = summary.get("per_run_summaries", []) or []
+    for name in names:
+        values = [run.get(name) for run in run_summaries if run.get(name) is not None]
+        if values:
+            numeric_values = [float(value) for value in values]
+            mean_value = sum(numeric_values) / len(numeric_values)
+            return int(mean_value) if mean_value.is_integer() else mean_value
+    return None
+
+
+def pruning_stat(report: dict[str, Any], *names: str) -> Any:
+    reload_validation = report.get("checkpoint_reload_validation")
+    sources = [reload_validation, report] if isinstance(reload_validation, dict) else [report]
+    for source in sources:
+        for name in names:
+            if source.get(name) is not None:
+                return source.get(name)
+    return None
+
+
+def read_pruning_stats(report_path: Path | None) -> dict[str, Any]:
+    report = read_pruning_report(report_path)
+    return {
+        "target_prunable_sparsity": pruning_stat(report, "target_prunable_sparsity", "target_sparsity", "sparsity"),
+        "target_sparsity_denominator": pruning_stat(report, "target_sparsity_denominator"),
+        "target_whole_model_sparsity": pruning_stat(report, "target_whole_model_sparsity"),
+        "method_target_note": pruning_stat(report, "method_target_note"),
+        "achieved_prunable_sparsity": pruning_stat(report, "achieved_prunable_sparsity", "mask_sparsity", "sparsity"),
+        "achieved_whole_model_sparsity": pruning_stat(report, "achieved_whole_model_sparsity", "model_zero_fraction"),
+        "real_sparsity": pruning_stat(report, "model_zero_fraction", "achieved_whole_model_sparsity"),
+        "active_model_parameters": pruning_stat(report, "nonzero_parameters"),
+        "active_prunable_parameters": pruning_stat(report, "active_prunable_parameters", "active_mask_parameters"),
+        "pruned_prunable_parameters": pruning_stat(report, "pruned_prunable_parameters", "pruned_mask_parameters"),
+        "total_prunable_parameters": pruning_stat(report, "total_prunable_parameters", "mask_parameter_count"),
+        "prunable_parameter_count": pruning_stat(report, "prunable_parameter_count", "mask_parameter_count"),
+        "protected_parameter_count": pruning_stat(report, "protected_parameter_count", "protected_parameters"),
+        "total_parameter_count": pruning_stat(report, "total_parameter_count", "total_parameters"),
+        "zero_parameters": pruning_stat(report, "zero_parameters"),
+        "nonzero_parameters": pruning_stat(report, "nonzero_parameters"),
+        "nonzero_fraction": pruning_stat(report, "nonzero_fraction"),
+        "mask_sparsity": pruning_stat(report, "mask_sparsity", "sparsity"),
+        "mask_parameter_count": pruning_stat(report, "mask_parameter_count"),
+        "active_mask_parameters": pruning_stat(report, "active_mask_parameters"),
+        "pruned_mask_parameters": pruning_stat(report, "pruned_mask_parameters"),
+        "active_mask_fraction": pruning_stat(report, "active_mask_fraction"),
+        "mask_implied_active_parameters": pruning_stat(report, "mask_implied_active_parameters"),
+        "mask_implied_pruned_parameters": pruning_stat(report, "mask_implied_pruned_parameters"),
+        "mask_implied_active_fraction": pruning_stat(report, "mask_implied_active_fraction"),
+        "mask_implied_pruned_fraction": pruning_stat(report, "mask_implied_pruned_fraction"),
+        "total_parameters": pruning_stat(report, "total_parameters"),
+        "masked_weight_violation_count": pruning_stat(report, "masked_weight_violation_count"),
+    }
 
 
 def summary_row(
@@ -494,52 +645,35 @@ def summary_row(
     error: str = "",
     pruning_report_path: Path | None = None,
     dense_exact_match: float | None = None,
-    cmc_comparable: bool = False,
-    comparability_issues: list[str] | None = None,
 ) -> dict[str, Any]:
+    result_eval_dir = resolve_eval_result_dir(eval_dir)
     summary = read_eval_summary(eval_dir) if status == "ok" else {}
-    pruning_report = read_pruning_report(pruning_report_path)
+    run_config = read_eval_run_config(eval_dir)
+    pruning_stats = read_pruning_stats(pruning_report_path)
     exact_match = metric(summary, "exact_match_accuracy")
+    if status == "ok" and exact_match is None:
+        status = "failed"
+        detail = f"Eval summary is missing exact_match_accuracy: {result_eval_dir}"
+        error = f"{error}; {detail}" if error else detail
     delta = None
     if exact_match is not None and dense_exact_match is not None:
         delta = float(exact_match) - float(dense_exact_match)
-    issue_text = "; ".join(comparability_issues or [])
-    if comparability_issues:
-        issue_text = f"not directly comparable to CMC0.2B yet: {issue_text}"
+    checkpoint_evaluated = run_config.get("checkpoint_path_used_for_evaluation") or run_config.get("model_path") or str(checkpoint)
     return {
         "method": method,
         "phase": phase,
         "status": status,
         "checkpoint": str(checkpoint),
-        "checkpoint_evaluated": str(checkpoint),
-        "eval_dir": str(eval_dir),
+        "checkpoint_evaluated": str(checkpoint_evaluated),
+        "eval_dir": str(result_eval_dir),
+        "eval_output_dir": str(result_eval_dir),
         "pruning_report": str(pruning_report_path or ""),
-        "target_prunable_sparsity": pruning_report.get("target_prunable_sparsity", pruning_report.get("target_sparsity")),
-        "achieved_prunable_sparsity": pruning_report.get("achieved_prunable_sparsity", pruning_report.get("mask_sparsity", pruning_report.get("sparsity"))),
-        "achieved_whole_model_sparsity": pruning_report.get("achieved_whole_model_sparsity", pruning_report.get("model_zero_fraction")),
-        "prunable_parameter_count": pruning_report.get("prunable_parameter_count", pruning_report.get("mask_parameter_count")),
-        "protected_parameter_count": pruning_report.get("protected_parameter_count", pruning_report.get("protected_parameters")),
-        "total_parameter_count": pruning_report.get("total_parameter_count", pruning_report.get("total_parameters")),
-        "active_prunable_parameters": pruning_report.get("active_prunable_parameters", pruning_report.get("active_mask_parameters")),
-        "pruned_prunable_parameters": pruning_report.get("pruned_prunable_parameters", pruning_report.get("pruned_mask_parameters")),
-        "total_prunable_parameters": pruning_report.get("total_prunable_parameters", pruning_report.get("mask_parameter_count")),
-        "mask_sparsity": pruning_report.get("mask_sparsity", pruning_report.get("sparsity")),
-        "mask_parameter_count": pruning_report.get("mask_parameter_count"),
-        "active_mask_parameters": pruning_report.get("active_mask_parameters"),
-        "pruned_mask_parameters": pruning_report.get("pruned_mask_parameters"),
-        "active_mask_fraction": pruning_report.get("active_mask_fraction"),
-        "mask_implied_active_parameters": pruning_report.get("mask_implied_active_parameters"),
-        "mask_implied_pruned_parameters": pruning_report.get("mask_implied_pruned_parameters"),
-        "mask_implied_active_fraction": pruning_report.get("mask_implied_active_fraction"),
-        "mask_implied_pruned_fraction": pruning_report.get("mask_implied_pruned_fraction"),
-        "total_parameters": pruning_report.get("total_parameters"),
-        "nonzero_parameters": pruning_report.get("nonzero_parameters"),
-        "zero_parameters": pruning_report.get("zero_parameters"),
-        "nonzero_fraction": pruning_report.get("nonzero_fraction"),
-        "masked_weight_violation_count": pruning_report.get("masked_weight_violation_count"),
+        **pruning_stats,
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "correct_examples": metric_count(summary, "correct_examples", "exact_match_correct"),
+        "total_examples": metric_count(summary, "total_examples"),
         "delta_vs_dense_exact_match": delta,
         "mean_response_loss_mean": metric(summary, "mean_response_loss"),
         "mean_response_loss": metric(summary, "mean_response_loss"),
@@ -550,30 +684,36 @@ def summary_row(
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
-        "cmc_comparable": cmc_comparable,
-        "blocking_comparability_issues": issue_text,
         "error": error,
     }
 
 
 def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
-    write_json(output_dir / "pruning_benchmark_summary.json", {"results": rows})
+    pruning_rows = [row for row in rows if row.get("phase") in PRUNING_ROW_PHASES]
+    dense_rows = [row for row in rows if row.get("phase") == "dense_baseline"]
+    write_json(output_dir / "pruning_benchmark_summary.json", {"results": pruning_rows, "dense_baseline": dense_rows})
     write_json(output_dir / "benchmark_summary.json", {"results": rows})
-    one_shot_rows = [row for row in rows if row.get("phase") in {"dense_baseline", "one_shot"}]
-    retuned_rows = [row for row in rows if str(row.get("phase", "")).startswith("retuned")]
+    one_shot_rows = [row for row in pruning_rows if row.get("phase") == "one_shot"]
+    retuned_rows = [row for row in pruning_rows if row.get("phase") == "retuned"]
+    write_json(output_dir / "dense_baseline_summary.json", {"results": dense_rows})
     write_json(output_dir / "benchmark_summary_one_shot.json", {"results": one_shot_rows})
     write_json(output_dir / "benchmark_summary_retuned.json", {"results": retuned_rows})
     csv_path = output_dir / "pruning_benchmark_summary.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
+    benchmark_fieldnames = [
         "method",
         "phase",
         "status",
         "checkpoint",
         "checkpoint_evaluated",
         "eval_dir",
+        "eval_output_dir",
         "pruning_report",
+        "active_model_parameters",
+        "real_sparsity",
         "target_prunable_sparsity",
+        "target_sparsity_denominator",
+        "target_whole_model_sparsity",
         "achieved_prunable_sparsity",
         "achieved_whole_model_sparsity",
         "prunable_parameter_count",
@@ -599,6 +739,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "exact_match_accuracy_mean",
         "exact_match_accuracy",
         "exact_match_accuracy_std",
+        "correct_examples",
+        "total_examples",
         "delta_vs_dense_exact_match",
         "mean_response_loss_mean",
         "mean_response_loss",
@@ -609,75 +751,80 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "avg_generated_tokens_mean",
         "avg_generated_tokens",
         "avg_generated_tokens_std",
-        "cmc_comparable",
-        "blocking_comparability_issues",
         "error",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=PRUNING_SUMMARY_CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(pruning_rows)
     with (output_dir / "benchmark_summary.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=benchmark_fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
     with (output_dir / "benchmark_summary_one_shot.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=benchmark_fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(one_shot_rows)
     with (output_dir / "benchmark_summary_retuned.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=benchmark_fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(retuned_rows)
 
 
-def cmc_comparability_report(
-    config: dict[str, Any],
-    benchmark: dict[str, Any],
+def latest_checkpoint_or_default(output_dir: Path) -> Path:
+    try:
+        return latest_checkpoint(output_dir)
+    except FileNotFoundError:
+        return output_dir / "final"
+
+
+def default_phase_paths(output_dir: Path, method: str, phase: str) -> tuple[Path, Path, Path | None]:
+    slug = method_slug(method)
+    if phase == "one_shot":
+        checkpoint = output_dir / "one_shot" / slug
+        eval_dir = output_dir / "benchmarks" / "one_shot" / slug
+    elif phase == "retuned":
+        checkpoint = latest_checkpoint_or_default(output_dir / "retuned" / slug)
+        eval_dir = output_dir / "benchmarks" / "retuned" / slug
+    else:
+        checkpoint = output_dir
+        eval_dir = output_dir
+    report_path = checkpoint / "pruning_report.json"
+    return checkpoint, eval_dir, report_path if report_path.exists() else None
+
+
+def ensure_expected_pruning_rows(
+    rows: list[dict[str, Any]],
     methods: list[str],
-    dense_checkpoint: Path,
-    pruned_checkpoint_paths: list[str],
-) -> dict[str, Any]:
-    blocking: list[str] = []
-    non_blocking: list[str] = []
-    if set(methods) != set(METHODS):
-        blocking.append(f"methods differ from CMC reference: {methods}")
-    if float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
-        blocking.append("target prunable sparsity is not 0.5")
-    if bool(config.get("prune", {}).get("include_lm_head", False)):
-        blocking.append("lm_head/output head pruning is enabled")
-    if int(benchmark.get("benchmark_runs", 1)) != 1:
-        non_blocking.append("benchmark repeats are enabled; CMC one-shot comparison should use one run per checkpoint")
-    if not benchmark.get("eval_file"):
-        blocking.append("benchmark eval_file is missing")
-    if not config.get("prune", {}).get("calibration_data_path") and any(method in {"wanda", "gradient"} for method in methods):
-        blocking.append("calibration_data_path is missing for Wanda/gradient")
-    retune_enabled = bool(config.get("retune", {}).get("enabled", False))
+    output_dir: Path,
+    retune_enabled: bool,
+    dense_exact_match: float | None,
+) -> None:
+    expected_phases = ["one_shot"]
     if retune_enabled:
-        non_blocking.append("retuned phase is enabled; keep it separate from primary CMC one-shot comparison")
-    return {
-        "comparable": not blocking,
-        "blocking_issues": blocking,
-        "non_blocking_differences": non_blocking,
-        "decoder_only_prunable_scope": "selected transformer attention/MLP torch.nn.Linear weights; embeddings/lm_head/norms/biases/non-Linears protected",
-        "cmc_prunable_scope": "selected prunable transformer Linear weights; embeddings/output head/norms/tokenizer/non-Linears protected",
-        "dense_baseline_checkpoint": str(dense_checkpoint),
-        "pruned_checkpoint_paths": pruned_checkpoint_paths,
-        "benchmark_config_hash": stable_config_hash(benchmark),
-        "tokenizer_config_hash": stable_config_hash({"tokenizer_path": str(dense_checkpoint)}),
-        "eval_config_hash": stable_config_hash(
-            {
-                "eval_file": benchmark.get("eval_file"),
-                "max_new_tokens": benchmark.get("max_new_tokens", 64),
-                "max_length": benchmark.get("max_length", benchmark.get("max_seq_length", 2048)),
-                "eval_batch_size": benchmark.get("eval_batch_size", 16),
-                "dtype": benchmark.get("dtype", "bf16"),
-                "comparison_mode": "whitespace",
-                "decoding": {"do_sample": False, "num_beams": 1, "temperature": 0},
-                "response_extraction": "decoder-only prompt/response exact-match evaluator",
-            }
-        ),
+        expected_phases.append("retuned")
+    present = {
+        (str(row.get("method")), str(row.get("phase")))
+        for row in rows
+        if row.get("phase") in PRUNING_ROW_PHASES
     }
+    for method in methods:
+        for phase in expected_phases:
+            if (method, phase) in present:
+                continue
+            checkpoint, eval_dir, report_path = default_phase_paths(output_dir, method, phase)
+            rows.append(
+                summary_row(
+                    method=method,
+                    phase=phase,
+                    checkpoint=checkpoint,
+                    eval_dir=eval_dir,
+                    status="missing",
+                    error=f"{phase} row was expected by the pruning benchmark plan but no completed result was recorded.",
+                    pruning_report_path=report_path,
+                    dense_exact_match=dense_exact_match,
+                )
+            )
 
 
 def main() -> None:
@@ -729,9 +876,6 @@ def main() -> None:
         retune=retune,
         continue_on_error=continue_on_error,
     )
-    pruned_checkpoint_paths: list[str] = []
-    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
-    write_json(output_dir / "cmc_comparability_report.json", comparability)
     dense_exact_match: float | None = None
     dense_eval_dir = output_dir / "benchmarks" / "dense_baseline"
     if bool(benchmark.get("run_dense_baseline", True)):
@@ -770,12 +914,10 @@ def main() -> None:
                     base_checkpoint,
                     dense_eval_dir,
                     dense_summary,
-                    comparable=bool(comparability["comparable"]),
-                    issues=list(comparability["blocking_issues"]),
                 )
             )
     elif not args.dry_run:
-        raise RuntimeError("Dense baseline evaluation is required for CMC-compatible pruning comparison.")
+        raise RuntimeError("Dense baseline evaluation is required for pruning benchmark comparison.")
 
     for method in methods:
         print(f"\n=== Running pruning method: {method} ===", flush=True)
@@ -784,8 +926,9 @@ def main() -> None:
         one_shot_eval_dir = output_dir / "benchmarks" / "one_shot" / slug
         retuned_dir = output_dir / "retuned" / slug
         retuned_eval_dir = output_dir / "benchmarks" / "retuned" / slug
-        try:
-            if bool(one_shot.get("enabled", True)):
+        one_shot_completed = False
+        if bool(one_shot.get("enabled", True)):
+            try:
                 prune_config = generated_prune_config(
                     base_config=base_prune_config,
                     benchmark_config=config,
@@ -794,9 +937,9 @@ def main() -> None:
                     output_dir=one_shot_dir,
                     recovery_steps=0,
                 )
-                prune_config_path = generated_config_dir / f"prune_{slug}_one_shot.yaml"
-                write_yaml(prune_config_path, prune_config)
-                run_prune(method, base_checkpoint, one_shot_dir, prune_config_path, env=env, dry_run=args.dry_run)
+                generated_one_shot_config_path = generated_config_dir / f"prune_{slug}_one_shot.yaml"
+                write_yaml(generated_one_shot_config_path, prune_config)
+                run_prune(method, base_checkpoint, one_shot_dir, generated_one_shot_config_path, env=env, dry_run=args.dry_run)
                 if not args.dry_run:
                     validate_pruning_report(
                         one_shot_dir / "pruning_report.json",
@@ -811,7 +954,6 @@ def main() -> None:
                 if not args.dry_run:
                     validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
                     validate_eval_protocol_matches_dense(dense_eval_dir, one_shot_eval_dir)
-                pruned_checkpoint_paths.append(str(one_shot_dir))
                 rows.append(
                     summary_row(
                         method,
@@ -821,12 +963,56 @@ def main() -> None:
                         "ok",
                         pruning_report_path=one_shot_dir / "pruning_report.json",
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=bool(comparability["comparable"]),
-                        comparability_issues=list(comparability["blocking_issues"]),
                     )
                 )
+                one_shot_completed = True
+            except Exception as exc:
+                rows.append(
+                    summary_row(
+                        method,
+                        "one_shot",
+                        one_shot_dir,
+                        one_shot_eval_dir,
+                        "failed",
+                        error=str(exc),
+                        pruning_report_path=one_shot_dir / "pruning_report.json",
+                        dense_exact_match=dense_exact_match,
+                    )
+                )
+                write_summary(output_dir, rows)
+                if not continue_on_error:
+                    raise
+        else:
+            rows.append(
+                summary_row(
+                    method,
+                    "one_shot",
+                    one_shot_dir,
+                    one_shot_eval_dir,
+                    "missing",
+                    error="one_shot.enabled is false; one-shot pruning result was not produced.",
+                    pruning_report_path=one_shot_dir / "pruning_report.json",
+                    dense_exact_match=dense_exact_match,
+                )
+            )
 
-            if bool(retune.get("enabled", True)):
+        if bool(retune.get("enabled", True)):
+            if not one_shot_completed:
+                rows.append(
+                    summary_row(
+                        method,
+                        "retuned",
+                        retuned_dir / "final",
+                        retuned_eval_dir,
+                        "missing",
+                        error=f"retune.enabled=true but retune was skipped because {method} one-shot did not complete.",
+                        pruning_report_path=None,
+                        dense_exact_match=dense_exact_match,
+                    )
+                )
+                write_summary(output_dir, rows)
+                continue
+            try:
                 masks_path = one_shot_dir / "pruning_masks.pt"
                 if not args.dry_run and not masks_path.exists():
                     raise FileNotFoundError(f"Missing pruning mask for retune: {masks_path}")
@@ -845,7 +1031,7 @@ def main() -> None:
                     validate_pruning_report(
                         retuned_report,
                         method=method,
-                        phase="retuned_sft",
+                        phase="retuned",
                         target_sparsity=float(config.get("prune", {}).get("sparsity", 0.5)),
                         tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
                     )
@@ -855,34 +1041,45 @@ def main() -> None:
                 if not args.dry_run:
                     validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
                     validate_eval_protocol_matches_dense(dense_eval_dir, retuned_eval_dir)
-                pruned_checkpoint_paths.append(str(retuned_checkpoint))
                 if args.dry_run or not retuned_report.exists():
                     retuned_report = one_shot_dir / "pruning_report.json"
                 rows.append(
                     summary_row(
                         method,
-                        "retuned_sft",
+                        "retuned",
                         retuned_checkpoint,
                         retuned_eval_dir,
                         "ok",
                         pruning_report_path=retuned_report,
                         dense_exact_match=dense_exact_match,
-                        cmc_comparable=False,
-                        comparability_issues=["retuned phase is post-pruning SFT and must not be mixed into primary CMC one-shot table"],
                     )
                 )
-        except subprocess.CalledProcessError as exc:
-            rows.append(summary_row(method, "failed", output_dir, output_dir, "failed", error=str(exc)))
-            write_summary(output_dir, rows)
-            if not continue_on_error:
-                raise
-        except Exception as exc:
-            rows.append(summary_row(method, "failed", output_dir, output_dir, "failed", error=str(exc)))
-            write_summary(output_dir, rows)
-            if not continue_on_error:
-                raise
-    comparability = cmc_comparability_report(config, benchmark, methods, base_checkpoint, pruned_checkpoint_paths)
-    write_json(output_dir / "cmc_comparability_report.json", comparability)
+            except Exception as exc:
+                retuned_checkpoint = latest_checkpoint_or_default(retuned_dir)
+                retuned_report = retuned_checkpoint / "pruning_report.json"
+                retuned_status = "failed" if has_eval_result(resolve_eval_result_dir(retuned_eval_dir)) else "missing"
+                rows.append(
+                    summary_row(
+                        method,
+                        "retuned",
+                        retuned_checkpoint,
+                        retuned_eval_dir,
+                        retuned_status,
+                        error=f"retune.enabled=true but retuned checkpoint/eval was not completed: {exc}",
+                        pruning_report_path=retuned_report if retuned_report.exists() else None,
+                        dense_exact_match=dense_exact_match,
+                    )
+                )
+                write_summary(output_dir, rows)
+                if not continue_on_error:
+                    raise
+    ensure_expected_pruning_rows(
+        rows=rows,
+        methods=methods,
+        output_dir=output_dir,
+        retune_enabled=bool(retune.get("enabled", True)),
+        dense_exact_match=dense_exact_match,
+    )
     write_summary(output_dir, rows)
     print(f"\nWrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.csv'}")
     print(f"Wrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.json'}")

@@ -8,18 +8,16 @@ train:
   batch_size: 2
 
 prune:
-  base_model: runs/contrastive-sft-0p2b/latest
-  output_dir: runs/pruned-0p2b
+  base_model: Qwen/Qwen2.5-0.5B
+  output_dir: runs/pruned-qwen25-0p5b
   method: magnitude
   sparsity: 0.5
-  # Vanilla CMC-style decoder pruning: 50% of each selected prunable Linear
-  # layer for magnitude/gradient, row-wise 50% for WANDA, and pure 2:4 groups.
   sparsity_denominator: prunable
   granularity: layer
   include_lm_head: false
-  calibration_data_path: data/sft/contrastive_train.jsonl
+  calibration_data_path: /path/to/calibration_or_sft.json
   calibration_batches: 128
-  max_length: 2048
+  max_length: 256
   batch_size: 2
   num_workers: 0
   recovery_steps: 0
