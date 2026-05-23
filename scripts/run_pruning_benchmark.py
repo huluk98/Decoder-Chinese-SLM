@@ -21,6 +21,12 @@ EVAL_SUMMARY_FILENAMES = (
     "prompt_response_eval_summary.json",
     "metrics.json",
 )
+HF_WEIGHT_FILENAMES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
 PRUNING_ROW_PHASES = {"one_shot", "retuned"}
 PRUNING_SUMMARY_CSV_FIELDS = [
     "method",
@@ -103,6 +109,30 @@ def latest_checkpoint(output_dir: Path) -> Path:
     if not checkpoints:
         raise FileNotFoundError(f"No final, latest, or step-* checkpoint found in {output_dir}")
     return checkpoints[-1]
+
+
+def has_hf_checkpoint_files(path: Path) -> bool:
+    return (path / "config.json").exists() and any((path / filename).exists() for filename in HF_WEIGHT_FILENAMES)
+
+
+def validate_saved_checkpoint_path(checkpoint: Path, label: str, base_checkpoint: Path | None = None) -> None:
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"{label} checkpoint does not exist: {checkpoint}")
+    if not checkpoint.is_dir():
+        raise ValueError(f"{label} checkpoint must be a directory: {checkpoint}")
+    if not has_hf_checkpoint_files(checkpoint):
+        raise FileNotFoundError(
+            f"{label} checkpoint is not a loadable Hugging Face directory: {checkpoint}. "
+            "Expected config.json plus model weights."
+        )
+    if base_checkpoint is not None and base_checkpoint.exists() and checkpoint.resolve() == base_checkpoint.resolve():
+        raise RuntimeError(f"Refusing to evaluate dense base checkpoint as {label}: {checkpoint}")
+
+
+def write_checkpoint_pointer(output_dir: Path, method: str, phase: str, checkpoint: Path) -> None:
+    pointer = output_dir / "checkpoint_paths"
+    pointer.mkdir(parents=True, exist_ok=True)
+    (pointer / f"{phase}_{method_slug(method)}.txt").write_text(str(checkpoint.resolve()) + "\n", encoding="utf-8")
 
 
 def command_env(benchmark: dict[str, Any]) -> dict[str, str]:
@@ -941,6 +971,8 @@ def main() -> None:
                 write_yaml(generated_one_shot_config_path, prune_config)
                 run_prune(method, base_checkpoint, one_shot_dir, generated_one_shot_config_path, env=env, dry_run=args.dry_run)
                 if not args.dry_run:
+                    validate_saved_checkpoint_path(one_shot_dir, f"{method} one-shot pruned", base_checkpoint)
+                    write_checkpoint_pointer(output_dir, method, "one_shot", one_shot_dir)
                     validate_pruning_report(
                         one_shot_dir / "pruning_report.json",
                         method=method,
@@ -1028,6 +1060,8 @@ def main() -> None:
                 retuned_checkpoint = latest_checkpoint(retuned_dir) if not args.dry_run else retuned_dir / "final"
                 retuned_report = retuned_checkpoint / "pruning_report.json"
                 if not args.dry_run:
+                    validate_saved_checkpoint_path(retuned_checkpoint, f"{method} retuned pruned", base_checkpoint)
+                    write_checkpoint_pointer(output_dir, method, "retuned", retuned_checkpoint)
                     validate_pruning_report(
                         retuned_report,
                         method=method,
