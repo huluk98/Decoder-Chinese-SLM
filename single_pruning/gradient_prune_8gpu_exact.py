@@ -10,7 +10,7 @@ Run with exactly two paths:
 The script auto-launches torchrun with up to 8 visible GPUs. It then:
   1. benchmarks the dense model on the eval file;
   2. computes first-order Taylor saliency |W * grad| on the eval/calibration set;
-  3. globally prunes 50% of eligible nn.Linear weights by lowest saliency;
+  3. prunes 50% of each eligible nn.Linear weight matrix by lowest saliency;
   4. benchmarks the pruned model on the same eval file;
   5. saves the pruned model and reports next to the model directory.
 
@@ -55,8 +55,8 @@ MAX_NEW_TOKENS = 128
 DTYPE = "bf16"          # auto | bf16 | fp16 | fp32
 TRUST_REMOTE_CODE = True
 OVERWRITE_OUTPUT = True
-INCLUDE_LM_HEAD = True  # set False only if lm_head pruning collapses accuracy
-PROMPT_FORMAT = "repo" # repo | plain | chat
+INCLUDE_LM_HEAD = False
+PROMPT_FORMAT = "plain" # plain | repo | chat
 COMPARISON_MODE = "whitespace"  # exact | whitespace
 NUM_WORKERS = 0
 SEED = 42
@@ -64,6 +64,28 @@ SEED = 42
 PROMPT_KEYS = ("prompt", "instruction", "input", "question", "query")
 RESPONSE_KEYS = ("response", "output", "answer", "target", "completion")
 TEXT_KEYS = ("text", "content")
+LEADING_MARKERS = (
+    "<|assistant|>",
+    "assistant:",
+    "Assistant:",
+    "ASSISTANT:",
+    "回答:",
+    "回答：",
+    "答案:",
+    "答案：",
+    "输出:",
+    "输出：",
+)
+STOP_MARKERS = (
+    "<|user|>",
+    "<|system|>",
+    "<|eos|>",
+    "<|im_start|>user",
+    "<|im_start|>system",
+    "<|im_end|>",
+    "\nUser:",
+    "\n用户:",
+)
 
 
 def resolve_run_paths(script_name: str) -> Tuple[Path, Path]:
@@ -165,8 +187,38 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    changed = True
+    while changed and len(text) >= 2:
+        changed = False
+        for left, right in (("`", "`"), ('"', '"'), ("'", "'")):
+            if text.startswith(left) and text.endswith(right):
+                text = text[1:-1].strip()
+                changed = True
+                break
+    return text
+
+
+def clean_prediction_text(text: str) -> str:
+    text = "" if text is None else str(text)
+    for marker in STOP_MARKERS:
+        if marker in text:
+            text = text.split(marker, 1)[0]
+    changed = True
+    while changed:
+        changed = False
+        stripped = text.strip()
+        for marker in LEADING_MARKERS:
+            if stripped.startswith(marker):
+                text = stripped[len(marker):]
+                changed = True
+                break
+    return strip_wrapping_quotes(text)
+
+
 def normalize_text(text: str, mode: str) -> str:
-    text = str(text)
+    text = clean_prediction_text("" if text is None else str(text))
     if mode == "exact":
         return text.strip()
     if mode == "whitespace":
@@ -356,6 +408,40 @@ def flatten(list_of_lists: Iterable[Any]) -> List[Any]:
     return out
 
 
+def exact_match_diagnostics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    predictions = [str(row.get("prediction", "")) for row in records]
+    normalized_predictions = [str(row.get("normalized_prediction", "")) for row in records]
+    prompts = [str(row.get("prompt", "")) for row in records]
+    nonempty_predictions = [text for text in predictions if text.strip()]
+    prompt_copy_count = sum(
+        1
+        for prompt, prediction in zip(prompts, predictions)
+        if prompt.strip()
+        and prediction.strip()
+        and (prediction.strip() in prompt.strip() or prediction.strip().startswith(prompt.strip()))
+    )
+    return {
+        "empty_predictions": len(predictions) - len(nonempty_predictions),
+        "unique_normalized_predictions": len(set(normalized_predictions)),
+        "prompt_copy_predictions": prompt_copy_count,
+        "total_generation_records": len(records),
+    }
+
+
+def generation_warnings(tag: str, diagnostics: Dict[str, Any]) -> List[str]:
+    total = int(diagnostics.get("total_generation_records", 0))
+    if total <= 0:
+        return []
+    warnings: List[str] = []
+    if int(diagnostics.get("empty_predictions", 0)) == total:
+        warnings.append(f"{tag}: all generated predictions are empty; check tokenizer/EOS/max_new_tokens.")
+    if int(diagnostics.get("unique_normalized_predictions", 0)) <= 1 and total > 1:
+        warnings.append(f"{tag}: all generated predictions are identical; check checkpoint/generation settings.")
+    if int(diagnostics.get("prompt_copy_predictions", 0)) / float(total) > 0.8:
+        warnings.append(f"{tag}: most generations look like prompt copies; check response slicing/prompt format.")
+    return warnings
+
+
 def evaluate(
     model: nn.Module,
     tokenizer: Any,
@@ -398,9 +484,15 @@ def evaluate(
             total_label_tokens += valid_tokens
             total_examples += int(lm_batch["input_ids"].shape[0])
 
-            if has_prompt_response and batch["prompts"][0] is not None:
+            prompt_indices = [
+                i
+                for i, (prompt, response) in enumerate(zip(batch["prompts"], batch["responses"]))
+                if prompt is not None and response is not None
+            ]
+            if has_prompt_response and prompt_indices:
+                prompts = [batch["prompts"][i] for i in prompt_indices]
                 enc = tokenizer(
-                    batch["prompts"],
+                    prompts,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
@@ -417,21 +509,25 @@ def evaluate(
                 )
 
                 prompt_width = int(enc["input_ids"].shape[1])
-                for i in range(gen.shape[0]):
-                    generated_ids = gen[i, prompt_width:]
+                for gen_i, batch_i in enumerate(prompt_indices):
+                    generated_ids = gen[gen_i, prompt_width:]
                     pred = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                    gold = batch["responses"][i]
-                    ok = normalize_text(pred, COMPARISON_MODE) == normalize_text(gold, COMPARISON_MODE)
+                    gold = batch["responses"][batch_i]
+                    normalized_prediction = normalize_text(pred, COMPARISON_MODE)
+                    normalized_gold = normalize_text(gold, COMPARISON_MODE)
+                    ok = normalized_prediction == normalized_gold
                     exact_correct += int(ok)
                     exact_total += 1
                     total_gen_tokens += int(generated_ids.numel())
                     predictions.append(
                         {
                             "tag": tag,
-                            "id": batch["ids"][i],
-                            "prompt": batch["raw_prompts"][i],
+                            "id": batch["ids"][batch_i],
+                            "prompt": batch["raw_prompts"][batch_i],
                             "target": gold,
                             "prediction": pred,
+                            "normalized_prediction": normalized_prediction,
+                            "normalized_gold": normalized_gold,
                             "exact_match": bool(ok),
                         }
                     )
@@ -454,6 +550,9 @@ def evaluate(
         return None, None
 
     merged_preds = flatten(gathered_predictions)
+    merged_preds.sort(key=lambda row: str(row.get("id", "")))
+    diagnostics = exact_match_diagnostics(merged_preds)
+    warnings = generation_warnings(tag, diagnostics)
     loss_sum = sum(x["loss_sum"] for x in gathered_stats)
     label_tokens = sum(x["label_tokens"] for x in gathered_stats)
     examples = sum(x["examples"] for x in gathered_stats)
@@ -477,6 +576,8 @@ def evaluate(
         "wall_time_sec": wall_time,
         "examples_per_sec": examples / wall_time if wall_time > 0 else None,
         "generated_tokens_per_sec": gen_tokens / wall_time if wall_time > 0 and gen_tokens else None,
+        "exact_match_diagnostics": diagnostics,
+        "generation_warnings": warnings,
     }
     return metrics, merged_preds
 
@@ -564,29 +665,28 @@ def compute_gradient_saliency(
     return modules, saliency
 
 
-def apply_global_gradient_prune(
+def apply_per_layer_gradient_prune(
     modules: List[Tuple[str, nn.Linear]],
     saliency: Dict[str, torch.Tensor],
     rank: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, torch.Tensor]]:
-    """Global 50% Taylor pruning across all selected Linear weights."""
-    all_scores = torch.cat([saliency[name].reshape(-1) for name, _ in modules])
-    total = int(all_scores.numel())
-    prune_k = int(total * SPARSITY)
-    if prune_k <= 0:
-        raise RuntimeError("Nothing to prune; selected parameter count is zero.")
-
-    # kthvalue finds the pruning threshold for the lowest saliency values.
-    threshold = torch.kthvalue(all_scores, k=prune_k).values
-
+    """Per-layer 50% Taylor pruning across each selected Linear weight."""
     rows: List[Dict[str, Any]] = []
     masks: Dict[str, torch.Tensor] = {}
     with torch.no_grad():
         for name, module in modules:
             score = saliency[name]
-            mask = score > threshold
-            # Tie correction: if threshold ties cause slight mismatch, this is still practically exact global 50%
-            # within ordinary tensor ties. Per-module actual sparsity is reported below.
+            flat_score = score.reshape(-1)
+            keep = int(flat_score.numel() * (1.0 - SPARSITY))
+            if keep <= 0:
+                continue
+            if keep >= flat_score.numel():
+                mask = torch.ones_like(score, dtype=torch.bool)
+            else:
+                keep_idx = torch.topk(flat_score, keep, largest=True).indices
+                mask_flat = torch.zeros_like(flat_score, dtype=torch.bool)
+                mask_flat[keep_idx] = True
+                mask = mask_flat.reshape_as(score)
             module.weight.mul_(mask.to(device=module.weight.device, dtype=module.weight.dtype))
             masks[name] = mask.detach().cpu()
             numel = int(module.weight.numel())
@@ -714,8 +814,8 @@ def main_worker() -> None:
     log(rank, "Computing gradient/Taylor saliency |W * grad|...")
     modules, saliency = compute_gradient_saliency(model, tokenizer, dataset, rank, world_size, is_dist, device)
 
-    log(rank, f"Applying global {SPARSITY:.0%} gradient pruning across selected Linear weights...")
-    prune_rows, masks = apply_global_gradient_prune(modules, saliency, rank)
+    log(rank, f"Applying per-layer {SPARSITY:.0%} gradient pruning to selected Linear weights...")
+    prune_rows, masks = apply_per_layer_gradient_prune(modules, saliency, rank)
     after_stats = parameter_zero_stats(model)
 
     pruned_model_dir = out_dir / "pruned_model"
@@ -749,7 +849,7 @@ def main_worker() -> None:
         selected_mask_pruned = sum(int(r["mask_pruned_parameters"]) for r in prune_rows)
         selected_actual_zeros = sum(int(r["actual_zero_parameters_after_prune"]) for r in prune_rows)
         report = {
-            "method": "global_gradient_taylor_pruning_decoder_only",
+            "method": "per_layer_gradient_taylor_pruning_decoder_only",
             "score": "abs(weight * gradient)",
             "sparsity_target": SPARSITY,
             "model_path": str(model_path),
@@ -765,7 +865,7 @@ def main_worker() -> None:
             "selected_linear_actual_zero_fraction": selected_actual_zeros / float(selected_params or 1),
             "before": before_stats,
             "after": after_stats,
-            "note": "This is unstructured 50% global gradient/Taylor pruning, not NVIDIA 2:4 pruning.",
+            "note": "This is unstructured 50% per-layer gradient/Taylor pruning, not NVIDIA 2:4 pruning.",
         }
         save_json(out_dir / "gradient_pruning_report.json", report)
 
