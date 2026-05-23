@@ -77,6 +77,12 @@ QUOTE_TRANSLATION = str.maketrans(
         "＝": "=",
     }
 )
+HF_WEIGHT_FILENAMES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
 
 
 def select_device(requested: str) -> torch.device:
@@ -198,6 +204,42 @@ def checkpoint_file_timestamps(path: str | Path) -> dict[str, Any]:
         "resolved_path": str(checkpoint_path.resolve()),
         "files": files,
     }
+
+
+def has_hf_checkpoint_files(path: Path) -> bool:
+    return (path / "config.json").exists() and any((path / filename).exists() for filename in HF_WEIGHT_FILENAMES)
+
+
+def is_local_checkpoint_like(value: str) -> bool:
+    path = Path(value).expanduser()
+    return (
+        path.is_absolute()
+        or value.startswith(("./", "../", "~"))
+        or path.exists()
+        or ("/" in value and path.parent.exists())
+    )
+
+
+def resolve_checkpoint_for_evaluation(value: str) -> str:
+    """Allow users to pass either a checkpoint dir or a pruning run dir containing pruned_model/."""
+    if not is_local_checkpoint_like(value):
+        return value
+    path = Path(value).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Model checkpoint path does not exist: {path}. "
+            "If pruning just finished, point --model-path at the saved pruned_model directory."
+        )
+    if path.is_file():
+        raise ValueError(f"Model checkpoint path must be a directory or HF model id, got file: {path}")
+    candidates = [path, path / "pruned_model", path / "final", path / "latest"]
+    for candidate in candidates:
+        if has_hf_checkpoint_files(candidate):
+            return str(candidate.resolve())
+    raise FileNotFoundError(
+        f"Could not find a loadable Hugging Face checkpoint at {path}. Expected config.json plus model weights "
+        "in that directory, or in pruned_model/, final/, or latest/."
+    )
 
 
 def parameter_count(model: torch.nn.Module) -> int:
@@ -518,6 +560,7 @@ def generate_completions_batch(
     tokenizer: AutoTokenizer,
     prompt_texts: list[str],
     device: torch.device,
+    max_prompt_tokens: int,
     max_new_tokens: int,
     do_sample: bool,
     temperature: float,
@@ -531,7 +574,14 @@ def generate_completions_batch(
     previous_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     try:
-        inputs = tokenizer(prompt_texts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+        inputs = tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max(1, int(max_prompt_tokens)),
+            add_special_tokens=False,
+        ).to(device)
     finally:
         tokenizer.padding_side = previous_padding_side
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -741,6 +791,7 @@ def write_eval_run_config(
         "script": "scripts/eval_prompt_response.py",
         "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "git_commit": git_commit_hash(),
+        "requested_model_path": getattr(args, "requested_checkpoint", args.checkpoint),
         "model_path": args.checkpoint,
         "checkpoint_path_used_for_evaluation": args.checkpoint,
         "tokenizer_path": args.checkpoint,
@@ -907,17 +958,9 @@ def main() -> None:
 
     seed_info = set_eval_seeds(args.seed, deterministic=bool(args.deterministic_eval))
     device, rank, local_rank, world_size = setup_distributed_eval(args.device)
-    checkpoint_path = Path(args.checkpoint).expanduser()
-    local_checkpoint_like = (
-        checkpoint_path.is_absolute()
-        or args.checkpoint.startswith(("./", "../"))
-        or ("/" in args.checkpoint and checkpoint_path.parent.exists())
-    )
-    if local_checkpoint_like and not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Model checkpoint path does not exist: {checkpoint_path}. "
-            "If SFT training just finished, point --model-path at the run's final checkpoint directory."
-        )
+    requested_checkpoint = args.checkpoint
+    args.requested_checkpoint = requested_checkpoint
+    args.checkpoint = resolve_checkpoint_for_evaluation(args.checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=False)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -1080,6 +1123,7 @@ def main() -> None:
                             tokenizer=tokenizer,
                             prompt_texts=[example["prompt_text"] for _offset, _index, example in needs_generation],
                             device=device,
+                            max_prompt_tokens=max(1, max_length - int(args.max_new_tokens)),
                             max_new_tokens=int(args.max_new_tokens),
                             do_sample=bool(args.do_sample),
                             temperature=float(args.temperature),

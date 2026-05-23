@@ -48,6 +48,12 @@ STOP_MARKERS = (
     "<|im_start|>user",
     "<|im_start|>system",
 )
+HF_WEIGHT_FILENAMES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
 
 
 def parse_simple_yaml_scalar(value: str) -> Any:
@@ -147,6 +153,39 @@ def resolve_project_path(value: str | Path | None, default: str | Path | None = 
     if not path.is_absolute():
         path = (PROJECT_ROOT / path).resolve()
     return path
+
+
+def is_local_path_like(value: str) -> bool:
+    path = Path(value).expanduser()
+    return (
+        path.is_absolute()
+        or value.startswith(("./", "../", "~"))
+        or path.exists()
+        or ("/" in value and path.parent.exists())
+    )
+
+
+def has_hf_checkpoint_files(path: Path) -> bool:
+    return (path / "config.json").exists() and any((path / filename).exists() for filename in HF_WEIGHT_FILENAMES)
+
+
+def resolve_model_checkpoint_path(value: str) -> str:
+    """Accept either a real checkpoint dir or a pruning run dir containing pruned_model/."""
+    if not is_local_path_like(value):
+        return value
+    path = Path(value).expanduser()
+    if not path.exists():
+        raise FileNotFoundError(f"Model path does not exist: {path}")
+    if path.is_file():
+        raise ValueError(f"Model path must be a checkpoint directory or HF model id, got file: {path}")
+    candidates = [path, path / "pruned_model", path / "final", path / "latest"]
+    for candidate in candidates:
+        if has_hf_checkpoint_files(candidate):
+            return str(candidate.resolve())
+    raise FileNotFoundError(
+        f"Could not find a Hugging Face checkpoint at {path}. Expected config.json plus model weights "
+        "in that directory, or in pruned_model/, final/, or latest/."
+    )
 
 
 def read_json_records(path: Path) -> list[dict[str, Any]]:
@@ -362,10 +401,18 @@ def generate_batch(
     tokenizer: Any,
     prompt_texts: list[str],
     device: torch.device,
+    max_prompt_tokens: int,
     max_new_tokens: int,
     num_beams: int,
 ) -> list[tuple[str, int]]:
-    inputs = tokenizer(prompt_texts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
+    inputs = tokenizer(
+        prompt_texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max(1, int(max_prompt_tokens)),
+        add_special_tokens=False,
+    ).to(device)
     prompt_width = int(inputs["input_ids"].shape[-1])
     output_ids = model.generate(
         **inputs,
@@ -469,11 +516,12 @@ def main() -> None:
         config_path = (PROJECT_ROOT / config_path).resolve()
     config = load_eval_config(config_path)
 
-    model_path = str(choose_setting(args, config, "model_path", "") or "").strip()
-    if not model_path:
+    requested_model_path = str(choose_setting(args, config, "model_path", "") or "").strip()
+    if not requested_model_path:
         raise ValueError(
             "Set model_path in configs/iot_benchmark_eval.yaml, or pass --model-path /path/or/hf-model-id."
         )
+    model_path = resolve_model_checkpoint_path(requested_model_path)
     benchmark_file = resolve_project_path(choose_setting(args, config, "benchmark_file", None), DEFAULT_BENCHMARK_FILE)
     if not benchmark_file.exists():
         raise FileNotFoundError(f"Benchmark file not found: {benchmark_file}")
@@ -541,6 +589,7 @@ def main() -> None:
             tokenizer,
             [example["prompt_text"] for example in batch],
             device=device,
+            max_prompt_tokens=max(1, max_length - max_new_tokens),
             max_new_tokens=max_new_tokens,
             num_beams=num_beams,
         )
@@ -582,6 +631,7 @@ def main() -> None:
     summary = {
         "script": "scripts/eval_iot_benchmark.py",
         "config_file": str(config_path),
+        "requested_model_path": requested_model_path,
         "model_path": model_path,
         "checkpoint_path_used_for_evaluation": model_path,
         "benchmark_file": str(benchmark_file),
@@ -614,7 +664,8 @@ def main() -> None:
     write_json(output_dir / "exact_match_failure_cases.json", [row for row in results if not row["exact_match"]][:50])
     print(
         "IoT benchmark summary:\n"
-        f"  model={model_path}\n"
+        f"  requested_model={requested_model_path}\n"
+        f"  evaluated_checkpoint={model_path}\n"
         f"  benchmark={benchmark_file}\n"
         f"  prompt_format={prompt_format}\n"
         f"  exact_match_accuracy={summary['exact_match_accuracy']:.4f} ({correct}/{len(results)})\n"
