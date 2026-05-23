@@ -45,6 +45,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 # Fixed experiment settings
 # =========================
 SPARSITY = 0.50
+MODEL_PATH = ""  # Optional: set /path/to/local_model here, then run with no path args.
+EVAL_DATASET_PATH = ""  # Optional: set /path/to/eval.json here, then run with no path args.
 MAX_GPUS = 8
 BATCH_SIZE = 4
 MAX_PROMPT_LEN = 512
@@ -64,14 +66,29 @@ RESPONSE_KEYS = ("response", "output", "answer", "target", "completion")
 TEXT_KEYS = ("text", "content")
 
 
+def resolve_run_paths(script_name: str) -> Tuple[Path, Path]:
+    if len(sys.argv) == 3:
+        model_value = sys.argv[1]
+        eval_value = sys.argv[2]
+    elif len(sys.argv) == 1 and MODEL_PATH.strip() and EVAL_DATASET_PATH.strip():
+        model_value = MODEL_PATH
+        eval_value = EVAL_DATASET_PATH
+    else:
+        print(
+            f"Usage: python {script_name} /path/to/local_model /path/to/eval_file\n"
+            "Or edit MODEL_PATH and EVAL_DATASET_PATH at the top of this script, then run it with no path args.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return Path(model_value).expanduser().resolve(), Path(eval_value).expanduser().resolve()
+
+
 def auto_launch_if_needed() -> None:
     """Relaunch this script with torchrun when multiple GPUs are visible."""
     if os.environ.get("LOCAL_RANK") is not None:
         return
 
-    if len(sys.argv) != 3:
-        print("Usage: python gradient_prune_8gpu_exact.py /path/to/local_model /path/to/eval_file", file=sys.stderr)
-        sys.exit(2)
+    model_path, eval_path = resolve_run_paths("gradient_prune_8gpu_exact.py")
 
     gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
     nproc = min(MAX_GPUS, gpu_count)
@@ -86,8 +103,8 @@ def auto_launch_if_needed() -> None:
         "--standalone",
         f"--nproc_per_node={nproc}",
         str(Path(__file__).resolve()),
-        sys.argv[1],
-        sys.argv[2],
+        str(model_path),
+        str(eval_path),
     ]
     print(f"Auto-launching distributed run on {nproc} GPUs:")
     print(" ".join(cmd))
@@ -613,13 +630,17 @@ def make_output_dir(model_path: Path) -> Path:
     return model_path.parent / f"{model_path.name}_gradient50_8gpu_exact_{stamp}"
 
 
-def main_worker() -> None:
-    if len(sys.argv) != 3:
-        print("Usage: python gradient_prune_8gpu_exact.py /path/to/local_model /path/to/eval_file", file=sys.stderr)
-        sys.exit(2)
+def format_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.6f}"
+    except (TypeError, ValueError):
+        return str(value)
 
-    model_path = Path(sys.argv[1]).expanduser().resolve()
-    eval_path = Path(sys.argv[2]).expanduser().resolve()
+
+def main_worker() -> None:
+    model_path, eval_path = resolve_run_paths("gradient_prune_8gpu_exact.py")
 
     if not model_path.exists():
         raise FileNotFoundError(f"Model path does not exist: {model_path}")
@@ -691,6 +712,13 @@ def main_worker() -> None:
     prune_rows, masks = apply_global_gradient_prune(modules, saliency, rank)
     after_stats = parameter_zero_stats(model)
 
+    pruned_model_dir = out_dir / "pruned_model"
+    if is_main(rank):
+        log(rank, f"Saving pruned model before evaluation: {pruned_model_dir}")
+        model.save_pretrained(pruned_model_dir, safe_serialization=True)
+        tokenizer.save_pretrained(pruned_model_dir)
+        torch.save(masks, out_dir / "gradient_pruning_masks.pt")
+        save_csv(out_dir / "sparsity_by_module.csv", prune_rows)
     if is_dist:
         dist.barrier()
 
@@ -698,11 +726,6 @@ def main_worker() -> None:
     pruned_metrics, pruned_preds = evaluate(model, tokenizer, dataset, rank, world_size, is_dist, device, "gradient_pruned_50")
 
     if is_main(rank):
-        pruned_model_dir = out_dir / "pruned_model"
-        model.save_pretrained(pruned_model_dir, safe_serialization=True)
-        tokenizer.save_pretrained(pruned_model_dir)
-        torch.save(masks, out_dir / "gradient_pruning_masks.pt")
-        save_csv(out_dir / "sparsity_by_module.csv", prune_rows)
         save_jsonl(out_dir / "predictions_pruned.jsonl", pruned_preds or [])
 
         selected_params = sum(int(r["weight_parameters"]) for r in prune_rows)
@@ -733,10 +756,14 @@ def main_worker() -> None:
         save_json(out_dir / "benchmark_summary.json", summary_rows)
         save_csv(out_dir / "benchmark_summary.csv", summary_rows)
 
-        log(rank, "Done.")
-        log(rank, f"Saved pruned model: {pruned_model_dir}")
-        log(rank, f"Saved benchmark summary: {out_dir / 'benchmark_summary.csv'}")
-        log(rank, json.dumps(report, ensure_ascii=False, indent=2))
+        print("\nGradient/Taylor pruning + exact benchmark complete")
+        print(f"Output directory: {out_dir}")
+        print(f"Pruned model:      {pruned_model_dir}")
+        print(f"Dense exact:       {format_metric(dense_metrics.get('exact_match_accuracy'))}")
+        print(f"Pruned exact:      {format_metric(pruned_metrics.get('exact_match_accuracy'))}")
+        print(f"Real sparsity:     {format_metric(report['after']['whole_model_sparsity'])}")
+        print(f"Linear sparsity:   {format_metric(report['selected_linear_mask_sparsity'])}")
+        print(f"Summary CSV:       {out_dir / 'benchmark_summary.csv'}")
 
     cleanup_distributed(is_dist)
 

@@ -768,6 +768,8 @@ python single_pruning/prune_2of4_8gpu_exact.py /path/to/local_model /path/to/eva
 
 They auto-launch with `torchrun` on up to 8 GPUs, evaluate the dense model, apply one pruning method, evaluate the pruned model, and save the pruned checkpoint plus summaries next to the model path.
 
+You can also edit `MODEL_PATH` and `EVAL_DATASET_PATH` at the top of any `single_pruning/*.py` file and run it with no path arguments. The pruned model is saved immediately after pruning, before the pruned benchmark starts, and the terminal prints dense accuracy, pruned accuracy, real whole-model sparsity, selected-linear sparsity, and output paths at the end.
+
 Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for one-shot pruning. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.

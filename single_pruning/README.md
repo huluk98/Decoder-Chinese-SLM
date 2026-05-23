@@ -6,7 +6,13 @@ These scripts are self-contained one-off pruning runners for local decoder-only 
 python single_pruning/<script>.py /path/to/local_model /path/to/eval.json
 ```
 
-They auto-launch with `torchrun` on up to 8 visible GPUs, evaluate the dense model, prune, evaluate the pruned model, and save the pruned checkpoint plus reports next to the model path.
+Or edit `MODEL_PATH` and `EVAL_DATASET_PATH` near the top of the script and run it with no path arguments:
+
+```bash
+python single_pruning/<script>.py
+```
+
+They auto-launch with `torchrun` on up to 8 visible GPUs, evaluate the dense model, prune, save the pruned checkpoint immediately, evaluate the pruned model, and print dense accuracy, pruned accuracy, whole-model sparsity, selected-linear sparsity, and output paths at the end.
 
 ## Scripts
 
