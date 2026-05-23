@@ -759,6 +759,14 @@ CHECKPOINT=runs/contrastive-sft-0p2b/latest ./scripts/run_pruning_suite.sh
 
 For the dense-vs-pruned check you asked for most often, use the SFT prompt/response evaluator directly. This avoids the Qwen-Instruct or IoT benchmark paths: it evaluates the dense SFT checkpoint on your data file, prunes each method, reloads the saved pruned checkpoint, evaluates that checkpoint with the same SFT evaluator, then prints accuracy and pruning stats.
 
+You can edit the `SCRIPT_MODEL_PATH` and `SCRIPT_DATA_FILE` block at the top of `scripts/run_sft_pruning_eval.sh`, then run:
+
+```bash
+bash scripts/run_sft_pruning_eval.sh
+```
+
+Or keep the script unchanged and pass paths at launch time:
+
 ```bash
 MODEL_PATH=/absolute/path/to/sft_or_hf_checkpoint \
 DATA_FILE=/absolute/path/to/eval_prompt_response.json \

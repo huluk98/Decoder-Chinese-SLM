@@ -5,11 +5,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
+# ---------------------------------------------------------------------------
+# EDIT THESE VALUES, THEN RUN:
+#   bash scripts/run_sft_pruning_eval.sh
+#
+# Command-line args and environment variables still override these values.
+# Example:
+#   SCRIPT_MODEL_PATH="/models/my_dense_sft_checkpoint"
+#   SCRIPT_DATA_FILE="/data/my_prompt_response_eval.json"
+# ---------------------------------------------------------------------------
+SCRIPT_MODEL_PATH=""
+SCRIPT_DATA_FILE=""
+SCRIPT_CALIBRATION_FILE=""  # optional; leave blank to reuse SCRIPT_DATA_FILE
+SCRIPT_TRAIN_FILE=""        # optional; only used for leakage/split audit
+SCRIPT_OUTPUT_DIR=""        # optional; blank creates runs/sft-pruning-eval-<timestamp>
+SCRIPT_TEMPLATE_CONFIG="configs/prune_50.yaml"
+
+SCRIPT_METHODS="magnitude 2of4 wanda gradient"
+SCRIPT_NPROC="8"
+SCRIPT_MAX_NEW_TOKENS="64"
+SCRIPT_MAX_LENGTH="2048"
+SCRIPT_EVAL_BATCH_SIZE="8"
+SCRIPT_PRUNE_BATCH_SIZE="2"
+SCRIPT_CALIBRATION_BATCHES="128"
+SCRIPT_DTYPE="bf16"
+SCRIPT_BENCHMARK_RUNS="1"
+SCRIPT_COMPARISON_MODE="whitespace"
+
 usage() {
   cat >&2 <<'EOF'
 Run dense SFT eval, one-shot prune, reload/evaluate the pruned checkpoint, and print accuracy + pruning stats.
 
 Usage:
+  # Option A: edit SCRIPT_MODEL_PATH and SCRIPT_DATA_FILE at the top, then:
+  bash scripts/run_sft_pruning_eval.sh
+
+  # Option B: pass paths without editing:
   MODEL_PATH=/path/to/sft_or_hf_checkpoint DATA_FILE=/path/to/eval.json bash scripts/run_sft_pruning_eval.sh
   bash scripts/run_sft_pruning_eval.sh /path/to/sft_or_hf_checkpoint /path/to/eval.json
 
@@ -28,8 +59,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-MODEL_PATH="${MODEL_PATH:-${1:-}}"
-DATA_FILE="${DATA_FILE:-${EVAL_FILE:-${2:-}}}"
+MODEL_PATH="${MODEL_PATH:-${1:-${SCRIPT_MODEL_PATH}}}"
+DATA_FILE="${DATA_FILE:-${EVAL_FILE:-${2:-${SCRIPT_DATA_FILE}}}}"
 if [[ -z "${MODEL_PATH}" || -z "${DATA_FILE}" ]]; then
   usage
   exit 2
@@ -63,14 +94,17 @@ PY
 }
 
 DATA_FILE="$(resolve_file "${DATA_FILE}")"
-CALIBRATION_FILE="${CALIBRATION_FILE:-${DATA_FILE}}"
+CALIBRATION_FILE="${CALIBRATION_FILE:-${SCRIPT_CALIBRATION_FILE}}"
+if [[ -z "${CALIBRATION_FILE}" ]]; then
+  CALIBRATION_FILE="${DATA_FILE}"
+fi
 CALIBRATION_FILE="$(resolve_file "${CALIBRATION_FILE}")"
-TRAIN_FILE="${TRAIN_FILE:-}"
+TRAIN_FILE="${TRAIN_FILE:-${SCRIPT_TRAIN_FILE}}"
 if [[ -n "${TRAIN_FILE}" ]]; then
   TRAIN_FILE="$(resolve_file "${TRAIN_FILE}")"
 fi
 
-METHODS_TEXT="${METHODS:-magnitude 2of4 wanda gradient}"
+METHODS_TEXT="${METHODS:-${SCRIPT_METHODS:-magnitude 2of4 wanda gradient}}"
 METHODS_TEXT="${METHODS_TEXT//,/ }"
 read -r -a METHOD_LIST <<<"${METHODS_TEXT}"
 if [[ "${#METHOD_LIST[@]}" -eq 0 ]]; then
@@ -79,19 +113,22 @@ if [[ "${#METHOD_LIST[@]}" -eq 0 ]]; then
 fi
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/sft-pruning-eval-${STAMP}}"
-TEMPLATE_CONFIG="${TEMPLATE_CONFIG:-configs/prune_50.yaml}"
-NPROC="${NPROC:-8}"
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
-MAX_LENGTH="${MAX_LENGTH:-2048}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
-PRUNE_BATCH_SIZE="${PRUNE_BATCH_SIZE:-2}"
-CALIBRATION_BATCHES="${CALIBRATION_BATCHES:-128}"
-DTYPE="${DTYPE:-bf16}"
-BENCHMARK_RUNS="${BENCHMARK_RUNS:-1}"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_OUTPUT_DIR}}"
+if [[ -z "${OUTPUT_DIR}" ]]; then
+  OUTPUT_DIR="runs/sft-pruning-eval-${STAMP}"
+fi
+TEMPLATE_CONFIG="${TEMPLATE_CONFIG:-${SCRIPT_TEMPLATE_CONFIG:-configs/prune_50.yaml}}"
+NPROC="${NPROC:-${SCRIPT_NPROC:-8}}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-${SCRIPT_MAX_NEW_TOKENS:-64}}"
+MAX_LENGTH="${MAX_LENGTH:-${SCRIPT_MAX_LENGTH:-2048}}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-${SCRIPT_EVAL_BATCH_SIZE:-8}}"
+PRUNE_BATCH_SIZE="${PRUNE_BATCH_SIZE:-${SCRIPT_PRUNE_BATCH_SIZE:-2}}"
+CALIBRATION_BATCHES="${CALIBRATION_BATCHES:-${SCRIPT_CALIBRATION_BATCHES:-128}}"
+DTYPE="${DTYPE:-${SCRIPT_DTYPE:-bf16}}"
+BENCHMARK_RUNS="${BENCHMARK_RUNS:-${SCRIPT_BENCHMARK_RUNS:-1}}"
 SEED="${SEED:-42}"
 DATA_SEED="${DATA_SEED:-${SEED}}"
-COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
+COMPARISON_MODE="${COMPARISON_MODE:-${SCRIPT_COMPARISON_MODE:-whitespace}}"
 SPARSITY="${SPARSITY:-0.5}"
 SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-prunable}"
 GRANULARITY="${GRANULARITY:-layer}"
