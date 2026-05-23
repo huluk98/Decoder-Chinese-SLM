@@ -38,7 +38,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # =========================
@@ -122,6 +122,14 @@ def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl")
     return True, rank, local_rank, world_size, torch.device(f"cuda:{local_rank}")
+
+
+def prepare_tokenizer(tokenizer: Any) -> Any:
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.unk_token
+    tokenizer.padding_side = "left"
+    return tokenizer
 
 
 def cleanup_distributed(is_dist: bool) -> None:
@@ -358,12 +366,12 @@ def evaluate(
     device: torch.device,
     tag: str,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[List[Dict[str, Any]]]]:
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False) if is_dist else None
+    local_records = dataset.records[rank::world_size] if is_dist else dataset.records
+    local_dataset = CausalEvalDataset(local_records, tokenizer)
     loader = DataLoader(
-        dataset,
+        local_dataset,
         batch_size=BATCH_SIZE,
-        sampler=sampler,
-        shuffle=False if sampler is not None else False,
+        shuffle=False,
         num_workers=NUM_WORKERS,
         collate_fn=collate_generation,
     )
@@ -408,9 +416,9 @@ def evaluate(
                     eos_token_id=tokenizer.eos_token_id,
                 )
 
-                prompt_lens = enc["attention_mask"].sum(dim=1).tolist()
+                prompt_width = int(enc["input_ids"].shape[1])
                 for i in range(gen.shape[0]):
-                    generated_ids = gen[i, int(prompt_lens[i]) :]
+                    generated_ids = gen[i, prompt_width:]
                     pred = tokenizer.decode(generated_ids, skip_special_tokens=True)
                     gold = batch["responses"][i]
                     ok = normalize_text(pred, COMPARISON_MODE) == normalize_text(gold, COMPARISON_MODE)
@@ -518,12 +526,12 @@ def compute_gradient_saliency(
         for name, module in modules
     }
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False) if is_dist else None
+    local_records = dataset.records[rank::world_size] if is_dist else dataset.records
+    local_dataset = CausalEvalDataset(local_records, tokenizer)
     loader = DataLoader(
-        dataset,
+        local_dataset,
         batch_size=BATCH_SIZE,
-        sampler=sampler,
-        shuffle=False if sampler is not None else False,
+        shuffle=False,
         num_workers=NUM_WORKERS,
         collate_fn=collate_generation,
     )
@@ -661,11 +669,9 @@ def main_worker() -> None:
     log(rank, f"Model path: {model_path}")
     log(rank, f"Eval file:  {eval_path}")
     log(rank, f"Output dir: {out_dir}")
-    log(rank, f"World size: {world_size}")
+    log(rank, f"World size: {world_size}; batch_size_per_gpu: {BATCH_SIZE}; effective_batch_size: {BATCH_SIZE * world_size}")
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=TRUST_REMOTE_CODE)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.unk_token
+    tokenizer = prepare_tokenizer(AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=TRUST_REMOTE_CODE))
 
     load_kwargs: Dict[str, Any] = {"trust_remote_code": TRUST_REMOTE_CODE, "torch_dtype": dtype_from_string(DTYPE)}
     model = AutoModelForCausalLM.from_pretrained(str(model_path), **load_kwargs).to(device)
@@ -726,9 +732,7 @@ def main_worker() -> None:
     if device.type == "cuda":
         torch.cuda.empty_cache()
     log(rank, f"Reloading saved pruned checkpoint for evaluation: {pruned_model_dir}")
-    tokenizer = AutoTokenizer.from_pretrained(str(pruned_model_dir), trust_remote_code=TRUST_REMOTE_CODE)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.unk_token
+    tokenizer = prepare_tokenizer(AutoTokenizer.from_pretrained(str(pruned_model_dir), trust_remote_code=TRUST_REMOTE_CODE))
     dataset.tokenizer = tokenizer
     model = AutoModelForCausalLM.from_pretrained(str(pruned_model_dir), **load_kwargs).to(device)
     model.config.use_cache = False

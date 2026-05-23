@@ -731,7 +731,11 @@ def main_worker() -> None:
     log(rank, f"[rank0] Model: {model_path}")
     log(rank, f"[rank0] Eval:  {eval_path}")
     log(rank, f"[rank0] Output: {output_dir}")
-    log(rank, f"[rank0] World size: {world_size}; local rank: {local_rank}; device: {device}")
+    log(
+        rank,
+        f"[rank0] World size: {world_size}; batch_size_per_gpu: {BATCH_SIZE}; "
+        f"effective_batch_size: {BATCH_SIZE * world_size}; local rank: {local_rank}; device: {device}",
+    )
 
     examples = load_eval_file(eval_path)
     if is_rank0(rank):

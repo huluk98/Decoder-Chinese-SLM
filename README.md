@@ -768,7 +768,7 @@ python single_pruning/prune_2of4_8gpu_exact.py /path/to/local_model /path/to/eva
 
 They auto-launch with `torchrun` on up to 8 GPUs, evaluate the dense model, apply one pruning method, evaluate the pruned model, and save the pruned checkpoint plus summaries next to the model path.
 
-You can also edit `MODEL_PATH` and `EVAL_DATASET_PATH` at the top of any `single_pruning/*.py` file and run it with no path arguments. The pruned model is saved immediately after pruning, then the pruned benchmark reloads that saved `pruned_model/` checkpoint from disk. The terminal prints dense accuracy, pruned accuracy, real whole-model sparsity, selected-linear sparsity, and output paths at the end.
+You can also edit `MODEL_PATH` and `EVAL_DATASET_PATH` at the top of any `single_pruning/*.py` file and run it with no path arguments. These scripts use one full model copy per GPU and shard evaluation across up to 8 visible GPUs; increase `BATCH_SIZE` near the top of the script if GPU utilization is low and memory allows it. The pruned model is saved immediately after pruning, then the pruned benchmark reloads that saved `pruned_model/` checkpoint from disk. The terminal prints dense accuracy, pruned accuracy, real whole-model sparsity, selected-linear sparsity, and output paths at the end.
 
 Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for one-shot pruning. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
 
