@@ -221,7 +221,19 @@ def save_checkpoint(
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
         write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
-        write_json(checkpoint_dir / "module_filter_report.json", module_filter_report(unwrap_model(model)))
+        source_report = load_pruning_source_report(pruning_mask_source)
+        pruning_scope = source_report.get(
+            "pruning_scope",
+            source_report.get("target_resolution", {}).get("pruning_scope", "transformer_linears"),
+        )
+        write_json(
+            checkpoint_dir / "module_filter_report.json",
+            module_filter_report(
+                unwrap_model(model),
+                include_lm_head=bool(source_report.get("include_lm_head", False)),
+                scope=pruning_scope,
+            ),
+        )
         write_json(
             checkpoint_dir / "mask_validation.json",
             {
@@ -371,6 +383,10 @@ def write_pruning_report(
         "sparsity": mask_sparsity(pruning_masks),
         "requested_sparsity": requested_sparsity,
         "target_sparsity": requested_sparsity,
+        "pruning_scope": source_report.get(
+            "pruning_scope",
+            source_report.get("target_resolution", {}).get("pruning_scope", "transformer_linears"),
+        ),
         "target_sparsity_denominator": target_denominator,
         "target_whole_model_sparsity": target_whole_model_sparsity,
         "source_pruning_method": source_report.get("method"),

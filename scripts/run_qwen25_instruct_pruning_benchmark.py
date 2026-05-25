@@ -140,13 +140,22 @@ def validate_pruning_report(
     report = read_pruning_report(report_path)
     if not report:
         raise FileNotFoundError(f"Missing pruning report for {method} {phase}: {report_path}")
-    actual_sparsity = report.get("mask_sparsity", report.get("sparsity"))
-    if actual_sparsity is None:
-        raise ValueError(f"Pruning report does not contain mask_sparsity/sparsity: {report_path}")
-    if abs(float(actual_sparsity) - float(target_sparsity)) > float(tolerance):
+    denominator = str(report.get("target_sparsity_denominator", "prunable")).lower()
+    target_prunable = report.get("target_prunable_sparsity", target_sparsity)
+    if denominator == "whole_model":
+        actual_sparsity = report.get("achieved_whole_model_sparsity", report.get("model_zero_fraction"))
+        expected_sparsity = report.get("target_whole_model_sparsity", report.get("target_sparsity", target_sparsity))
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved whole-model sparsity: {report_path}")
+    else:
+        actual_sparsity = report.get("achieved_prunable_sparsity", report.get("mask_sparsity", report.get("sparsity")))
+        expected_sparsity = target_prunable
+        if actual_sparsity is None:
+            raise ValueError(f"Pruning report does not contain achieved prunable sparsity: {report_path}")
+    if abs(float(actual_sparsity) - float(expected_sparsity)) > float(tolerance):
         raise ValueError(
-            f"{method} {phase} sparsity check failed: actual={float(actual_sparsity):.8f}, "
-            f"target={float(target_sparsity):.8f}, tolerance={float(tolerance):.8f}"
+            f"{method} {phase} {denominator} sparsity check failed: actual={float(actual_sparsity):.8f}, "
+            f"target={float(expected_sparsity):.8f}, tolerance={float(tolerance):.8f}"
         )
     violations = int(report.get("masked_weight_violation_count", 0) or 0)
     if violations:
@@ -157,7 +166,7 @@ def validate_pruning_report(
     nonzero_parameters = report.get("nonzero_parameters")
     if nonzero_parameters is not None and int(nonzero_parameters) <= 0:
         raise ValueError(f"{method} {phase} reports zero nonzero model parameters: {report_path}")
-    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_sparsity)) > float(tolerance):
+    if "achieved_prunable_sparsity" in report and abs(float(report["achieved_prunable_sparsity"]) - float(target_prunable)) > float(tolerance):
         raise ValueError(f"{method} {phase} achieved_prunable_sparsity does not match target: {report_path}")
 
 
@@ -647,8 +656,10 @@ def cmc_comparability_report(
         blocking.append(f"methods differ from CMC reference: {methods}")
     if float(config.get("prune", {}).get("sparsity", 0.5)) != 0.5:
         blocking.append("target prunable sparsity is not 0.5")
+    if str(config.get("prune", {}).get("scope", "transformer_linears")).lower() == "full_model":
+        non_blocking.append("full-model pruning is enabled; this intentionally differs from CMC protected-parameter scope")
     if bool(config.get("prune", {}).get("include_lm_head", False)):
-        blocking.append("lm_head/output head pruning is enabled")
+        non_blocking.append("lm_head/output head pruning is enabled")
     if int(benchmark.get("benchmark_runs", 1)) != 1:
         non_blocking.append("benchmark repeats are enabled; CMC one-shot comparison should use one run per checkpoint")
     if not benchmark.get("eval_file"):
@@ -661,7 +672,7 @@ def cmc_comparability_report(
         "comparable": not blocking,
         "blocking_issues": blocking,
         "non_blocking_differences": non_blocking,
-        "decoder_only_prunable_scope": "selected transformer attention/MLP torch.nn.Linear weights; embeddings/lm_head/norms/biases/non-Linears protected",
+        "decoder_only_prunable_scope": "all floating-point parameters when prune.scope=full_model; legacy scope protects embeddings/lm_head/norms/biases/non-Linears",
         "cmc_prunable_scope": "selected prunable transformer Linear weights; embeddings/output head/norms/tokenizer/non-Linears protected",
         "dense_baseline_checkpoint": str(dense_checkpoint),
         "pruned_checkpoint_paths": pruned_checkpoint_paths,

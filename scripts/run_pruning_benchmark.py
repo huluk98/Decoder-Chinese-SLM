@@ -288,6 +288,7 @@ def print_plan(
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
+    print(f"  pruning_scope: {config.get('prune', {}).get('scope', 'full_model')}", flush=True)
     print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)

@@ -732,7 +732,7 @@ If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and
 
 ## 50% Pruning
 
-Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The generic decoder-only path prunes `torch.nn.Linear` weights only and skips `lm_head` by default. Embeddings, positional embeddings, output heads, tied output embeddings, norms, biases, tokenizer-related parameters, and non-Linear modules are protected.
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The default configs now use `prune.scope: full_model`, `sparsity_denominator: whole_model`, `granularity: global`, and `include_lm_head: true`, so 50% means 50% of all floating-point model parameters. Embeddings, output heads, tied output embeddings, norms, and biases are all inside the mask.
 
 Run one pruning method:
 
@@ -746,10 +746,10 @@ python scripts/prune.py \
 
 Available methods:
 
-- `magnitude`: per-layer unstructured 50% pruning by `abs(weight)`.
-- `2of4`: NVIDIA-style semi-structured 2:4 pruning, two zeros in each group of four linear weights.
-- `wanda`: row-wise activation-aware 50% pruning using calibration data and `abs(weight) * input_activation_norm`.
-- `gradient`: per-layer gradient-score pruning using `abs(weight * grad)` on calibration batches.
+- `magnitude`: global unstructured 50% pruning by `abs(parameter)`.
+- `2of4`: exact 2:4 masks on eligible linear weights, plus magnitude fallback for every other floating tensor so the whole model still reaches 50%.
+- `wanda`: activation-aware scoring for linear weights, plus magnitude fallback for non-linear tensors under full-model scope.
+- `gradient`: global gradient-score pruning using `abs(parameter * grad)` on calibration batches.
 
 Run all four:
 
@@ -931,9 +931,9 @@ pruning_benchmark_summary.json
 
 That gives 8 model outputs total and 8 benchmark output folders total, plus the dense baseline eval folder. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json` and `exact_match_failure_cases.json`.
 
-Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; a 50% run means 50% sparsity over the selected prunable Linear weights, while whole-model sparsity will be lower because protected parameters are intentionally left dense.
+Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default full-model scope, both should land at the 50% target for dense checkpoints.
 
-The runner checks each report before evaluation and fails the phase if prunable sparsity is not 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, protected parameters changed during pruning, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
 ### Final IoT Benchmark Eval
 

@@ -49,9 +49,41 @@ MLP_LINEAR_NAMES = (
     "w3",
 )
 
+FULL_MODEL_SCOPE = "full_model"
+TRANSFORMER_LINEAR_SCOPE = "transformer_linears"
+
 
 def _lower_name(name: str) -> str:
     return name.replace("-", "_").lower()
+
+
+def normalize_pruning_scope(value: str | None) -> str:
+    scope = str(value or TRANSFORMER_LINEAR_SCOPE).strip().lower().replace("-", "_")
+    aliases = {
+        "linear": TRANSFORMER_LINEAR_SCOPE,
+        "linears": TRANSFORMER_LINEAR_SCOPE,
+        "prunable": TRANSFORMER_LINEAR_SCOPE,
+        "prunable_linear": TRANSFORMER_LINEAR_SCOPE,
+        "prunable_linears": TRANSFORMER_LINEAR_SCOPE,
+        "decoder_linear": TRANSFORMER_LINEAR_SCOPE,
+        "decoder_linears": TRANSFORMER_LINEAR_SCOPE,
+        "transformer_linear": TRANSFORMER_LINEAR_SCOPE,
+        "transformer_linears": TRANSFORMER_LINEAR_SCOPE,
+        "all": FULL_MODEL_SCOPE,
+        "all_parameters": FULL_MODEL_SCOPE,
+        "all_params": FULL_MODEL_SCOPE,
+        "model": FULL_MODEL_SCOPE,
+        "whole_model": FULL_MODEL_SCOPE,
+        "full": FULL_MODEL_SCOPE,
+        "full_model": FULL_MODEL_SCOPE,
+    }
+    scope = aliases.get(scope, scope)
+    if scope not in {TRANSFORMER_LINEAR_SCOPE, FULL_MODEL_SCOPE}:
+        raise ValueError(
+            "prune.scope must be 'transformer_linears' or 'full_model', "
+            f"got {value!r}."
+        )
+    return scope
 
 
 def protected_reason(name: str, module: torch.nn.Module | None = None) -> str:
@@ -118,7 +150,136 @@ def named_prunable_linears(model: torch.nn.Module, include_lm_head: bool = False
     return modules
 
 
-def module_filter_report(model: torch.nn.Module, include_lm_head: bool = False) -> dict[str, Any]:
+def _named_linears_for_scope(
+    model: torch.nn.Module,
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+) -> list[tuple[str, torch.nn.Linear]]:
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        modules = [
+            (name, module)
+            for name, module in model.named_modules()
+            if isinstance(module, torch.nn.Linear) and module.weight is not None and module.weight.dtype.is_floating_point
+        ]
+        if not modules:
+            raise ValueError("No torch.nn.Linear modules with floating-point weights were found.")
+        return modules
+    return named_prunable_linears(model, include_lm_head=include_lm_head)
+
+
+def _linear_weight_parameter_names(
+    model: torch.nn.Module,
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+) -> set[str]:
+    return {
+        f"{name}.weight"
+        for name, _module in _named_linears_for_scope(model, include_lm_head=include_lm_head, scope=scope)
+    }
+
+
+def named_prunable_parameters(
+    model: torch.nn.Module,
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+) -> list[tuple[str, torch.nn.Parameter]]:
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        parameters = [
+            (name, parameter)
+            for name, parameter in model.named_parameters()
+            if parameter.dtype.is_floating_point and int(parameter.numel()) > 0
+        ]
+        if not parameters:
+            raise ValueError("No floating-point model parameters were found for full-model pruning.")
+        return parameters
+
+    prunable_weight_names = _linear_weight_parameter_names(
+        model,
+        include_lm_head=include_lm_head,
+        scope=TRANSFORMER_LINEAR_SCOPE,
+    )
+    parameters = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if name in prunable_weight_names
+    ]
+    if not parameters:
+        raise ValueError("No prunable transformer Linear weight parameters were found.")
+    return parameters
+
+
+def _mask_parameter_lookup(model: torch.nn.Module) -> dict[str, torch.nn.Parameter]:
+    lookup = {name: parameter for name, parameter in model.named_parameters()}
+    for module_name, module in model.named_modules():
+        weight = getattr(module, "weight", None)
+        if isinstance(weight, torch.nn.Parameter):
+            lookup.setdefault(module_name, weight)
+            lookup.setdefault(f"{module_name}.weight", weight)
+    return lookup
+
+
+def _masked_parameter_names(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> set[str]:
+    parameter_lookup = _mask_parameter_lookup(model)
+    parameter_to_names: dict[int, list[str]] = defaultdict(list)
+    for name, parameter in model.named_parameters():
+        parameter_to_names[id(parameter)].append(name)
+    names: set[str] = set()
+    for mask_name in masks:
+        parameter = parameter_lookup.get(mask_name)
+        if parameter is None:
+            continue
+        names.update(parameter_to_names.get(id(parameter), []))
+    return names
+
+
+def module_filter_report(
+    model: torch.nn.Module,
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+) -> dict[str, Any]:
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        prunable = named_prunable_parameters(model, include_lm_head=include_lm_head, scope=normalized_scope)
+        prunable_parameter_names = {name for name, _parameter in prunable}
+        prunable_parameter_count = sum(int(parameter.numel()) for _name, parameter in prunable)
+        total_parameter_count = sum(int(parameter.numel()) for parameter in model.parameters())
+        protected = [
+            {
+                "name": name,
+                "module": name.rsplit(".", 1)[0] if "." in name else name,
+                "shape": list(parameter.shape),
+                "parameter_count": int(parameter.numel()),
+                "reason": "non_floating_parameter",
+            }
+            for name, parameter in model.named_parameters()
+            if name not in prunable_parameter_names
+        ]
+        protected_parameter_count = total_parameter_count - prunable_parameter_count
+        return {
+            "protocol": "full-model pruning scope",
+            "pruning_scope": normalized_scope,
+            "prunable_scope": "all floating-point model parameters; no name-based protected tensors",
+            "prunable_parameter_names": [name for name, _parameter in prunable],
+            "prunable_parameters": [
+                {
+                    "name": name,
+                    "shape": list(parameter.shape),
+                    "parameter_count": int(parameter.numel()),
+                }
+                for name, parameter in prunable
+            ],
+            "protected_parameters": protected,
+            "protected_module_names": sorted({row["module"] for row in protected}),
+            "protected_categories": sorted({row["reason"] for row in protected}),
+            "prunable_parameter_count": prunable_parameter_count,
+            "protected_parameter_count": protected_parameter_count,
+            "total_parameter_count": total_parameter_count,
+            "percentage_of_model_in_pruning_mask": prunable_parameter_count / float(total_parameter_count or 1),
+            "excluded_from_pruning": [],
+        }
+
     prunable = named_prunable_linears(model, include_lm_head=include_lm_head)
     prunable_weight_params = {f"{name}.weight" for name, _module in prunable}
     prunable_module_names = [name for name, _module in prunable]
@@ -143,6 +304,7 @@ def module_filter_report(model: torch.nn.Module, include_lm_head: bool = False) 
     protected_parameter_count = total_parameter_count - prunable_parameter_count
     return {
         "protocol": "decoder-only pruning scope",
+        "pruning_scope": normalized_scope,
         "prunable_scope": "decoder torch.nn.Linear weights only; lm_head skipped unless include_lm_head=true",
         "prunable_module_names": prunable_module_names,
         "prunable_modules": [
@@ -199,14 +361,16 @@ def resolve_prunable_sparsity_for_target(
     target_sparsity: float,
     denominator: str | None = "prunable",
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, Any]:
     target = float(target_sparsity)
     if not 0.0 <= target <= 1.0:
         raise ValueError(f"sparsity must be between 0 and 1, got {target_sparsity}")
 
     normalized_denominator = normalize_sparsity_denominator(denominator)
-    prunable = named_prunable_linears(model, include_lm_head=include_lm_head)
-    prunable_parameter_count = sum(int(module.weight.numel()) for _name, module in prunable)
+    normalized_scope = normalize_pruning_scope(scope)
+    prunable = named_prunable_parameters(model, include_lm_head=include_lm_head, scope=normalized_scope)
+    prunable_parameter_count = sum(int(parameter.numel()) for _name, parameter in prunable)
     model_stats = model_parameter_stats(model)
     total_parameter_count = int(model_stats["total_parameters"])
     existing_zero_parameters = int(model_stats["zero_parameters"])
@@ -218,7 +382,10 @@ def resolve_prunable_sparsity_for_target(
         target_pruned_prunable_parameters = int(target_prunable_sparsity * prunable_parameter_count)
     else:
         target_whole_zeros = int(round(target * total_parameter_count))
-        target_pruned_prunable_parameters = max(0, target_whole_zeros - existing_zero_parameters)
+        if normalized_scope == FULL_MODEL_SCOPE:
+            target_pruned_prunable_parameters = target_whole_zeros
+        else:
+            target_pruned_prunable_parameters = max(0, target_whole_zeros - existing_zero_parameters)
         if target_pruned_prunable_parameters > prunable_parameter_count:
             raise ValueError(
                 "Cannot reach requested whole-model sparsity while keeping protected parameters unchanged: "
@@ -230,6 +397,7 @@ def resolve_prunable_sparsity_for_target(
 
     return {
         "requested_sparsity": target,
+        "pruning_scope": normalized_scope,
         "target_sparsity_denominator": normalized_denominator,
         "target_prunable_sparsity": float(target_prunable_sparsity),
         "target_whole_model_sparsity": target_whole_model_sparsity,
@@ -247,24 +415,29 @@ def validate_masks_match_prunable_scope(
     masks: dict[str, torch.Tensor],
     include_lm_head: bool = False,
     allow_missing: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> None:
-    prunable_names = {name for name, _module in named_prunable_linears(model, include_lm_head=include_lm_head)}
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        prunable_names = {name for name, _parameter in named_prunable_parameters(model, scope=normalized_scope)}
+    else:
+        prunable_names = {name for name, _module in named_prunable_linears(model, include_lm_head=include_lm_head)}
     missing = sorted(prunable_names - set(masks))
     if missing and not allow_missing:
         raise ValueError(f"Pruning masks are missing prunable modules: {missing}")
     for name in masks:
         if name not in prunable_names:
             raise ValueError(f"Mask includes non-prunable module: {name}")
-        if is_protected_name(name) and not (include_lm_head and is_lm_head_name(name)):
+        if normalized_scope != FULL_MODEL_SCOPE and is_protected_name(name) and not (include_lm_head and is_lm_head_name(name)):
             raise ValueError(f"Mask includes protected module name: {name}")
 
 
 def protected_parameter_snapshot(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    prunable_weight_names = {f"{name}.weight" for name in masks}
+    masked_parameter_names = _masked_parameter_names(model, masks)
     return {
         name: parameter.detach().cpu().clone()
         for name, parameter in model.named_parameters()
-        if name not in prunable_weight_names
+        if name not in masked_parameter_names
     }
 
 
@@ -313,18 +486,18 @@ def assert_protected_parameters_unchanged(model: torch.nn.Module, snapshot: dict
 
 
 def apply_masks(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> None:
-    module_lookup = dict(model.named_modules())
+    parameter_lookup = _mask_parameter_lookup(model)
     with torch.no_grad():
         for name, mask in masks.items():
-            if name not in module_lookup:
-                raise KeyError(f"Pruning mask references unknown module: {name}")
-            module = module_lookup[name]
-            if mask.shape != module.weight.shape:
+            if name not in parameter_lookup:
+                raise KeyError(f"Pruning mask references unknown parameter or module weight: {name}")
+            parameter = parameter_lookup[name]
+            if mask.shape != parameter.shape:
                 raise ValueError(
                     f"Pruning mask shape mismatch for {name}: mask={tuple(mask.shape)} "
-                    f"weight={tuple(module.weight.shape)}"
+                    f"parameter={tuple(parameter.shape)}"
                 )
-            module.weight.mul_(mask.to(device=module.weight.device, dtype=module.weight.dtype))
+            parameter.mul_(mask.to(device=parameter.device, dtype=parameter.dtype))
 
 
 def mask_sparsity(masks: dict[str, torch.Tensor]) -> float:
@@ -401,20 +574,20 @@ def sparsity_accounting(model: torch.nn.Module, masks: dict[str, torch.Tensor], 
 
 
 def masked_weight_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> dict[str, int | float]:
-    module_lookup = dict(model.named_modules())
+    parameter_lookup = _mask_parameter_lookup(model)
     masked_weight_count = 0
     masked_weight_violation_count = 0
     for name, mask in masks.items():
-        if name not in module_lookup:
-            raise KeyError(f"Pruning mask references unknown module: {name}")
-        module = module_lookup[name]
-        if mask.shape != module.weight.shape:
+        if name not in parameter_lookup:
+            raise KeyError(f"Pruning mask references unknown parameter or module weight: {name}")
+        parameter = parameter_lookup[name]
+        if mask.shape != parameter.shape:
             raise ValueError(
                 f"Pruning mask shape mismatch for {name}: mask={tuple(mask.shape)} "
-                f"weight={tuple(module.weight.shape)}"
+                f"parameter={tuple(parameter.shape)}"
             )
-        mask_on_device = mask.to(device=module.weight.device, dtype=torch.bool)
-        pruned_values = module.weight.detach().masked_select(~mask_on_device)
+        mask_on_device = mask.to(device=parameter.device, dtype=torch.bool)
+        pruned_values = parameter.detach().masked_select(~mask_on_device)
         masked_weight_count += int(pruned_values.numel())
         masked_weight_violation_count += int(torch.count_nonzero(pruned_values).item())
     return {
@@ -425,11 +598,11 @@ def masked_weight_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor]) 
 
 
 def collect_weight_norms(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> dict[str, dict[str, float | int]]:
-    module_lookup = dict(model.named_modules())
+    parameter_lookup = _mask_parameter_lookup(model)
     rows: dict[str, dict[str, float | int]] = {}
     for name, mask in masks.items():
-        module = module_lookup[name]
-        weight = module.weight.detach().float()
+        parameter = parameter_lookup[name]
+        weight = parameter.detach().float()
         mask_bool = mask.to(device=weight.device, dtype=torch.bool)
         active_values = weight.masked_select(mask_bool)
         pruned_values = weight.masked_select(~mask_bool)
@@ -445,18 +618,20 @@ def collect_weight_norms(model: torch.nn.Module, masks: dict[str, torch.Tensor])
 
 
 def layerwise_zero_fraction(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> list[dict[str, Any]]:
-    module_lookup = dict(model.named_modules())
+    parameter_lookup = _mask_parameter_lookup(model)
     rows: list[dict[str, Any]] = []
     for name, mask in masks.items():
-        module = module_lookup[name]
-        weight = module.weight.detach()
+        parameter = parameter_lookup[name]
+        weight = parameter.detach()
         zero_count = int((weight == 0).sum().item())
         total = int(weight.numel())
         mask_zeros = int((mask == 0).sum().item())
         rows.append(
             {
                 "module": name,
+                "parameter": name,
                 "weight_parameter_count": total,
+                "parameter_count": total,
                 "zero_parameters": zero_count,
                 "zero_fraction": zero_count / float(total or 1),
                 "mask_pruned_parameters": mask_zeros,
@@ -519,17 +694,30 @@ def tensor_stats(tensor: torch.Tensor) -> dict[str, float | int]:
     }
 
 
-def gradient_saliency_report(gradient_scores: dict[str, torch.Tensor]) -> dict[str, Any]:
+def gradient_saliency_report(
+    gradient_scores: dict[str, torch.Tensor],
+    block_all_zero: bool = True,
+) -> dict[str, Any]:
     modules = []
     blocking: list[str] = []
+    warnings: list[str] = []
     for name, score in gradient_scores.items():
         stats = tensor_stats(score)
         modules.append({"module": name, **stats})
         if int(stats["finite_count"]) != int(stats["numel"]):
             blocking.append(f"{name}: gradient saliency contains NaN/Inf")
         if int(stats["nonzero_count"]) <= 0:
-            blocking.append(f"{name}: gradient saliency is all zero")
-    return {"modules": modules, "blocking_issues": blocking, "all_modules_valid": not blocking}
+            message = f"{name}: gradient saliency is all zero"
+            if block_all_zero:
+                blocking.append(message)
+            else:
+                warnings.append(message)
+    return {
+        "modules": modules,
+        "blocking_issues": blocking,
+        "warnings": warnings,
+        "all_modules_valid": not blocking,
+    }
 
 
 def wanda_activation_report(activation_scalers: dict[str, torch.Tensor], masks: dict[str, torch.Tensor]) -> dict[str, Any]:
@@ -557,6 +745,7 @@ def validate_two_of_four_masks(
     masks: dict[str, torch.Tensor],
     model: torch.nn.Module | None = None,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, Any]:
     modules = []
     total_valid_groups = 0
@@ -564,19 +753,28 @@ def validate_two_of_four_masks(
     invalid_examples: list[dict[str, Any]] = []
     skipped_modules: list[dict[str, Any]] = []
     missing_eligible_modules: list[str] = []
+    eligible_mask_names: set[str] | None = None
     if model is not None:
-        for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
+        normalized_scope = normalize_pruning_scope(scope)
+        eligible_mask_names = set()
+        for name, module in _named_linears_for_scope(model, include_lm_head=include_lm_head, scope=normalized_scope):
+            mask_name = f"{name}.weight" if normalized_scope == FULL_MODEL_SCOPE else name
             if module.weight.shape[1] % 4 != 0:
-                skipped_modules.append(
-                    {
-                        "module": name,
-                        "shape": list(module.weight.shape),
-                        "reason": "in_features_not_divisible_by_4",
-                    }
-                )
-            elif name not in masks:
-                missing_eligible_modules.append(name)
+                row = {
+                    "module": name,
+                    "shape": list(module.weight.shape),
+                    "reason": "in_features_not_divisible_by_4",
+                }
+                if normalized_scope == FULL_MODEL_SCOPE:
+                    row["mask"] = mask_name
+                skipped_modules.append(row)
+            else:
+                eligible_mask_names.add(mask_name)
+                if mask_name not in masks:
+                    missing_eligible_modules.append(mask_name)
     for name, mask in masks.items():
+        if eligible_mask_names is not None and name not in eligible_mask_names:
+            continue
         if mask.shape[1] % 4 != 0:
             raise ValueError(f"2:4 validation requires in_features divisible by 4: {name} shape={tuple(mask.shape)}")
         grouped = mask.bool().cpu().reshape(mask.shape[0], mask.shape[1] // 4, 4)
@@ -620,15 +818,16 @@ def validate_two_of_four_masks(
     }
 
 
-def exact_global_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
-    if not 0.0 <= float(sparsity) <= 1.0:
-        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
+def exact_global_score_masks_for_pruned_count(
+    scores: dict[str, torch.Tensor],
+    pruned_count: int,
+) -> dict[str, torch.Tensor]:
     names = list(scores)
     if not names:
         raise ValueError("No prunable score tensors were provided.")
     flat_scores = torch.cat([scores[name].detach().float().flatten().cpu() for name in names])
     total = flat_scores.numel()
-    keep_count = max(0, min(total, total - int(float(sparsity) * total)))
+    keep_count = max(0, min(total, total - int(pruned_count)))
     if keep_count <= 0:
         return {name: torch.zeros_like(scores[name], dtype=torch.bool) for name in names}
     if keep_count >= total:
@@ -645,6 +844,13 @@ def exact_global_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -
         masks[name] = flat_mask[offset : offset + numel].reshape_as(scores[name]).to(scores[name].device)
         offset += numel
     return masks
+
+
+def exact_global_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
+    if not 0.0 <= float(sparsity) <= 1.0:
+        raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
+    total = sum(int(score.numel()) for score in scores.values())
+    return exact_global_score_masks_for_pruned_count(scores, int(float(sparsity) * total))
 
 
 def exact_layerwise_score_masks(scores: dict[str, torch.Tensor], sparsity: float) -> dict[str, torch.Tensor]:
@@ -748,9 +954,17 @@ def global_magnitude_masks(
     model: torch.nn.Module,
     sparsity: float = 0.5,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
-    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
-    scores = {name: module.weight.detach().abs() for name, module in layers}
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        scores = {
+            name: parameter.detach().abs()
+            for name, parameter in named_prunable_parameters(model, scope=normalized_scope)
+        }
+    else:
+        layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+        scores = {name: module.weight.detach().abs() for name, module in layers}
     return exact_global_score_masks(scores, sparsity=sparsity)
 
 
@@ -758,14 +972,71 @@ def layerwise_magnitude_masks(
     model: torch.nn.Module,
     sparsity: float = 0.5,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
-    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
-    scores = {name: module.weight.detach().abs() for name, module in layers}
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        scores = {
+            name: parameter.detach().abs()
+            for name, parameter in named_prunable_parameters(model, scope=normalized_scope)
+        }
+    else:
+        layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+        scores = {name: module.weight.detach().abs() for name, module in layers}
     return exact_layerwise_score_masks(scores, sparsity=sparsity)
 
 
-def two_of_four_masks(model: torch.nn.Module, include_lm_head: bool = False) -> dict[str, torch.Tensor]:
+def two_of_four_masks(
+    model: torch.nn.Module,
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+    sparsity: float = 0.5,
+) -> dict[str, torch.Tensor]:
+    normalized_scope = normalize_pruning_scope(scope)
     masks: dict[str, torch.Tensor] = {}
+    if normalized_scope == FULL_MODEL_SCOPE:
+        target_parameters = named_prunable_parameters(model, scope=normalized_scope)
+        total = sum(int(parameter.numel()) for _name, parameter in target_parameters)
+        target_pruned = max(0, min(total, int(float(sparsity) * total)))
+        fixed_pruned = 0
+        fallback_scores: dict[str, torch.Tensor] = {}
+        linear_weight_names = {
+            f"{name}.weight": module
+            for name, module in _named_linears_for_scope(model, include_lm_head=True, scope=normalized_scope)
+            if module.weight.ndim == 2 and module.weight.shape[1] % 4 == 0
+        }
+        for name, parameter in target_parameters:
+            module = linear_weight_names.get(name)
+            if module is None:
+                fallback_scores[name] = parameter.detach().abs()
+                continue
+            weight = module.weight.detach()
+            mask = torch.ones_like(weight, dtype=torch.bool)
+            full_cols = (weight.shape[1] // 4) * 4
+            view = weight[:, :full_cols].abs().reshape(weight.shape[0], full_cols // 4, 4)
+            prune_idx = torch.topk(view, k=2, dim=-1, largest=False).indices
+            grouped_mask = torch.ones_like(view, dtype=torch.bool)
+            grouped_mask.scatter_(-1, prune_idx, False)
+            mask[:, :full_cols] = grouped_mask.reshape(weight.shape[0], full_cols)
+            masks[name] = mask
+            fixed_pruned += int((~mask).sum().item())
+
+        fallback_total = sum(int(score.numel()) for score in fallback_scores.values())
+        fallback_pruned = target_pruned - fixed_pruned
+        if fallback_pruned < 0:
+            raise ValueError(
+                "Full-model 2:4 fixed masks already exceed the requested sparsity: "
+                f"fixed_pruned={fixed_pruned:,}, target_pruned={target_pruned:,}."
+            )
+        if fallback_scores:
+            masks.update(
+                exact_global_score_masks_for_pruned_count(
+                    fallback_scores,
+                    pruned_count=max(0, min(fallback_total, fallback_pruned)),
+                )
+            )
+        return masks
+
     for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
         weight = module.weight.detach()
         if weight.shape[1] % 4 != 0:
@@ -788,20 +1059,45 @@ def wanda_masks(
     activation_scalers: dict[str, torch.Tensor],
     sparsity: float = 0.5,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+    granularity: str = "row",
 ) -> dict[str, torch.Tensor]:
     if not 0.0 <= float(sparsity) <= 1.0:
         raise ValueError(f"sparsity must be between 0 and 1, got {sparsity}")
-    masks: dict[str, torch.Tensor] = {}
+    normalized_scope = normalize_pruning_scope(scope)
     scores: dict[str, torch.Tensor] = {}
-    for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
+    linear_modules = _named_linears_for_scope(model, include_lm_head=include_lm_head, scope=normalized_scope)
+    linear_weight_names = {f"{name}.weight": (name, module) for name, module in linear_modules}
+    if normalized_scope == FULL_MODEL_SCOPE:
+        for parameter_name, parameter in named_prunable_parameters(model, scope=normalized_scope):
+            linear = linear_weight_names.get(parameter_name)
+            if linear is None:
+                scores[parameter_name] = parameter.detach().abs()
+                continue
+            module_name, module = linear
+            scaler = activation_scalers.get(module_name)
+            if scaler is None:
+                score = module.weight.detach().abs()
+            else:
+                score = module.weight.detach().abs() * scaler.to(module.weight.device).sqrt().view(1, -1)
+            scores[parameter_name] = score
+        if granularity == "global":
+            return exact_global_score_masks(scores, sparsity=sparsity)
+        linear_scores = {name: score for name, score in scores.items() if name in linear_weight_names and score.ndim == 2}
+        other_scores = {name: score for name, score in scores.items() if name not in linear_scores}
+        masks = exact_rowwise_score_masks(linear_scores, sparsity=sparsity) if linear_scores else {}
+        if other_scores:
+            masks.update(exact_layerwise_score_masks(other_scores, sparsity=sparsity))
+        return masks
+
+    for name, module in linear_modules:
         scaler = activation_scalers.get(name)
         if scaler is None:
             score = module.weight.detach().abs()
         else:
             score = module.weight.detach().abs() * scaler.to(module.weight.device).sqrt().view(1, -1)
         scores[name] = score
-    masks.update(exact_rowwise_score_masks(scores, sparsity=sparsity))
-    return masks
+    return exact_rowwise_score_masks(scores, sparsity=sparsity)
 
 
 def gradient_score_masks(
@@ -809,12 +1105,20 @@ def gradient_score_masks(
     gradient_scores: dict[str, torch.Tensor],
     sparsity: float = 0.5,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
-    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
-    scores = {
-        name: gradient_scores.get(name, torch.zeros_like(module.weight, device="cpu")).to(module.weight.device)
-        for name, module in layers
-    }
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        scores = {
+            name: gradient_scores.get(name, torch.zeros_like(parameter, device="cpu")).to(parameter.device)
+            for name, parameter in named_prunable_parameters(model, scope=normalized_scope)
+        }
+    else:
+        layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+        scores = {
+            name: gradient_scores.get(name, torch.zeros_like(module.weight, device="cpu")).to(module.weight.device)
+            for name, module in layers
+        }
     return exact_global_score_masks(scores, sparsity=sparsity)
 
 
@@ -823,12 +1127,20 @@ def layerwise_gradient_score_masks(
     gradient_scores: dict[str, torch.Tensor],
     sparsity: float = 0.5,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
-    layers = named_prunable_linears(model, include_lm_head=include_lm_head)
-    scores = {
-        name: gradient_scores.get(name, torch.zeros_like(module.weight, device="cpu")).to(module.weight.device)
-        for name, module in layers
-    }
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        scores = {
+            name: gradient_scores.get(name, torch.zeros_like(parameter, device="cpu")).to(parameter.device)
+            for name, parameter in named_prunable_parameters(model, scope=normalized_scope)
+        }
+    else:
+        layers = named_prunable_linears(model, include_lm_head=include_lm_head)
+        scores = {
+            name: gradient_scores.get(name, torch.zeros_like(module.weight, device="cpu")).to(module.weight.device)
+            for name, module in layers
+        }
     return exact_layerwise_score_masks(scores, sparsity=sparsity)
 
 
@@ -838,6 +1150,7 @@ def collect_activation_scalers(
     device: torch.device,
     max_batches: int,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
     sums: dict[str, torch.Tensor] = {}
     counts: dict[str, int] = defaultdict(int)
@@ -852,7 +1165,7 @@ def collect_activation_scalers(
 
         return _hook
 
-    for name, module in named_prunable_linears(model, include_lm_head=include_lm_head):
+    for name, module in _named_linears_for_scope(model, include_lm_head=include_lm_head, scope=scope):
         hooks.append(module.register_forward_hook(hook_for(name)))
 
     model.eval()
@@ -878,12 +1191,21 @@ def collect_gradient_scores(
     device: torch.device,
     max_batches: int,
     include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
 ) -> dict[str, torch.Tensor]:
-    scores = {
-        name: torch.zeros_like(module.weight, device="cpu")
-        for name, module in named_prunable_linears(model, include_lm_head=include_lm_head)
-    }
-    module_lookup = dict(model.named_modules())
+    normalized_scope = normalize_pruning_scope(scope)
+    if normalized_scope == FULL_MODEL_SCOPE:
+        scores = {
+            name: torch.zeros_like(parameter, device="cpu")
+            for name, parameter in named_prunable_parameters(model, scope=normalized_scope)
+        }
+        parameter_lookup = dict(model.named_parameters())
+    else:
+        scores = {
+            name: torch.zeros_like(module.weight, device="cpu")
+            for name, module in named_prunable_linears(model, include_lm_head=include_lm_head)
+        }
+        module_lookup = dict(model.named_modules())
     model.train()
     model.zero_grad(set_to_none=True)
     for batch_index, batch in enumerate(batches):
@@ -893,8 +1215,13 @@ def collect_gradient_scores(
         outputs = model(**batch, use_cache=False)
         outputs.loss.backward()
         for name, score in scores.items():
-            module = module_lookup[name]
-            if module.weight.grad is not None:
-                score.add_((module.weight.detach() * module.weight.grad.detach()).abs().cpu())
+            if normalized_scope == FULL_MODEL_SCOPE:
+                parameter = parameter_lookup[name]
+                if parameter.grad is not None:
+                    score.add_((parameter.detach() * parameter.grad.detach()).abs().cpu())
+            else:
+                module = module_lookup[name]
+                if module.weight.grad is not None:
+                    score.add_((module.weight.detach() * module.weight.grad.detach()).abs().cpu())
         model.zero_grad(set_to_none=True)
     return scores
