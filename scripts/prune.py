@@ -31,6 +31,7 @@ from chatlm_decoder.pruning import (
     mask_sparsity,
     module_filter_report,
     model_parameter_stats,
+    normalize_pruning_scope,
     protected_parameter_snapshot,
     resolve_prunable_sparsity_for_target,
     sparsity_accounting,
@@ -79,7 +80,8 @@ def make_masks(
     prune_config: dict[str, Any],
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     requested_sparsity = float(prune_config.get("sparsity", 0.5))
-    include_lm_head = bool(prune_config.get("include_lm_head", False))
+    scope = normalize_pruning_scope(prune_config.get("scope", "full_model"))
+    include_lm_head = bool(prune_config.get("include_lm_head", scope == "full_model"))
     max_batches = int(prune_config.get("calibration_batches", 128))
     granularity = str(prune_config.get("granularity", prune_config.get("pruning_granularity", "layer"))).lower()
     if granularity in {"per_layer", "layerwise", "per-module", "per_module"}:
@@ -91,20 +93,23 @@ def make_masks(
         target_sparsity=requested_sparsity,
         denominator=str(prune_config.get("sparsity_denominator", "prunable")),
         include_lm_head=include_lm_head,
+        scope=scope,
     )
     sparsity = float(target_resolution["target_prunable_sparsity"])
     prune_config["_target_resolution"] = target_resolution
     prune_config["_resolved_prunable_sparsity"] = sparsity
+    prune_config["_pruning_scope"] = scope
 
     if method == "2of4":
         method_target_note = ""
-        if str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
+        if scope != "full_model" and str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
             requested_resolution = target_resolution
             target_resolution = resolve_prunable_sparsity_for_target(
                 model,
                 target_sparsity=0.5,
                 denominator="prunable",
                 include_lm_head=include_lm_head,
+                scope=scope,
             )
             sparsity = 0.5
             prune_config["_target_resolution"] = target_resolution
@@ -116,8 +121,8 @@ def make_masks(
                 f"The requested whole-model target would have required "
                 f"{float(requested_resolution['target_prunable_sparsity']):.8f} prunable sparsity."
             )
-        masks = two_of_four_masks(model, include_lm_head=include_lm_head)
-        validation = validate_two_of_four_masks(masks, model=model, include_lm_head=include_lm_head)
+        masks = two_of_four_masks(model, include_lm_head=include_lm_head, scope=scope, sparsity=sparsity)
+        validation = validate_two_of_four_masks(masks, model=model, include_lm_head=include_lm_head, scope=scope)
         if not validation["valid"]:
             raise ValueError(
                 "Invalid NVIDIA 2:4 mask: "
@@ -127,21 +132,21 @@ def make_masks(
         return masks, {
             "pruning_granularity": "per_group_of_4_input_weights",
             "score_definition": "in each group of 4 weights, keep top 2 by abs(weight)",
-            "method_variant": "vanilla_nvidia_2of4",
+            "method_variant": "full_model_2of4_plus_magnitude_fallback" if scope == "full_model" else "vanilla_nvidia_2of4",
             "method_target_note": method_target_note,
             "target_resolution": target_resolution,
             "nvidia_2of4_validation": validation,
         }
     if method == "magnitude":
         masks = (
-            global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head)
+            global_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head, scope=scope)
             if granularity == "global"
-            else layerwise_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head)
+            else layerwise_magnitude_masks(model, sparsity=sparsity, include_lm_head=include_lm_head, scope=scope)
         )
         return masks, {
-            "pruning_granularity": "global_prunable_linear_weight" if granularity == "global" else "per_layer_linear_weight",
-            "score_definition": "abs(weight)",
-            "method_variant": "vanilla_global_magnitude" if granularity == "global" else "vanilla_per_layer_magnitude",
+            "pruning_granularity": "global_prunable_parameter" if granularity == "global" else "per_parameter_tensor",
+            "score_definition": "abs(parameter)",
+            "method_variant": f"{scope}_global_magnitude" if granularity == "global" else f"{scope}_layerwise_magnitude",
             "target_resolution": target_resolution,
         }
     if calibration_loader is None:
@@ -153,20 +158,24 @@ def make_masks(
             device=device,
             max_batches=max_batches,
             include_lm_head=include_lm_head,
+            scope=scope,
         )
         masks = wanda_masks(
             model,
             activation_scalers=scalers,
             sparsity=sparsity,
             include_lm_head=include_lm_head,
+            scope=scope,
+            granularity=granularity,
         )
-        report = wanda_activation_report(scalers, masks)
+        linear_mask_names = {f"{name}.weight" if scope == "full_model" else name for name in scalers}
+        report = wanda_activation_report(scalers, {name: mask for name, mask in masks.items() if name in linear_mask_names})
         if not report["all_modules_valid"]:
             raise ValueError(f"Invalid Wanda activation statistics: {report['blocking_issues']}")
         return masks, {
-            "pruning_granularity": "per_output_row_prunable_linear_weight",
-            "score_definition": "abs(weight) * sqrt(mean(input_activation^2))",
-            "method_variant": "vanilla_wanda",
+            "pruning_granularity": "global_prunable_parameter" if granularity == "global" else "per_output_row_linear_plus_per_parameter_tensor",
+            "score_definition": "linear weights use abs(weight) * sqrt(mean(input_activation^2)); non-linear full-model tensors use abs(parameter)",
+            "method_variant": f"{scope}_wanda",
             "target_resolution": target_resolution,
             "wanda_activation_report": report,
         }
@@ -177,8 +186,9 @@ def make_masks(
             device=device,
             max_batches=max_batches,
             include_lm_head=include_lm_head,
+            scope=scope,
         )
-        report = gradient_saliency_report(scores)
+        report = gradient_saliency_report(scores, block_all_zero=scope != "full_model")
         if not report["all_modules_valid"]:
             raise ValueError(f"Invalid gradient saliency statistics: {report['blocking_issues']}")
         masks = (
@@ -187,6 +197,7 @@ def make_masks(
                 gradient_scores=scores,
                 sparsity=sparsity,
                 include_lm_head=include_lm_head,
+                scope=scope,
             )
             if granularity == "global"
             else layerwise_gradient_score_masks(
@@ -194,12 +205,13 @@ def make_masks(
                 gradient_scores=scores,
                 sparsity=sparsity,
                 include_lm_head=include_lm_head,
+                scope=scope,
             )
         )
         return masks, {
-            "pruning_granularity": "global_prunable_linear_weight" if granularity == "global" else "per_layer_linear_weight",
-            "score_definition": "abs(weight * gradient)",
-            "method_variant": "vanilla_global_gradient_saliency" if granularity == "global" else "vanilla_per_layer_gradient_saliency",
+            "pruning_granularity": "global_prunable_parameter" if granularity == "global" else "per_parameter_tensor",
+            "score_definition": "abs(parameter * gradient)",
+            "method_variant": f"{scope}_global_gradient_saliency" if granularity == "global" else f"{scope}_layerwise_gradient_saliency",
             "target_resolution": target_resolution,
             "gradient_saliency_report": report,
         }
@@ -266,11 +278,13 @@ def save_pruned_model(
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
     requested_sparsity = float(prune_config.get("sparsity", 0.5))
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
     target_resolution = prune_config.get("_target_resolution") or resolve_prunable_sparsity_for_target(
         model,
         target_sparsity=requested_sparsity,
         denominator=str(prune_config.get("sparsity_denominator", "prunable")),
-        include_lm_head=bool(prune_config.get("include_lm_head", False)),
+        include_lm_head=bool(prune_config.get("include_lm_head", scope == "full_model")),
+        scope=scope,
     )
     target_prunable_sparsity = float(target_resolution["target_prunable_sparsity"])
     accounting = sparsity_accounting(model, masks, target=target_prunable_sparsity)
@@ -290,6 +304,7 @@ def save_pruned_model(
         "sparsity": mask_sparsity(masks),
         "requested_sparsity": requested_sparsity,
         "target_sparsity": requested_sparsity,
+        "pruning_scope": scope,
         "target_sparsity_denominator": target_resolution["target_sparsity_denominator"],
         "target_resolution": target_resolution,
         "target_prunable_sparsity": target_prunable_sparsity,
@@ -298,7 +313,7 @@ def save_pruned_model(
         "method_target_note": diagnostics.get("method_target_note", ""),
         "achieved_prunable_sparsity": accounting["achieved_prunable_sparsity"],
         "achieved_whole_model_sparsity": accounting["achieved_whole_model_sparsity"],
-        "include_lm_head": bool(prune_config.get("include_lm_head", False)),
+        "include_lm_head": bool(prune_config.get("include_lm_head", scope == "full_model")),
         "recovery_steps": int(prune_config.get("recovery_steps", 0)),
         "checkpoint_evaluated": str(output_dir),
         "checkpoint_reload_validation": reload_validation,
@@ -311,7 +326,14 @@ def save_pruned_model(
             else "Dense checkpoint with zeros applied according to pruning masks."
         ),
     }
-    write_json(output_dir / "module_filter_report.json", module_filter_report(model, include_lm_head=bool(prune_config.get("include_lm_head", False))))
+    write_json(
+        output_dir / "module_filter_report.json",
+        module_filter_report(
+            model,
+            include_lm_head=bool(prune_config.get("include_lm_head", scope == "full_model")),
+            scope=scope,
+        ),
+    )
     write_json(output_dir / "pruning_report.json", metadata)
     write_json(output_dir / "mask_validation.json", {"method": method, "phase": "one_shot_prune", **accounting})
     write_json(output_dir / "checkpoint_reload_validation.json", reload_validation)
@@ -353,11 +375,13 @@ def main() -> None:
 
     calibration_loader = build_calibration_loader(config, tokenizer, prune_config)
     masks, diagnostics = make_masks(method, model, calibration_loader, device, prune_config)
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
     validate_masks_match_prunable_scope(
         model,
         masks,
-        include_lm_head=bool(prune_config.get("include_lm_head", False)),
-        allow_missing=method == "2of4",
+        include_lm_head=bool(prune_config.get("include_lm_head", scope == "full_model")),
+        allow_missing=method == "2of4" and scope != "full_model",
+        scope=scope,
     )
     protected_snapshot = protected_parameter_snapshot(model, masks)
     before_norms = collect_weight_norms(model, masks)

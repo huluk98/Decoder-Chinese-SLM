@@ -12,11 +12,14 @@ prune:
   output_dir: runs/pruned-0p2b
   method: magnitude
   sparsity: 0.5
-  # Vanilla CMC-style decoder pruning: 50% of each selected prunable Linear
-  # layer for magnitude/gradient, row-wise 50% for WANDA, and pure 2:4 groups.
-  sparsity_denominator: prunable
-  granularity: layer
-  include_lm_head: false
+  # Full-model pruning: no embeddings, heads, norms, or biases are protected.
+  # Magnitude/gradient are global over all floating parameters; WANDA uses
+  # activation scores for Linear weights and magnitude fallback elsewhere.
+  # 2:4 keeps exact 2:4 on eligible Linear weights and magnitude-prunes the rest.
+  scope: full_model
+  sparsity_denominator: whole_model
+  granularity: global
+  include_lm_head: true
   calibration_data_path: data/sft/contrastive_train.jsonl
   calibration_batches: 128
   max_length: 2048

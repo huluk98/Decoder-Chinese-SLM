@@ -19,9 +19,10 @@ benchmark:
 
 prune:
   sparsity: 0.5
-  sparsity_denominator: prunable
-  granularity: layer
-  include_lm_head: false
+  scope: full_model
+  sparsity_denominator: whole_model
+  granularity: global
+  include_lm_head: true
   calibration_data_path: /path/to/calibration_or_sft.json
   calibration_batches: 128
   max_length: 256

@@ -19,11 +19,12 @@ benchmark:
 
 prune:
   sparsity: 0.5
-  # Vanilla CMC-style decoder pruning: 50% of each selected prunable Linear
-  # layer for magnitude/gradient, row-wise 50% for WANDA, and pure 2:4 groups.
-  sparsity_denominator: prunable
-  granularity: layer
-  include_lm_head: false
+  # Full-model pruning: no embeddings, heads, norms, or biases are protected.
+  # 2:4 stays exact on eligible Linear weights and magnitude-prunes the rest.
+  scope: full_model
+  sparsity_denominator: whole_model
+  granularity: global
+  include_lm_head: true
   calibration_data_path: /path/to/calibration_or_sft.jsonl
   calibration_batches: 128
   max_length: 128

@@ -24,7 +24,7 @@ This audit checks whether a jump from about 83% to about 96% exact-match accurac
 
 9. Qwen2.5-0.5B-Instruct now has a separate SFT/eval path. It uses `tokenizer.apply_chat_template(..., add_generation_prompt=True)` during both training and evaluation, saves only `output_dir/final/`, and rejects the legacy `<|user|>` / `<|assistant|>` / `<|system|>` / `<|eos|>` formatting tokens. Previous Qwen-Instruct scores from the legacy formatter should be treated as invalid until rerun through `scripts/sft_qwen25_instruct.py` and `scripts/eval_qwen25_instruct.py`.
 
-10. Qwen2.5-0.5B-Instruct pruning now has a separate benchmark path. `scripts/prune_qwen25_instruct.py` uses Qwen chat-template calibration data for Wanda/gradient pruning, and prune+retune calls `scripts/sft_qwen25_instruct.py --pruning-mask` so fixed masks are preserved during Qwen SFT. The pruning benchmark runners also validate 50% mask sparsity and zero masked-weight violations before each benchmark phase.
+10. Qwen2.5-0.5B-Instruct pruning now has a separate benchmark path. `scripts/prune_qwen25_instruct.py` uses Qwen chat-template calibration data for Wanda/gradient pruning, and prune+retune calls `scripts/sft_qwen25_instruct.py --pruning-mask` so fixed masks are preserved during Qwen SFT. The default pruning configs now target full-model 50% sparsity with no protected floating-point parameters, and the benchmark runners validate the configured sparsity denominator plus zero masked-weight violations before each phase.
 
 ## New Diagnostic Outputs
 

@@ -130,9 +130,10 @@ SEED="${SEED:-42}"
 DATA_SEED="${DATA_SEED:-${SEED}}"
 COMPARISON_MODE="${COMPARISON_MODE:-${SCRIPT_COMPARISON_MODE:-whitespace}}"
 SPARSITY="${SPARSITY:-0.5}"
-SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-prunable}"
-GRANULARITY="${GRANULARITY:-layer}"
-INCLUDE_LM_HEAD="${INCLUDE_LM_HEAD:-false}"
+PRUNING_SCOPE="${PRUNING_SCOPE:-full_model}"
+SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
+GRANULARITY="${GRANULARITY:-global}"
+INCLUDE_LM_HEAD="${INCLUDE_LM_HEAD:-true}"
 
 mkdir -p "${OUTPUT_DIR}/generated_configs" "${OUTPUT_DIR}/benchmarks/one_shot" "${OUTPUT_DIR}/one_shot"
 
@@ -189,14 +190,14 @@ write_prune_config() {
   local config_path="$3"
   "${PYTHON_BIN}" - "${TEMPLATE_CONFIG}" "${config_path}" "${method}" "${MODEL_PATH}" "${output_dir}" \
     "${CALIBRATION_FILE}" "${MAX_LENGTH}" "${PRUNE_BATCH_SIZE}" "${CALIBRATION_BATCHES}" \
-    "${SPARSITY}" "${SPARSITY_DENOMINATOR}" "${GRANULARITY}" "${INCLUDE_LM_HEAD}" <<'PY'
+    "${SPARSITY}" "${PRUNING_SCOPE}" "${SPARSITY_DENOMINATOR}" "${GRANULARITY}" "${INCLUDE_LM_HEAD}" <<'PY'
 from pathlib import Path
 import sys
 import yaml
 
 template, config_path, method, model_path, output_dir = sys.argv[1:6]
 calibration_file, max_length, batch_size, calibration_batches = sys.argv[6:10]
-sparsity, denominator, granularity, include_lm_head = sys.argv[10:14]
+sparsity, scope, denominator, granularity, include_lm_head = sys.argv[10:15]
 
 with Path(template).open("r", encoding="utf-8") as handle:
     config = yaml.safe_load(handle) or {}
@@ -216,6 +217,7 @@ config["prune"].update(
         "output_dir": output_dir,
         "calibration_data_path": calibration_file,
         "sparsity": float(sparsity),
+        "scope": scope,
         "sparsity_denominator": denominator,
         "granularity": granularity,
         "include_lm_head": str(include_lm_head).lower() == "true",
@@ -238,6 +240,8 @@ echo "  model:            ${MODEL_PATH}"
 echo "  eval data:        ${DATA_FILE}"
 echo "  calibration data: ${CALIBRATION_FILE}"
 echo "  output:           ${OUTPUT_DIR}"
+echo "  pruning scope:    ${PRUNING_SCOPE}"
+echo "  sparsity target:  ${SPARSITY} ${SPARSITY_DENOMINATOR}"
 echo "  methods:          ${METHOD_LIST[*]}"
 echo "  evaluator:        scripts/eval_prompt_response.py"
 echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"

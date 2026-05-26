@@ -198,6 +198,12 @@ def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
     return clean_masks
 
 
+def infer_pruning_scope_from_masks(pruning_masks: dict[str, torch.Tensor]) -> str:
+    if any(name.endswith((".weight", ".bias")) for name in pruning_masks):
+        return "full_model"
+    return "transformer_linears"
+
+
 def model_parameter_stats(model: torch.nn.Module) -> dict[str, int | float]:
     total_parameters = 0
     nonzero_parameters = 0
@@ -225,11 +231,13 @@ def write_pruning_report(
     mask_stats = mask_parameter_stats(pruning_masks)
     model_stats = model_parameter_stats(model)
     accounting = sparsity_accounting(unwrap_model(model), pruning_masks, target=mask_sparsity(pruning_masks))
+    pruning_scope = infer_pruning_scope_from_masks(pruning_masks)
     metadata = {
         "method": "qwen25_instruct_sft_retune_with_fixed_pruning_masks",
         "phase": "retuned_qwen25_instruct_sft",
         "step": int(step),
         "sparsity": mask_sparsity(pruning_masks),
+        "pruning_scope": pruning_scope,
         "pruning_mask_source": pruning_mask_source or "",
         "mask_preserved_during_sft": True,
         "uses_qwen_apply_chat_template": True,
@@ -294,7 +302,15 @@ def save_final_checkpoint(
     if pruning_masks is not None:
         torch.save({name: mask.cpu() for name, mask in pruning_masks.items()}, checkpoint_dir / "pruning_masks.pt")
         write_pruning_report(checkpoint_dir, model, pruning_masks, step, pruning_mask_source=pruning_mask_source)
-        write_json(checkpoint_dir / "module_filter_report.json", module_filter_report(unwrap_model(model)))
+        pruning_scope = infer_pruning_scope_from_masks(pruning_masks)
+        write_json(
+            checkpoint_dir / "module_filter_report.json",
+            module_filter_report(
+                unwrap_model(model),
+                include_lm_head=pruning_scope == "full_model",
+                scope=pruning_scope,
+            ),
+        )
         write_json(
             checkpoint_dir / "mask_validation.json",
             {
