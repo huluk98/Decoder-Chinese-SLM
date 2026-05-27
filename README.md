@@ -937,11 +937,30 @@ SKIP_REGULAR=1 ./run_sft_and_contrastive_pruning_benchmarks.sh
 DRY_RUN=1 ./run_sft_and_contrastive_pruning_benchmarks.sh
 ```
 
+Wanda-only rerun commands:
+
+```bash
+# Run only Wanda for regular SFT + contrastive SFT.
+./run_wanda_pruning_benchmarks.sh
+
+# Only regular SFT Wanda.
+SKIP_CONTRASTIVE=1 ./run_wanda_pruning_benchmarks.sh
+
+# Only contrastive SFT Wanda.
+SKIP_REGULAR=1 ./run_wanda_pruning_benchmarks.sh
+
+# Preview Wanda-only commands.
+DRY_RUN=1 ./run_wanda_pruning_benchmarks.sh
+```
+
 For one model/config instead of both:
 
 ```bash
 MODE=generic CONFIG_PATH=configs/pruning_benchmark_regular_sft.yaml ./scripts/run_pruning_benchmark_8way.sh
 MODE=generic CONFIG_PATH=configs/pruning_benchmark_contrastive_sft.yaml ./scripts/run_pruning_benchmark_8way.sh
+
+# Or run one method through the generic launcher without editing YAML:
+PRUNING_METHODS=wanda MODE=generic CONFIG_PATH=configs/pruning_benchmark_contrastive_sft.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
 
 For a single method without the full benchmark suite:

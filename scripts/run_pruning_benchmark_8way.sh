@@ -21,6 +21,7 @@ fi
 MODE="${MODE:-auto}"
 DRY_RUN="${DRY_RUN:-0}"
 KEEP_GOING="${KEEP_GOING:-1}"
+METHODS_OVERRIDE="${PRUNING_METHODS:-${METHODS:-}}"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -87,6 +88,13 @@ ARGS=(--config "${CONFIG_PATH}")
 if [[ -n "${EVAL_FILE:-}" ]]; then
   ARGS+=(--eval-file "${EVAL_FILE}")
 fi
+if [[ -n "${METHODS_OVERRIDE}" ]]; then
+  if [[ "${RUN_KIND}" != "generic" ]]; then
+    echo "PRUNING_METHODS/METHODS override is only supported by the generic pruning runner." >&2
+    exit 2
+  fi
+  ARGS+=(--methods "${METHODS_OVERRIDE}")
+fi
 if [[ "${DRY_RUN}" == "1" ]]; then
   ARGS+=(--dry-run)
 fi
@@ -96,21 +104,25 @@ else
   ARGS+=(--stop-on-error)
 fi
 
-echo "Sequential 8-way pruning benchmark"
+echo "Sequential pruning benchmark"
 echo "  config: ${CONFIG_PATH}"
 echo "  mode:   ${RUN_KIND}"
 echo "  runner: ${RUNNER}"
 if [[ -n "${EVAL_FILE:-}" ]]; then
   echo "  eval_file override: ${EVAL_FILE}"
 fi
+if [[ -n "${METHODS_OVERRIDE}" ]]; then
+  echo "  methods override: ${METHODS_OVERRIDE}"
+fi
 echo "  CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 echo "  keep going after method failure: ${KEEP_GOING}"
 echo
 echo "Order inside the runner:"
-echo "  magnitude: one-shot prune -> eval -> retune -> eval"
-echo "  2of4:      one-shot prune -> eval -> retune -> eval"
-echo "  wanda:     one-shot prune -> eval -> retune -> eval"
-echo "  gradient:  one-shot prune -> eval -> retune -> eval"
+METHODS_TEXT="${METHODS_OVERRIDE:-magnitude 2of4 wanda gradient}"
+METHODS_TEXT="${METHODS_TEXT//,/ }"
+for method in ${METHODS_TEXT}; do
+  printf '  %-9s one-shot prune -> eval -> retune -> eval\n' "${method}:"
+done
 echo
 
 "${PYTHON_BIN}" "${RUNNER}" "${ARGS[@]}"

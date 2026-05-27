@@ -209,3 +209,46 @@ def test_whole_model_target_resolves_to_higher_prunable_sparsity() -> None:
 
     assert accounting["achieved_prunable_sparsity"] == pytest.approx(28 / 32)
     assert accounting["achieved_whole_model_sparsity"] == pytest.approx(0.5)
+
+
+def test_full_model_wanda_report_maps_weight_masks_to_activation_modules() -> None:
+    torch = pytest.importorskip("torch")
+    from chatlm_decoder.pruning import linear_masks_for_activation_report, wanda_activation_report
+
+    class TinyWanda(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = torch.nn.Module()
+            self.block.q_proj = torch.nn.Linear(4, 3, bias=False)
+
+    model = TinyWanda()
+    scalers = {"block.q_proj": torch.ones(4)}
+    masks = {"block.q_proj.weight": torch.ones(3, 4, dtype=torch.bool)}
+
+    report_masks = linear_masks_for_activation_report(model, masks, scope="full_model")
+    report = wanda_activation_report(scalers, report_masks)
+
+    assert set(report_masks) == {"block.q_proj"}
+    assert report["all_modules_valid"]
+    assert report["blocking_issues"] == []
+
+
+def test_full_model_wanda_report_still_flags_missing_activation_scaler() -> None:
+    torch = pytest.importorskip("torch")
+    from chatlm_decoder.pruning import linear_masks_for_activation_report, wanda_activation_report
+
+    class TinyWanda(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.block = torch.nn.Module()
+            self.block.q_proj = torch.nn.Linear(4, 3, bias=False)
+
+    model = TinyWanda()
+    masks = {"block.q_proj.weight": torch.ones(3, 4, dtype=torch.bool)}
+
+    report_masks = linear_masks_for_activation_report(model, masks, scope="full_model")
+    report = wanda_activation_report({}, report_masks)
+
+    assert set(report_masks) == {"block.q_proj"}
+    assert not report["all_modules_valid"]
+    assert report["blocking_issues"] == ["block.q_proj: missing activation scaler"]
