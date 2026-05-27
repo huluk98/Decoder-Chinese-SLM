@@ -1,11 +1,13 @@
 model_name_or_path: /path/to/model
-train_file: /path/to/train.json
-eval_file: /path/to/eval.json
+train_file: data/cleaned/619_Luke_fixed_dedup.json
+eval_file: data/cleaned/619_Luke_fixed_dedup.json
+benchmark_file: data/benchmarks/iot_instruction_benchmark_200.json
 output_dir: outputs/sft_0p2b_8gpu
 
 max_seq_length: 128
 max_new_tokens: 64
 benchmark_runs: 5
+top_k_exact_match: 5
 
 num_train_epochs: 3
 learning_rate: 2.0e-5
