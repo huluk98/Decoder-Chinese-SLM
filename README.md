@@ -724,8 +724,8 @@ For the 8x H20 workflow, edit only `configs/contrastive_sft_8gpu.yaml`:
 ```yaml
 sft:
   base_model: /absolute/path/to/base-or-sft-checkpoint
-  data_path: /absolute/path/to/contrastive_train.jsonl
-  anchor_eval_path: data/cleaned/619_Luke_fixed_dedup.json
+  data_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_anchor_positive_negative.json"
+  anchor_eval_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_training_dataset.json"
   benchmark_path: data/benchmarks/iot_instruction_benchmark_200.json
   benchmark_runs: 5
   top_k_exact_match: 5
@@ -740,7 +740,7 @@ Then run:
 CONFIG_PATH=configs/contrastive_sft_8gpu.yaml ./run_contrastive_sft_8gpu.sh
 ```
 
-The script uses all 8 visible GPUs, runs contrastive SFT, then evaluates only the anchor prompt/response rows plus the smart-home benchmark. Positive and negative fields are used only for contrastive training. The final reports land under:
+The script uses all 8 visible GPUs, runs contrastive SFT, then evaluates only the anchor prompt/response rows plus the smart-home benchmark. Positive and negative fields are used only for contrastive training. The anchor eval can intentionally be the prompt/response projection of the contrastive training file, so overlap is logged in `split_audit.json` but does not fail the run. The final reports land under:
 
 ```text
 runs/contrastive-sft-0p2b-8gpu/eval/final_anchor/
