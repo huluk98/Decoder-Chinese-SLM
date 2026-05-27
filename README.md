@@ -753,13 +753,16 @@ Override repeats or top-K once with:
 CONTRASTIVE_BENCHMARK_RUNS=3 CONTRASTIVE_TOP_K_EXACT_MATCH=5 ./run_contrastive_sft_8gpu.sh
 ```
 
-The contrastive objective follows the pictured semantic-alignment idea:
+The contrastive objective follows the compatibility-aware triplet SFT algorithm:
 
 ```text
-loss = generation_loss + lambda * (distance(prompt, positive) + relu(margin - distance(prompt, negative)))
+loss =
+  GenLoss(anchor, response)
+  + GenLoss(positive, response)
+  + lambda * relu(margin + distance(anchor, positive) - distance(anchor, negative))
 ```
 
-The implementation uses mean-pooled last hidden states and cosine distance. `configs/contrastive_sft.yaml` controls `alignment_weight` and `margin`.
+The implementation prompt-formats anchor, positive, and negative before representation scoring, uses mean-pooled last hidden states and cosine distance, and does not train on `negative_response`. `configs/contrastive_sft.yaml` controls `alignment_weight` and `margin`.
 
 For hyperparameter testing, start small. A good first screen is 6 runs:
 
