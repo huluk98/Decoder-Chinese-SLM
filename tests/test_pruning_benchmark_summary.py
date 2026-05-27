@@ -49,6 +49,10 @@ def make_eval_result(parent: Path, checkpoint: Path, summary: dict | None = None
             "exact_match_accuracy_mean": 0.0,
             "correct_examples": 0,
             "total_examples": 4772,
+            "difficulty_easy_total_examples": 70,
+            "difficulty_easy_exact_match_accuracy": 0.2,
+            "difficulty_easy_exact_match_at_top_k_accuracy": 0.3,
+            "difficulty_easy_exact_match_at_5_accuracy": 0.3,
             "mean_response_loss_mean": 5.737810,
             "response_perplexity_mean": 310.383830,
             "avg_generated_tokens_mean": 64.0,
@@ -118,6 +122,8 @@ def test_summary_row_uses_real_pruning_stats(tmp_path: Path) -> None:
     assert row["active_prunable_parameters"] == 75497472
     assert row["real_sparsity"] == pytest.approx(0.38512769683412146)
     assert row["exact_match_accuracy"] == 0.0
+    assert row["difficulty_easy_exact_match_accuracy"] == pytest.approx(0.2)
+    assert row["difficulty_easy_exact_match_at_5_accuracy"] == pytest.approx(0.3)
     assert row["checkpoint_evaluated"] == str(checkpoint)
     assert row["checkpoint_evaluated"] != str(tmp_path)
 

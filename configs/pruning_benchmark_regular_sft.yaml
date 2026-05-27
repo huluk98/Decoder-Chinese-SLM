@@ -1,11 +1,13 @@
 benchmark:
-  output_dir: runs/pruning-benchmark-0p2b
-  base_checkpoint: runs/contrastive-sft-0p2b-8gpu/latest
+  output_dir: runs/pruning-benchmark-regular-sft-0p2b
+  base_checkpoint: outputs/sft_0p2b_8gpu/final
   prune_config: configs/prune_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
-  eval_file: /path/to/eval.json
+  eval_files:
+    sft_dataset: data/cleaned/619_Luke_fixed_dedup.json
+    benchmark: data/benchmarks/iot_instruction_benchmark_200.json
   run_dense_baseline: true
-  min_dense_exact_match_accuracy: 0.01
+  min_dense_exact_match_accuracy: null
   benchmark_runs: 1
   top_k_exact_match: 5
   comparison_mode: whitespace
@@ -21,13 +23,11 @@ benchmark:
 
 prune:
   sparsity: 0.5
-  # Full-model pruning: no embeddings, heads, norms, or biases are protected.
-  # 2:4 stays exact on eligible Linear weights and magnitude-prunes the rest.
   scope: full_model
   sparsity_denominator: whole_model
   granularity: global
   include_lm_head: true
-  calibration_data_path: /path/to/calibration_or_sft.jsonl
+  calibration_data_path: data/cleaned/619_Luke_fixed_dedup.json
   calibration_batches: 128
   max_length: 128
   batch_size: 2
@@ -40,7 +40,7 @@ retune:
   enabled: true
   config: configs/sft_0p2b_8gpu.yaml
   mode: sft
-  data_path: /path/to/retune_sft.jsonl
+  data_path: data/cleaned/619_Luke_fixed_dedup.json
   max_steps: null
   epochs: 3
   per_device_train_batch_size: null

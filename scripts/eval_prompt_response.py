@@ -39,6 +39,8 @@ from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
 ANCHOR_ID_FIELDS = ("anchor_id", "semantic_anchor_id", "group_id", "cluster_id", "intent_id", "anchor")
 RECORD_ID_FIELDS = ("id", "uid", "uuid", "example_id", "sample_id", "index")
+DIFFICULTY_FIELDS = ("difficulty", "hardness", "difficulty_level", "hardness_level", "level")
+DIFFICULTY_ORDER = {"easy": 0, "medium": 1, "hard": 2, "unknown": 99}
 CHAT_MARKERS = (
     "<|user|>",
     "<|assistant|>",
@@ -314,6 +316,30 @@ def first_nonempty_field(record: dict[str, Any], fields: tuple[str, ...]) -> str
 def record_id(record: dict[str, Any], fallback: int) -> str:
     explicit = first_nonempty_field(record, RECORD_ID_FIELDS)
     return explicit or str(fallback)
+
+
+def record_difficulty(record: dict[str, Any]) -> str:
+    for field in DIFFICULTY_FIELDS:
+        value = record.get(field)
+        if value is not None and str(value).strip():
+            return normalize_whitespace_exact(str(value)).lower()
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict):
+        for field in DIFFICULTY_FIELDS:
+            value = metadata.get(field)
+            if value is not None and str(value).strip():
+                return normalize_whitespace_exact(str(value)).lower()
+    return "unknown"
+
+
+def record_task_type(record: dict[str, Any]) -> str:
+    value = record.get("task_type", record.get("task", record.get("category", "")))
+    return normalize_whitespace_exact(str(value)) if value is not None and str(value).strip() else "unknown"
+
+
+def difficulty_sort_key(value: str) -> tuple[int, str]:
+    normalized = str(value).lower()
+    return (DIFFICULTY_ORDER.get(normalized, 50), normalized)
 
 
 def split_record_signature(record: dict[str, Any], index: int) -> dict[str, str]:
@@ -751,6 +777,104 @@ def benchmark_metric_summary(run_summaries: list[dict[str, Any]], key: str) -> d
     }
 
 
+def finite_mean(values: list[float]) -> float | None:
+    finite = [float(value) for value in values if math.isfinite(float(value))]
+    if not finite:
+        return None
+    return sum(finite) / len(finite)
+
+
+def grouped_exact_metrics(results: list[dict[str, Any]], field: str, exact_match_enabled: bool) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in results:
+        key = str(row.get(field) or "unknown")
+        groups.setdefault(key, []).append(row)
+    grouped: dict[str, Any] = {}
+    for key, rows in sorted(groups.items(), key=lambda item: difficulty_sort_key(item[0]) if field == "difficulty" else (50, item[0])):
+        exact_correct = sum(1 for row in rows if bool(row.get("exact_match")))
+        top_k_correct = sum(1 for row in rows if bool(row.get("exact_match_at_top_k")))
+        loss_values = [float(row["loss"]) for row in rows if row.get("loss") is not None]
+        generated_values = [float(row["generated_length"]) for row in rows if row.get("generated_length") is not None]
+        loss = finite_mean(loss_values)
+        generated_tokens = finite_mean(generated_values)
+        grouped[key] = {
+            "total_examples": len(rows),
+            "exact_match_correct": exact_correct if exact_match_enabled else None,
+            "exact_match_accuracy": exact_correct / float(len(rows) or 1) if exact_match_enabled else None,
+            "exact_match_at_top_k_correct": top_k_correct if exact_match_enabled else None,
+            "exact_match_at_top_k_accuracy": top_k_correct / float(len(rows) or 1) if exact_match_enabled else None,
+            "mean_response_loss": loss,
+            "response_perplexity": math.exp(loss) if loss is not None else None,
+            "avg_generated_tokens": generated_tokens if exact_match_enabled else None,
+        }
+    return grouped
+
+
+def flatten_difficulty_metrics(
+    summary: dict[str, Any],
+    by_difficulty: dict[str, Any],
+    exact_match_top_k: int | None,
+) -> None:
+    for difficulty, metrics in by_difficulty.items():
+        slug = safe_slug(str(difficulty).lower(), max_length=32).replace("-", "_")
+        prefix = f"difficulty_{slug}"
+        summary[f"{prefix}_total_examples"] = metrics.get("total_examples")
+        summary[f"{prefix}_exact_match_correct"] = metrics.get("exact_match_correct")
+        summary[f"{prefix}_exact_match_accuracy"] = metrics.get("exact_match_accuracy")
+        summary[f"{prefix}_exact_match_at_top_k_correct"] = metrics.get("exact_match_at_top_k_correct")
+        summary[f"{prefix}_exact_match_at_top_k_accuracy"] = metrics.get("exact_match_at_top_k_accuracy")
+        summary[f"{prefix}_mean_response_loss"] = metrics.get("mean_response_loss")
+        summary[f"{prefix}_response_perplexity"] = metrics.get("response_perplexity")
+        summary[f"{prefix}_avg_generated_tokens"] = metrics.get("avg_generated_tokens")
+        if exact_match_top_k == 5:
+            summary[f"{prefix}_exact_match_at_5_correct"] = metrics.get("exact_match_at_top_k_correct")
+            summary[f"{prefix}_exact_match_at_5_accuracy"] = metrics.get("exact_match_at_top_k_accuracy")
+            summary[f"{prefix}_top5_exact_match_accuracy"] = metrics.get("exact_match_at_top_k_accuracy")
+
+
+def aggregate_grouped_run_summaries(run_summaries: list[dict[str, Any]], group_key: str) -> dict[str, Any]:
+    group_names = sorted(
+        {
+            group_name
+            for summary in run_summaries
+            for group_name in (summary.get(group_key, {}) or {}).keys()
+        },
+        key=difficulty_sort_key if group_key == "by_difficulty" else lambda value: (50, str(value)),
+    )
+    aggregated: dict[str, Any] = {}
+    for group_name in group_names:
+        aggregated[group_name] = {}
+        per_run = [
+            (summary.get(group_key, {}) or {}).get(group_name, {})
+            for summary in run_summaries
+            if (summary.get(group_key, {}) or {}).get(group_name) is not None
+        ]
+        total_values = [float(metrics.get("total_examples")) for metrics in per_run if metrics.get("total_examples") is not None]
+        if total_values:
+            total_mean, total_std = mean_std(total_values)
+            aggregated[group_name]["total_examples_mean"] = total_mean
+            aggregated[group_name]["total_examples_std"] = total_std
+        for metric_name in (
+            "exact_match_accuracy",
+            "exact_match_correct",
+            "exact_match_at_top_k_accuracy",
+            "exact_match_at_top_k_correct",
+            "mean_response_loss",
+            "response_perplexity",
+            "avg_generated_tokens",
+        ):
+            values = [
+                float(metrics[metric_name])
+                for metrics in per_run
+                if metrics.get(metric_name) is not None and math.isfinite(float(metrics[metric_name]))
+            ]
+            mean_value, std_value = mean_std(values)
+            aggregated[group_name][f"{metric_name}_mean"] = mean_value
+            aggregated[group_name][f"{metric_name}_std"] = std_value
+            aggregated[group_name][f"{metric_name}_mean_pm_std"] = f"{mean_value:.6f} ± {std_value:.6f}"
+    return aggregated
+
+
 def resolve_output_dirs(args: argparse.Namespace, dataset_path: Path) -> tuple[Path, Path]:
     output_root = Path(args.output_dir or Path("runs") / "eval" / f"{dataset_path.stem}_prompt_response").expanduser()
     if not args.unique_output_dir:
@@ -780,6 +904,9 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
     with (output_dir / "prediction_debug.csv").open("w", encoding="utf-8", newline="") as handle:
         fieldnames = [
             "id",
+            "difficulty",
+            "hardness",
+            "task_type",
             "prompt",
             "raw_prediction",
             "normalized_prediction",
@@ -797,6 +924,9 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             writer.writerow(
                 {
                     "id": result.get("id", result.get("index")),
+                    "difficulty": result.get("difficulty", ""),
+                    "hardness": result.get("hardness", ""),
+                    "task_type": result.get("task_type", ""),
                     "prompt": result.get("prompt", ""),
                     "raw_prediction": result.get("raw_prediction", ""),
                     "normalized_prediction": result.get("normalized_prediction", ""),
@@ -812,6 +942,9 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
     generation_samples = [
         {
             "raw_input_example": result.get("record", {}),
+            "difficulty": result.get("difficulty", ""),
+            "hardness": result.get("hardness", ""),
+            "task_type": result.get("task_type", ""),
             "formatted_prompt": result.get("prompt", ""),
             "tokenized_prompt_length": result.get("tokenized_prompt_length"),
             "gold_response": result.get("raw_label", result.get("response", "")),
@@ -1238,6 +1371,9 @@ def main() -> None:
                     "benchmark_run": run_index + 1,
                     "id": record_id(batch[offset]["record"], index),
                     "index": index,
+                    "difficulty": record_difficulty(batch[offset]["record"]),
+                    "hardness": record_difficulty(batch[offset]["record"]),
+                    "task_type": record_task_type(batch[offset]["record"]),
                     "record": batch[offset]["record"],
                     "prompt": batch[offset]["prompt_text"],
                     "response": batch[offset]["response_text"],
@@ -1388,6 +1524,9 @@ def main() -> None:
                 raise RuntimeError("Generated predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
         incorrect = len(records) - exact_correct if args.exact_match else None
         top_k_exact_match = int(args.exact_match_top_k)
+        by_difficulty = grouped_exact_metrics(results, "difficulty", exact_match_enabled=bool(args.exact_match))
+        by_task_type = grouped_exact_metrics(results, "task_type", exact_match_enabled=bool(args.exact_match))
+        difficulty_distribution = {level: int(metrics["total_examples"]) for level, metrics in by_difficulty.items()}
         summary = {
             "benchmark_run": run_index + 1,
             "benchmark_runs": benchmark_runs,
@@ -1413,6 +1552,9 @@ def main() -> None:
             "max_new_tokens": int(args.max_new_tokens),
             "top_k_exact_match": int(args.exact_match_top_k) if args.exact_match else None,
             "comparison_mode": args.comparison_mode if args.exact_match else None,
+            "difficulty_distribution": difficulty_distribution,
+            "by_difficulty": by_difficulty,
+            "by_task_type": by_task_type,
             "max_length": max_length,
             "batch_size": batch_size,
             "label_audit": label_audit,
@@ -1425,6 +1567,7 @@ def main() -> None:
             summary["exact_match_at_5_correct"] = summary["exact_match_at_top_k_correct"]
             summary["top5_exact_match_accuracy"] = summary["exact_match_at_top_k_accuracy"]
             summary["top5_exact_match_correct"] = summary["exact_match_at_top_k_correct"]
+        flatten_difficulty_metrics(summary, by_difficulty, top_k_exact_match if args.exact_match else None)
         run_summaries.append(summary)
 
         write_prediction_files(run_output_dir, results, summary)
@@ -1446,6 +1589,22 @@ def main() -> None:
                     f"accuracy={summary['exact_match_at_top_k_accuracy']:.4f} "
                     f"({summary['exact_match_at_top_k_correct']}/{summary['total_examples']})"
                 )
+            if by_difficulty and set(by_difficulty.keys()) != {"unknown"}:
+                difficulty_parts = []
+                for difficulty, metrics in by_difficulty.items():
+                    accuracy = metrics.get("exact_match_accuracy")
+                    top_k_accuracy = metrics.get("exact_match_at_top_k_accuracy")
+                    if accuracy is None:
+                        continue
+                    part = (
+                        f"{difficulty}={float(accuracy):.4f} "
+                        f"({metrics.get('exact_match_correct')}/{metrics.get('total_examples')})"
+                    )
+                    if int(args.exact_match_top_k) > 1 and top_k_accuracy is not None:
+                        part += f", @{int(args.exact_match_top_k)}={float(top_k_accuracy):.4f}"
+                    difficulty_parts.append(part)
+                if difficulty_parts:
+                    print(f"[run {run_index + 1}/{benchmark_runs}] Difficulty accuracy: " + "; ".join(difficulty_parts))
             if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
                 print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
 
@@ -1533,6 +1692,19 @@ def main() -> None:
             benchmark_summary["exact_match_correct_mean"] = correct_mean
             benchmark_summary["exact_match_correct_std"] = correct_std
 
+        benchmark_summary["by_difficulty"] = aggregate_grouped_run_summaries(run_summaries, "by_difficulty")
+        benchmark_summary["by_task_type"] = aggregate_grouped_run_summaries(run_summaries, "by_task_type")
+        difficulty_metric_keys = sorted(
+            {
+                key
+                for summary in run_summaries
+                for key, value in summary.items()
+                if key.startswith("difficulty_") and isinstance(value, (int, float)) and value is not None
+            }
+        )
+        for key in difficulty_metric_keys:
+            benchmark_summary.update(benchmark_metric_summary(run_summaries, key))
+
         write_json(output_dir / "prompt_response_eval_benchmark_summary.json", benchmark_summary)
         write_json(output_dir / "prompt_response_eval_summary.json", benchmark_summary)
         write_json(output_dir / "metrics.json", benchmark_summary)
@@ -1562,6 +1734,20 @@ def main() -> None:
                     f"  exact_match@{int(args.exact_match_top_k)}="
                     f"{benchmark_summary['exact_match_at_top_k_accuracy_mean_pm_std']}"
                 )
+            by_difficulty = benchmark_summary.get("by_difficulty", {})
+            if by_difficulty and set(by_difficulty.keys()) != {"unknown"}:
+                parts = []
+                for difficulty, metrics in by_difficulty.items():
+                    accuracy = metrics.get("exact_match_accuracy_mean_pm_std")
+                    top_k_accuracy = metrics.get("exact_match_at_top_k_accuracy_mean_pm_std")
+                    if not accuracy:
+                        continue
+                    part = f"{difficulty}={accuracy}"
+                    if int(args.exact_match_top_k) > 1 and top_k_accuracy:
+                        part += f", @{int(args.exact_match_top_k)}={top_k_accuracy}"
+                    parts.append(part)
+                if parts:
+                    print("  by_difficulty=" + "; ".join(parts))
         print(f"Wrote benchmark results to {output_dir}")
     else:
         if run_summaries:

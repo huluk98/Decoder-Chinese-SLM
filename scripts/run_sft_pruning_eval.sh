@@ -31,6 +31,7 @@ SCRIPT_CALIBRATION_BATCHES="128"
 SCRIPT_DTYPE="bf16"
 SCRIPT_BENCHMARK_RUNS="1"
 SCRIPT_COMPARISON_MODE="whitespace"
+SCRIPT_TOP_K_EXACT_MATCH="5"
 
 usage() {
   cat >&2 <<'EOF'
@@ -50,6 +51,7 @@ Common overrides:
   OUTPUT_DIR=runs/sft-pruning-eval
   NPROC=8
   BENCHMARK_RUNS=1
+  TOP_K_EXACT_MATCH=5
   COMPARISON_MODE=whitespace
 EOF
 }
@@ -126,6 +128,7 @@ PRUNE_BATCH_SIZE="${PRUNE_BATCH_SIZE:-${SCRIPT_PRUNE_BATCH_SIZE:-2}}"
 CALIBRATION_BATCHES="${CALIBRATION_BATCHES:-${SCRIPT_CALIBRATION_BATCHES:-128}}"
 DTYPE="${DTYPE:-${SCRIPT_DTYPE:-bf16}}"
 BENCHMARK_RUNS="${BENCHMARK_RUNS:-${SCRIPT_BENCHMARK_RUNS:-1}}"
+TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-${SCRIPT_TOP_K_EXACT_MATCH:-5}}"
 SEED="${SEED:-42}"
 DATA_SEED="${DATA_SEED:-${SEED}}"
 COMPARISON_MODE="${COMPARISON_MODE:-${SCRIPT_COMPARISON_MODE:-whitespace}}"
@@ -142,7 +145,7 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
-export MODEL_PATH DATA_FILE CALIBRATION_FILE OUTPUT_DIR
+export MODEL_PATH DATA_FILE CALIBRATION_FILE OUTPUT_DIR TOP_K_EXACT_MATCH
 
 run_eval() {
   local checkpoint="$1"
@@ -164,6 +167,7 @@ run_eval() {
     --batch-size "${EVAL_BATCH_SIZE}"
     --dtype "${DTYPE}"
     --benchmark-runs "${BENCHMARK_RUNS}"
+    --exact-match-top-k "${TOP_K_EXACT_MATCH}"
     --comparison-mode "${COMPARISON_MODE}"
   )
   if [[ -n "${TRAIN_FILE}" ]]; then
@@ -244,6 +248,7 @@ echo "  pruning scope:    ${PRUNING_SCOPE}"
 echo "  sparsity target:  ${SPARSITY} ${SPARSITY_DENOMINATOR}"
 echo "  methods:          ${METHOD_LIST[*]}"
 echo "  evaluator:        scripts/eval_prompt_response.py"
+echo "  exact match @K:   ${TOP_K_EXACT_MATCH}"
 echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
 DENSE_EVAL_DIR="${OUTPUT_DIR}/benchmarks/dense_sft"
@@ -380,6 +385,10 @@ rows.append(
         "checkpoint_evaluated": dense_eval.get("checkpoint", os.environ.get("MODEL_PATH", "")),
         "eval_output_dir": dense_eval.get("_resolved_eval_dir", ""),
         "exact_match_accuracy": metric(dense_eval, "exact_match_accuracy"),
+        "exact_match_at_top_k_accuracy": metric(dense_eval, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_correct": metric_count(dense_eval, "exact_match_at_top_k_correct"),
+        "exact_match_at_5_accuracy": metric(dense_eval, "exact_match_at_5_accuracy"),
+        "top5_exact_match_accuracy": metric(dense_eval, "top5_exact_match_accuracy"),
         "correct_examples": metric_count(dense_eval, "correct_examples", "exact_match_correct"),
         "total_examples": metric_count(dense_eval, "total_examples"),
         "mean_response_loss": metric(dense_eval, "mean_response_loss"),
@@ -425,6 +434,10 @@ for method in methods:
             "checkpoint_evaluated": eval_summary.get("checkpoint", str(checkpoint)),
             "eval_output_dir": eval_summary.get("_resolved_eval_dir", ""),
             "exact_match_accuracy": exact_match_accuracy,
+            "exact_match_at_top_k_accuracy": metric(eval_summary, "exact_match_at_top_k_accuracy"),
+            "exact_match_at_top_k_correct": metric_count(eval_summary, "exact_match_at_top_k_correct"),
+            "exact_match_at_5_accuracy": metric(eval_summary, "exact_match_at_5_accuracy"),
+            "top5_exact_match_accuracy": metric(eval_summary, "top5_exact_match_accuracy"),
             "correct_examples": metric_count(eval_summary, "correct_examples", "exact_match_correct"),
             "total_examples": metric_count(eval_summary, "total_examples"),
             "mean_response_loss": metric(eval_summary, "mean_response_loss"),
@@ -456,10 +469,12 @@ with csv_path.open("w", encoding="utf-8", newline="") as handle:
 json_path.write_text(json.dumps({"results": rows}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 print("\nSFT pruning eval summary")
+top_k_label = f"exact@{os.environ.get('TOP_K_EXACT_MATCH', '5')}"
 print(
     "method".ljust(12),
     "phase".ljust(10),
     "accuracy".rjust(10),
+    top_k_label.rjust(10),
     "correct/total".rjust(15),
     "pruned/total prunable".rjust(24),
     "prunable_sparsity".rjust(18),
@@ -474,6 +489,7 @@ for row in rows:
         str(row["method"]).ljust(12),
         str(row.get("phase", "")).ljust(10),
         fmt(row.get("exact_match_accuracy")).rjust(10),
+        fmt(row.get("exact_match_at_top_k_accuracy")).rjust(10),
         f"{correct}/{total}".rjust(15),
         f"{pruned}/{total_prunable}".rjust(24),
         fmt(row.get("achieved_prunable_sparsity")).rjust(18),

@@ -7,6 +7,7 @@ import copy
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 METHODS = ("magnitude", "2of4", "wanda", "gradient")
+DIFFICULTY_LEVELS = ("easy", "medium", "hard")
 EVAL_SUMMARY_FILENAMES = (
     "prompt_response_eval_benchmark_summary.json",
     "prompt_response_eval_summary.json",
@@ -42,7 +44,38 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "target_sparsity_denominator",
     "achieved_prunable_sparsity",
     "method_target_note",
+    "eval_name",
+    "eval_file",
+    "exact_match_accuracy_mean",
     "exact_match_accuracy",
+    "exact_match_accuracy_std",
+    "exact_match_at_top_k_accuracy_mean",
+    "exact_match_at_top_k_accuracy",
+    "exact_match_at_top_k_accuracy_std",
+    "exact_match_at_top_k_correct",
+    "exact_match_at_5_accuracy",
+    "top5_exact_match_accuracy",
+    "difficulty_easy_total_examples",
+    "difficulty_easy_exact_match_correct",
+    "difficulty_easy_exact_match_accuracy",
+    "difficulty_easy_exact_match_at_top_k_correct",
+    "difficulty_easy_exact_match_at_top_k_accuracy",
+    "difficulty_easy_exact_match_at_5_correct",
+    "difficulty_easy_exact_match_at_5_accuracy",
+    "difficulty_medium_total_examples",
+    "difficulty_medium_exact_match_correct",
+    "difficulty_medium_exact_match_accuracy",
+    "difficulty_medium_exact_match_at_top_k_correct",
+    "difficulty_medium_exact_match_at_top_k_accuracy",
+    "difficulty_medium_exact_match_at_5_correct",
+    "difficulty_medium_exact_match_at_5_accuracy",
+    "difficulty_hard_total_examples",
+    "difficulty_hard_exact_match_correct",
+    "difficulty_hard_exact_match_accuracy",
+    "difficulty_hard_exact_match_at_top_k_correct",
+    "difficulty_hard_exact_match_at_top_k_accuracy",
+    "difficulty_hard_exact_match_at_5_correct",
+    "difficulty_hard_exact_match_at_5_accuracy",
     "correct_examples",
     "total_examples",
     "mean_response_loss",
@@ -96,6 +129,64 @@ def display_path(path: Path) -> str:
         return str(path.resolve())
     except OSError:
         return str(path)
+
+
+def slugify_name(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip()).strip("-")
+    return slug or "eval"
+
+
+def eval_specs_from_benchmark(benchmark: dict[str, Any], override: str | None) -> list[dict[str, Any]]:
+    if override:
+        return [{"name": "eval", "slug": "eval", "path": as_path(override)}]
+    eval_files = benchmark.get("eval_files")
+    specs: list[dict[str, Any]] = []
+    if isinstance(eval_files, dict):
+        for name, path in eval_files.items():
+            specs.append({"name": str(name), "slug": slugify_name(str(name)), "path": as_path(path)})
+    elif isinstance(eval_files, list):
+        for index, item in enumerate(eval_files, start=1):
+            if isinstance(item, dict):
+                path = item.get("path", item.get("file", item.get("eval_file")))
+                if not path:
+                    raise ValueError(f"benchmark.eval_files item {index} is missing path/file/eval_file.")
+                name = str(item.get("name", Path(str(path)).stem or f"eval-{index}"))
+            else:
+                path = item
+                name = Path(str(path)).stem or f"eval-{index}"
+            specs.append({"name": name, "slug": slugify_name(name), "path": as_path(path)})
+    else:
+        eval_file = benchmark.get("eval_file")
+        if eval_file:
+            specs.append({"name": "eval", "slug": "eval", "path": as_path(eval_file)})
+    if not specs:
+        raise ValueError("Set benchmark.eval_file or benchmark.eval_files.")
+    seen_slugs: dict[str, int] = {}
+    for spec in specs:
+        slug = str(spec["slug"])
+        seen_slugs[slug] = seen_slugs.get(slug, 0) + 1
+        if seen_slugs[slug] > 1:
+            spec["slug"] = f"{slug}-{seen_slugs[slug]}"
+    return specs
+
+
+def eval_dir_for_phase(
+    output_dir: Path,
+    phase: str,
+    method: str | None,
+    eval_spec: dict[str, Any],
+    multi_eval: bool,
+) -> Path:
+    eval_slug = str(eval_spec["slug"])
+    if phase == "dense_baseline":
+        base = output_dir / "benchmarks" / "dense_baseline"
+    elif phase == "one_shot" and method is not None:
+        base = output_dir / "benchmarks" / "one_shot" / method_slug(method)
+    elif phase == "retuned" and method is not None:
+        base = output_dir / "benchmarks" / "retuned" / method_slug(method)
+    else:
+        base = output_dir
+    return base / eval_slug if multi_eval else base
 
 
 def latest_checkpoint(output_dir: Path) -> Path:
@@ -231,7 +322,7 @@ def validate_pruning_report(
 def validate_benchmark_paths(
     methods: list[str],
     base_checkpoint: Path,
-    eval_file: Path,
+    eval_specs: list[dict[str, Any]],
     prune_config_path: Path,
     config: dict[str, Any],
     retune: dict[str, Any],
@@ -244,8 +335,10 @@ def validate_benchmark_paths(
             f"benchmark.base_checkpoint does not exist as a local path: {base_checkpoint}. "
             "If this is not a Hugging Face model id, fix the YAML before launching."
         )
-    if not eval_file.exists():
-        problems.append(f"benchmark.eval_file does not exist: {eval_file}")
+    for eval_spec in eval_specs:
+        eval_file = Path(eval_spec["path"])
+        if not eval_file.exists():
+            problems.append(f"benchmark eval file {eval_spec['name']!r} does not exist: {eval_file}")
     if not prune_config_path.exists():
         problems.append(f"benchmark.prune_config does not exist: {prune_config_path}")
     calibration_data_path = config.get("prune", {}).get("calibration_data_path")
@@ -273,7 +366,7 @@ def print_plan(
     methods: list[str],
     output_dir: Path,
     base_checkpoint: Path,
-    eval_file: Path,
+    eval_specs: list[dict[str, Any]],
     prune_config_path: Path,
     config: dict[str, Any],
     benchmark: dict[str, Any],
@@ -284,13 +377,16 @@ def print_plan(
     print(f"  methods: {', '.join(methods)}", flush=True)
     print(f"  output_dir: {display_path(output_dir)}", flush=True)
     print(f"  base_checkpoint: {display_path(base_checkpoint)}", flush=True)
-    print(f"  eval_file: {display_path(eval_file)}", flush=True)
+    print("  eval_files:", flush=True)
+    for eval_spec in eval_specs:
+        print(f"    {eval_spec['name']}: {display_path(Path(eval_spec['path']))}", flush=True)
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
     print(f"  pruning_scope: {config.get('prune', {}).get('scope', 'full_model')}", flush=True)
     print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
+    print(f"  exact_match_top_k: {benchmark.get('top_k_exact_match', 5)}", flush=True)
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)
     print(f"  retune.data_path: {retune.get('data_path')}", flush=True)
     print(f"  retune.max_steps: {retune.get('max_steps')}", flush=True)
@@ -399,20 +495,33 @@ def run_eval(
             str(benchmark.get("dtype", "bf16")),
             "--benchmark-runs",
             str(int(benchmark.get("benchmark_runs", 1))),
+            "--exact-match-top-k",
+            str(int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5)))),
+            "--comparison-mode",
+            str(benchmark.get("comparison_mode", "whitespace")),
         ],
         env=env,
         dry_run=dry_run,
     )
 
 
-def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]) -> dict[str, Any]:
+def dense_baseline_row(
+    checkpoint: Path,
+    eval_dir: Path,
+    summary: dict[str, Any],
+    eval_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     result_eval_dir = resolve_eval_result_dir(eval_dir)
+    eval_name = str(eval_spec.get("name")) if eval_spec else "eval"
+    eval_file = str(eval_spec.get("path")) if eval_spec else ""
     return {
         "method": "dense_sft_baseline",
         "phase": "dense_baseline",
         "status": "ok",
         "checkpoint": str(checkpoint),
         "checkpoint_evaluated": str(checkpoint),
+        "eval_name": eval_name,
+        "eval_file": eval_file,
         "eval_dir": str(result_eval_dir),
         "eval_output_dir": str(result_eval_dir),
         "pruning_report": "",
@@ -427,6 +536,13 @@ def dense_baseline_row(checkpoint: Path, eval_dir: Path, summary: dict[str, Any]
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "exact_match_at_top_k_accuracy_mean": metric(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_accuracy": metric(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_accuracy_std": metric_std(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_correct": metric_count(summary, "exact_match_at_top_k_correct"),
+        "exact_match_at_5_accuracy": metric(summary, "exact_match_at_5_accuracy"),
+        "top5_exact_match_accuracy": metric(summary, "top5_exact_match_accuracy"),
+        **difficulty_summary_metrics(summary),
         "correct_examples": metric_count(summary, "correct_examples", "exact_match_correct"),
         "total_examples": metric_count(summary, "total_examples"),
         "delta_vs_dense_exact_match": 0.0,
@@ -623,6 +739,21 @@ def metric_count(summary: dict[str, Any], *names: str) -> Any:
     return None
 
 
+def difficulty_summary_metrics(summary: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for level in DIFFICULTY_LEVELS:
+        prefix = f"difficulty_{level}"
+        metrics[f"{prefix}_total_examples"] = metric_count(summary, f"{prefix}_total_examples")
+        metrics[f"{prefix}_exact_match_correct"] = metric_count(summary, f"{prefix}_exact_match_correct")
+        metrics[f"{prefix}_exact_match_accuracy"] = metric(summary, f"{prefix}_exact_match_accuracy")
+        metrics[f"{prefix}_exact_match_at_top_k_correct"] = metric_count(summary, f"{prefix}_exact_match_at_top_k_correct")
+        metrics[f"{prefix}_exact_match_at_top_k_accuracy"] = metric(summary, f"{prefix}_exact_match_at_top_k_accuracy")
+        metrics[f"{prefix}_exact_match_at_5_correct"] = metric_count(summary, f"{prefix}_exact_match_at_5_correct")
+        metrics[f"{prefix}_exact_match_at_5_accuracy"] = metric(summary, f"{prefix}_exact_match_at_5_accuracy")
+        metrics[f"{prefix}_top5_exact_match_accuracy"] = metric(summary, f"{prefix}_top5_exact_match_accuracy")
+    return metrics
+
+
 def pruning_stat(report: dict[str, Any], *names: str) -> Any:
     reload_validation = report.get("checkpoint_reload_validation")
     sources = [reload_validation, report] if isinstance(reload_validation, dict) else [report]
@@ -676,12 +807,15 @@ def summary_row(
     error: str = "",
     pruning_report_path: Path | None = None,
     dense_exact_match: float | None = None,
+    eval_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result_eval_dir = resolve_eval_result_dir(eval_dir)
     summary = read_eval_summary(eval_dir) if status == "ok" else {}
     run_config = read_eval_run_config(eval_dir)
     pruning_stats = read_pruning_stats(pruning_report_path)
     exact_match = metric(summary, "exact_match_accuracy")
+    eval_name = str(eval_spec.get("name")) if eval_spec else "eval"
+    eval_file = str(eval_spec.get("path")) if eval_spec else ""
     if status == "ok" and exact_match is None:
         status = "failed"
         detail = f"Eval summary is missing exact_match_accuracy: {result_eval_dir}"
@@ -696,6 +830,8 @@ def summary_row(
         "status": status,
         "checkpoint": str(checkpoint),
         "checkpoint_evaluated": str(checkpoint_evaluated),
+        "eval_name": eval_name,
+        "eval_file": eval_file,
         "eval_dir": str(result_eval_dir),
         "eval_output_dir": str(result_eval_dir),
         "pruning_report": str(pruning_report_path or ""),
@@ -703,6 +839,13 @@ def summary_row(
         "exact_match_accuracy_mean": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy": metric(summary, "exact_match_accuracy"),
         "exact_match_accuracy_std": metric_std(summary, "exact_match_accuracy"),
+        "exact_match_at_top_k_accuracy_mean": metric(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_accuracy": metric(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_accuracy_std": metric_std(summary, "exact_match_at_top_k_accuracy"),
+        "exact_match_at_top_k_correct": metric_count(summary, "exact_match_at_top_k_correct"),
+        "exact_match_at_5_accuracy": metric(summary, "exact_match_at_5_accuracy"),
+        "top5_exact_match_accuracy": metric(summary, "top5_exact_match_accuracy"),
+        **difficulty_summary_metrics(summary),
         "correct_examples": metric_count(summary, "correct_examples", "exact_match_correct"),
         "total_examples": metric_count(summary, "total_examples"),
         "delta_vs_dense_exact_match": delta,
@@ -737,6 +880,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "status",
         "checkpoint",
         "checkpoint_evaluated",
+        "eval_name",
+        "eval_file",
         "eval_dir",
         "eval_output_dir",
         "pruning_report",
@@ -770,6 +915,36 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "exact_match_accuracy_mean",
         "exact_match_accuracy",
         "exact_match_accuracy_std",
+        "exact_match_at_top_k_accuracy_mean",
+        "exact_match_at_top_k_accuracy",
+        "exact_match_at_top_k_accuracy_std",
+        "exact_match_at_top_k_correct",
+        "exact_match_at_5_accuracy",
+        "top5_exact_match_accuracy",
+        "difficulty_easy_total_examples",
+        "difficulty_easy_exact_match_correct",
+        "difficulty_easy_exact_match_accuracy",
+        "difficulty_easy_exact_match_at_top_k_correct",
+        "difficulty_easy_exact_match_at_top_k_accuracy",
+        "difficulty_easy_exact_match_at_5_correct",
+        "difficulty_easy_exact_match_at_5_accuracy",
+        "difficulty_easy_top5_exact_match_accuracy",
+        "difficulty_medium_total_examples",
+        "difficulty_medium_exact_match_correct",
+        "difficulty_medium_exact_match_accuracy",
+        "difficulty_medium_exact_match_at_top_k_correct",
+        "difficulty_medium_exact_match_at_top_k_accuracy",
+        "difficulty_medium_exact_match_at_5_correct",
+        "difficulty_medium_exact_match_at_5_accuracy",
+        "difficulty_medium_top5_exact_match_accuracy",
+        "difficulty_hard_total_examples",
+        "difficulty_hard_exact_match_correct",
+        "difficulty_hard_exact_match_accuracy",
+        "difficulty_hard_exact_match_at_top_k_correct",
+        "difficulty_hard_exact_match_at_top_k_accuracy",
+        "difficulty_hard_exact_match_at_5_correct",
+        "difficulty_hard_exact_match_at_5_accuracy",
+        "difficulty_hard_top5_exact_match_accuracy",
         "correct_examples",
         "total_examples",
         "delta_vs_dense_exact_match",
@@ -809,14 +984,20 @@ def latest_checkpoint_or_default(output_dir: Path) -> Path:
         return output_dir / "final"
 
 
-def default_phase_paths(output_dir: Path, method: str, phase: str) -> tuple[Path, Path, Path | None]:
+def default_phase_paths(
+    output_dir: Path,
+    method: str,
+    phase: str,
+    eval_spec: dict[str, Any] | None = None,
+    multi_eval: bool = False,
+) -> tuple[Path, Path, Path | None]:
     slug = method_slug(method)
     if phase == "one_shot":
         checkpoint = output_dir / "one_shot" / slug
-        eval_dir = output_dir / "benchmarks" / "one_shot" / slug
+        eval_dir = eval_dir_for_phase(output_dir, phase, method, eval_spec or {"slug": "eval"}, multi_eval)
     elif phase == "retuned":
         checkpoint = latest_checkpoint_or_default(output_dir / "retuned" / slug)
-        eval_dir = output_dir / "benchmarks" / "retuned" / slug
+        eval_dir = eval_dir_for_phase(output_dir, phase, method, eval_spec or {"slug": "eval"}, multi_eval)
     else:
         checkpoint = output_dir
         eval_dir = output_dir
@@ -829,33 +1010,47 @@ def ensure_expected_pruning_rows(
     methods: list[str],
     output_dir: Path,
     retune_enabled: bool,
-    dense_exact_match: float | None,
+    dense_exact_matches: dict[str, float | None] | float | None = None,
+    eval_specs: list[dict[str, Any]] | None = None,
+    multi_eval: bool = False,
+    dense_exact_match: float | None = None,
 ) -> None:
+    if dense_exact_matches is None:
+        dense_exact_matches = dense_exact_match
+    eval_specs = eval_specs or [{"name": "eval", "slug": "eval", "path": ""}]
     expected_phases = ["one_shot"]
     if retune_enabled:
         expected_phases.append("retuned")
     present = {
-        (str(row.get("method")), str(row.get("phase")))
+        (str(row.get("method")), str(row.get("phase")), str(row.get("eval_name", "eval")))
         for row in rows
         if row.get("phase") in PRUNING_ROW_PHASES
     }
     for method in methods:
         for phase in expected_phases:
-            if (method, phase) in present:
-                continue
-            checkpoint, eval_dir, report_path = default_phase_paths(output_dir, method, phase)
-            rows.append(
-                summary_row(
-                    method=method,
-                    phase=phase,
-                    checkpoint=checkpoint,
-                    eval_dir=eval_dir,
-                    status="missing",
-                    error=f"{phase} row was expected by the pruning benchmark plan but no completed result was recorded.",
-                    pruning_report_path=report_path,
-                    dense_exact_match=dense_exact_match,
+            for eval_spec in eval_specs:
+                eval_name = str(eval_spec.get("name", "eval"))
+                if (method, phase, eval_name) in present:
+                    continue
+                checkpoint, eval_dir, report_path = default_phase_paths(output_dir, method, phase, eval_spec, multi_eval)
+                dense_exact_match = (
+                    dense_exact_matches.get(eval_name)
+                    if isinstance(dense_exact_matches, dict)
+                    else dense_exact_matches
                 )
-            )
+                rows.append(
+                    summary_row(
+                        method=method,
+                        phase=phase,
+                        checkpoint=checkpoint,
+                        eval_dir=eval_dir,
+                        status="missing",
+                        error=f"{phase} row was expected by the pruning benchmark plan but no completed result was recorded.",
+                        pruning_report_path=report_path,
+                        dense_exact_match=dense_exact_match,
+                        eval_spec=eval_spec,
+                    )
+                )
 
 
 def main() -> None:
@@ -881,13 +1076,11 @@ def main() -> None:
     output_dir = as_path(benchmark.get("output_dir", "runs/pruning-benchmark-0p2b"))
     generated_config_dir = output_dir / "generated_configs"
     base_checkpoint_value = benchmark.get("base_checkpoint", config.get("prune", {}).get("base_model"))
-    eval_file_value = args.eval_file or benchmark.get("eval_file")
     if not base_checkpoint_value:
         raise ValueError("Set benchmark.base_checkpoint.")
-    if not eval_file_value:
-        raise ValueError("Set benchmark.eval_file.")
     base_checkpoint = as_path(base_checkpoint_value)
-    eval_file = as_path(eval_file_value)
+    eval_specs = eval_specs_from_benchmark(benchmark, args.eval_file)
+    multi_eval = len(eval_specs) > 1
 
     prune_config_path = as_path(benchmark.get("prune_config", "configs/prune_50.yaml"))
     base_prune_config = load_yaml(prune_config_path)
@@ -896,58 +1089,70 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     output_dir.mkdir(parents=True, exist_ok=True)
     validate_gpu_launch_config(benchmark, strict=not args.dry_run)
-    validate_benchmark_paths(methods, base_checkpoint, eval_file, prune_config_path, config, retune, strict=not args.dry_run)
+    validate_benchmark_paths(methods, base_checkpoint, eval_specs, prune_config_path, config, retune, strict=not args.dry_run)
     print_plan(
         methods=methods,
         output_dir=output_dir,
         base_checkpoint=base_checkpoint,
-        eval_file=eval_file,
+        eval_specs=eval_specs,
         prune_config_path=prune_config_path,
         config=config,
         benchmark=benchmark,
         retune=retune,
         continue_on_error=continue_on_error,
     )
-    dense_exact_match: float | None = None
-    dense_eval_dir = output_dir / "benchmarks" / "dense_baseline"
+    dense_exact_matches: dict[str, float | None] = {}
+    dense_eval_dirs: dict[str, Path] = {}
     if bool(benchmark.get("run_dense_baseline", True)):
-        run_eval(base_checkpoint, eval_file, dense_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-        if not args.dry_run:
-            dense_summary = read_eval_summary(dense_eval_dir)
-            if not dense_summary:
-                raise FileNotFoundError(f"Dense baseline evaluation summary missing: {dense_eval_dir}")
-            dense_exact_value = metric(dense_summary, "exact_match_accuracy")
-            if dense_exact_value is None:
-                raise ValueError(f"Dense baseline exact-match accuracy missing: {dense_eval_dir}")
-            dense_exact_match = float(dense_exact_value)
-            min_dense = benchmark.get("min_dense_exact_match_accuracy", 0.01)
-            if min_dense is not None and dense_exact_match < float(min_dense):
-                raise RuntimeError(
-                    f"Dense baseline exact-match accuracy {dense_exact_match:.6f} is below "
-                    f"benchmark.min_dense_exact_match_accuracy={float(min_dense):.6f}; debug eval before pruning."
+        for eval_spec in eval_specs:
+            eval_name = str(eval_spec["name"])
+            eval_file = Path(eval_spec["path"])
+            dense_eval_dir = eval_dir_for_phase(output_dir, "dense_baseline", None, eval_spec, multi_eval)
+            dense_eval_dirs[eval_name] = dense_eval_dir
+            run_eval(base_checkpoint, eval_file, dense_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+            if not args.dry_run:
+                dense_summary = read_eval_summary(dense_eval_dir)
+                if not dense_summary:
+                    raise FileNotFoundError(f"Dense baseline evaluation summary missing: {dense_eval_dir}")
+                dense_exact_value = metric(dense_summary, "exact_match_accuracy")
+                if dense_exact_value is None:
+                    raise ValueError(f"Dense baseline exact-match accuracy missing: {dense_eval_dir}")
+                dense_exact_matches[eval_name] = float(dense_exact_value)
+                min_dense = benchmark.get("min_dense_exact_match_accuracy", 0.01)
+                if min_dense is not None and dense_exact_matches[eval_name] < float(min_dense):
+                    raise RuntimeError(
+                        f"Dense baseline exact-match accuracy for {eval_name} "
+                        f"{dense_exact_matches[eval_name]:.6f} is below "
+                        f"benchmark.min_dense_exact_match_accuracy={float(min_dense):.6f}; debug eval before pruning."
+                    )
+                dense_payload = {
+                    "checkpoint_path": str(base_checkpoint),
+                    "tokenizer_path": str(base_checkpoint),
+                    "dataset_path": str(eval_file),
+                    "benchmark_split": str(eval_file),
+                    "eval_name": eval_name,
+                    "generation_config": {
+                        "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
+                        "num_beams": 1,
+                        "temperature": 0,
+                        "do_sample": False,
+                        "exact_match_top_k": int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5))),
+                    },
+                    "exact_match_normalization": {"comparison_mode": benchmark.get("comparison_mode", "whitespace")},
+                    **dense_summary,
+                }
+                dense_payload_path = output_dir / (
+                    "dense_baseline_eval.json" if not multi_eval else f"dense_baseline_eval_{eval_spec['slug']}.json"
                 )
-            dense_payload = {
-                "checkpoint_path": str(base_checkpoint),
-                "tokenizer_path": str(base_checkpoint),
-                "dataset_path": str(eval_file),
-                "benchmark_split": str(eval_file),
-                "generation_config": {
-                    "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
-                    "num_beams": 1,
-                    "temperature": 0,
-                    "do_sample": False,
-                },
-                "exact_match_normalization": {"comparison_mode": "whitespace"},
-                **dense_summary,
-            }
-            write_json(output_dir / "dense_baseline_eval.json", dense_payload)
-            rows.append(
-                dense_baseline_row(
-                    base_checkpoint,
-                    dense_eval_dir,
-                    dense_summary,
+                write_json(dense_payload_path, dense_payload)
+                rows.append(
+                    dense_baseline_row(
+                        base_checkpoint,
+                        dense_eval_dir,
+                        dense_summary,
+                        eval_spec=eval_spec,
+                    )
                 )
-            )
     elif not args.dry_run:
         raise RuntimeError("Dense baseline evaluation is required for pruning benchmark comparison.")
 
@@ -955,11 +1160,10 @@ def main() -> None:
         print(f"\n=== Running pruning method: {method} ===", flush=True)
         slug = method_slug(method)
         one_shot_dir = output_dir / "one_shot" / slug
-        one_shot_eval_dir = output_dir / "benchmarks" / "one_shot" / slug
         retuned_dir = output_dir / "retuned" / slug
-        retuned_eval_dir = output_dir / "benchmarks" / "retuned" / slug
         one_shot_completed = False
         if bool(one_shot.get("enabled", True)):
+            completed_one_shot_eval_names: set[str] = set()
             try:
                 prune_config = generated_prune_config(
                     base_config=base_prune_config,
@@ -984,68 +1188,89 @@ def main() -> None:
                     )
                     if one_shot_dir.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as one-shot pruned checkpoint.")
-                run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-                if not args.dry_run:
-                    validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
-                    validate_eval_protocol_matches_dense(dense_eval_dir, one_shot_eval_dir)
-                rows.append(
-                    summary_row(
-                        method,
-                        "one_shot",
-                        one_shot_dir,
-                        one_shot_eval_dir,
-                        "ok",
-                        pruning_report_path=one_shot_dir / "pruning_report.json",
-                        dense_exact_match=dense_exact_match,
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec["name"])
+                    eval_file = Path(eval_spec["path"])
+                    one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
+                    run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                    if not args.dry_run:
+                        validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
+                        validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], one_shot_eval_dir)
+                    rows.append(
+                        summary_row(
+                            method,
+                            "one_shot",
+                            one_shot_dir,
+                            one_shot_eval_dir,
+                            "ok",
+                            pruning_report_path=one_shot_dir / "pruning_report.json",
+                            dense_exact_match=dense_exact_matches.get(eval_name),
+                            eval_spec=eval_spec,
+                        )
                     )
-                )
+                    completed_one_shot_eval_names.add(eval_name)
                 one_shot_completed = True
             except Exception as exc:
-                rows.append(
-                    summary_row(
-                        method,
-                        "one_shot",
-                        one_shot_dir,
-                        one_shot_eval_dir,
-                        "failed",
-                        error=str(exc),
-                        pruning_report_path=one_shot_dir / "pruning_report.json",
-                        dense_exact_match=dense_exact_match,
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec.get("name", "eval"))
+                    if eval_name in completed_one_shot_eval_names:
+                        continue
+                    one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
+                    rows.append(
+                        summary_row(
+                            method,
+                            "one_shot",
+                            one_shot_dir,
+                            one_shot_eval_dir,
+                            "failed",
+                            error=str(exc),
+                            pruning_report_path=one_shot_dir / "pruning_report.json",
+                            dense_exact_match=dense_exact_matches.get(eval_name),
+                            eval_spec=eval_spec,
+                        )
                     )
-                )
                 write_summary(output_dir, rows)
                 if not continue_on_error:
                     raise
         else:
-            rows.append(
-                summary_row(
-                    method,
-                    "one_shot",
-                    one_shot_dir,
-                    one_shot_eval_dir,
-                    "missing",
-                    error="one_shot.enabled is false; one-shot pruning result was not produced.",
-                    pruning_report_path=one_shot_dir / "pruning_report.json",
-                    dense_exact_match=dense_exact_match,
-                )
-            )
-
-        if bool(retune.get("enabled", True)):
-            if not one_shot_completed:
+            for eval_spec in eval_specs:
+                eval_name = str(eval_spec.get("name", "eval"))
+                one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
                 rows.append(
                     summary_row(
                         method,
-                        "retuned",
-                        retuned_dir / "final",
-                        retuned_eval_dir,
+                        "one_shot",
+                        one_shot_dir,
+                        one_shot_eval_dir,
                         "missing",
-                        error=f"retune.enabled=true but retune was skipped because {method} one-shot did not complete.",
-                        pruning_report_path=None,
-                        dense_exact_match=dense_exact_match,
+                        error="one_shot.enabled is false; one-shot pruning result was not produced.",
+                        pruning_report_path=one_shot_dir / "pruning_report.json",
+                        dense_exact_match=dense_exact_matches.get(eval_name),
+                        eval_spec=eval_spec,
                     )
                 )
+
+        if bool(retune.get("enabled", True)):
+            if not one_shot_completed:
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec.get("name", "eval"))
+                    retuned_eval_dir = eval_dir_for_phase(output_dir, "retuned", method, eval_spec, multi_eval)
+                    rows.append(
+                        summary_row(
+                            method,
+                            "retuned",
+                            retuned_dir / "final",
+                            retuned_eval_dir,
+                            "missing",
+                            error=f"retune.enabled=true but retune was skipped because {method} one-shot did not complete.",
+                            pruning_report_path=None,
+                            dense_exact_match=dense_exact_matches.get(eval_name),
+                            eval_spec=eval_spec,
+                        )
+                    )
                 write_summary(output_dir, rows)
                 continue
+            completed_retuned_eval_names: set[str] = set()
             try:
                 masks_path = one_shot_dir / "pruning_masks.pt"
                 if not args.dry_run and not masks_path.exists():
@@ -1073,39 +1298,51 @@ def main() -> None:
                     )
                     if retuned_checkpoint.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as retuned pruned checkpoint.")
-                run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-                if not args.dry_run:
-                    validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
-                    validate_eval_protocol_matches_dense(dense_eval_dir, retuned_eval_dir)
                 if args.dry_run or not retuned_report.exists():
                     retuned_report = one_shot_dir / "pruning_report.json"
-                rows.append(
-                    summary_row(
-                        method,
-                        "retuned",
-                        retuned_checkpoint,
-                        retuned_eval_dir,
-                        "ok",
-                        pruning_report_path=retuned_report,
-                        dense_exact_match=dense_exact_match,
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec["name"])
+                    eval_file = Path(eval_spec["path"])
+                    retuned_eval_dir = eval_dir_for_phase(output_dir, "retuned", method, eval_spec, multi_eval)
+                    run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                    if not args.dry_run:
+                        validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
+                        validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], retuned_eval_dir)
+                    rows.append(
+                        summary_row(
+                            method,
+                            "retuned",
+                            retuned_checkpoint,
+                            retuned_eval_dir,
+                            "ok",
+                            pruning_report_path=retuned_report,
+                            dense_exact_match=dense_exact_matches.get(eval_name),
+                            eval_spec=eval_spec,
+                        )
                     )
-                )
+                    completed_retuned_eval_names.add(eval_name)
             except Exception as exc:
                 retuned_checkpoint = latest_checkpoint_or_default(retuned_dir)
                 retuned_report = retuned_checkpoint / "pruning_report.json"
-                retuned_status = "failed" if has_eval_result(resolve_eval_result_dir(retuned_eval_dir)) else "missing"
-                rows.append(
-                    summary_row(
-                        method,
-                        "retuned",
-                        retuned_checkpoint,
-                        retuned_eval_dir,
-                        retuned_status,
-                        error=f"retune.enabled=true but retuned checkpoint/eval was not completed: {exc}",
-                        pruning_report_path=retuned_report if retuned_report.exists() else None,
-                        dense_exact_match=dense_exact_match,
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec.get("name", "eval"))
+                    if eval_name in completed_retuned_eval_names:
+                        continue
+                    retuned_eval_dir = eval_dir_for_phase(output_dir, "retuned", method, eval_spec, multi_eval)
+                    retuned_status = "failed" if has_eval_result(resolve_eval_result_dir(retuned_eval_dir)) else "missing"
+                    rows.append(
+                        summary_row(
+                            method,
+                            "retuned",
+                            retuned_checkpoint,
+                            retuned_eval_dir,
+                            retuned_status,
+                            error=f"retune.enabled=true but retuned checkpoint/eval was not completed: {exc}",
+                            pruning_report_path=retuned_report if retuned_report.exists() else None,
+                            dense_exact_match=dense_exact_matches.get(eval_name),
+                            eval_spec=eval_spec,
+                        )
                     )
-                )
                 write_summary(output_dir, rows)
                 if not continue_on_error:
                     raise
@@ -1114,7 +1351,9 @@ def main() -> None:
         methods=methods,
         output_dir=output_dir,
         retune_enabled=bool(retune.get("enabled", True)),
-        dense_exact_match=dense_exact_match,
+        dense_exact_matches=dense_exact_matches,
+        eval_specs=eval_specs,
+        multi_eval=multi_eval,
     )
     write_summary(output_dir, rows)
     print(f"\nWrote pruning benchmark summary to {output_dir / 'pruning_benchmark_summary.csv'}")
