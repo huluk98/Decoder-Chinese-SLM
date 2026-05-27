@@ -16,6 +16,8 @@ PROMPT_FIELDS = ("prompt", "anchor", "instruction", "question", "query", "input"
 INPUT_FIELDS = ("input", "context", "source", "background")
 SYSTEM_FIELDS = ("system", "system_prompt")
 RESPONSE_FIELDS = ("response", "responses", "output", "answer", "completion", "target", "y")
+POSITIVE_FIELDS = ("positive", "pos", "x_positive", "chosen", "x_plus")
+NEGATIVE_FIELDS = ("negative", "neg", "x_negative", "rejected", "x_minus")
 MESSAGE_FIELDS = ("messages", "conversations")
 CONTENT_FIELDS = ("content", "value", "text", "message")
 ROLE_ALIASES = {
@@ -172,6 +174,17 @@ def format_sft_text(record: dict[str, Any]) -> tuple[str, str]:
     return prompt, prompt + response
 
 
+def format_prompt_from_text(record: dict[str, Any], text: str) -> str:
+    system = _first_text(record, SYSTEM_FIELDS)
+    instruction = _clean_content(text)
+    parts: list[str] = []
+    if system:
+        parts.append(f"{SYSTEM_TOKEN}\n{system}")
+    parts.append(f"{USER_TOKEN}\n{instruction}")
+    parts.append(ASSISTANT_TOKEN)
+    return "\n".join(parts) + "\n"
+
+
 def _coerce_json_records(payload: Any, path: Path) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         records = payload
@@ -246,15 +259,21 @@ class ContrastiveSFTDataset(SFTDataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         item = super().__getitem__(index)
         record = item["record"]
-        positive = _first_text(record, ("positive", "pos", "x_positive", "chosen", "x_plus"))
-        negative = _first_text(record, ("negative", "neg", "x_negative", "rejected", "x_minus"))
+        positive = _first_text(record, POSITIVE_FIELDS)
+        negative = _first_text(record, NEGATIVE_FIELDS)
         if not positive or not negative:
             raise ValueError(
                 "Contrastive SFT rows must include positive/negative fields "
                 "such as positive and negative, x_positive and x_negative, or chosen and rejected."
             )
+        response = format_response(record)
+        positive_prompt = format_prompt_from_text(record, positive)
+        negative_prompt = format_prompt_from_text(record, negative)
         item["positive"] = positive
         item["negative"] = negative
+        item["positive_prompt"] = positive_prompt
+        item["positive_text"] = positive_prompt + response
+        item["negative_prompt"] = negative_prompt
         return item
 
 
@@ -279,13 +298,19 @@ def _pad_sequences(sequences: list[list[int]], pad_token_id: int) -> tuple[torch
     return input_ids, attention_mask
 
 
-def sft_collate(features: list[dict[str, Any]], tokenizer: Any, max_length: int) -> dict[str, torch.Tensor]:
+def _collate_supervised_texts(
+    features: list[dict[str, Any]],
+    tokenizer: Any,
+    max_length: int,
+    prompt_key: str,
+    text_key: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     input_sequences: list[list[int]] = []
     label_sequences: list[list[int]] = []
     for feature in features:
-        prompt_ids = _tokenize_text(tokenizer, feature["prompt"], max_length)
-        full_ids = _tokenize_text(tokenizer, feature["text"], max_length)
+        prompt_ids = _tokenize_text(tokenizer, feature[prompt_key], max_length)
+        full_ids = _tokenize_text(tokenizer, feature[text_key], max_length)
         labels = list(full_ids)
         prompt_len = min(len(prompt_ids), len(labels))
         labels[:prompt_len] = [-100] * prompt_len
@@ -294,6 +319,17 @@ def sft_collate(features: list[dict[str, Any]], tokenizer: Any, max_length: int)
 
     input_ids, attention_mask = _pad_sequences(input_sequences, int(pad_token_id))
     labels, _ = _pad_sequences(label_sequences, -100)
+    return input_ids, attention_mask, labels
+
+
+def sft_collate(features: list[dict[str, Any]], tokenizer: Any, max_length: int) -> dict[str, torch.Tensor]:
+    input_ids, attention_mask, labels = _collate_supervised_texts(
+        features,
+        tokenizer,
+        max_length,
+        prompt_key="prompt",
+        text_key="text",
+    )
     return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 
@@ -301,14 +337,24 @@ def contrastive_sft_collate(features: list[dict[str, Any]], tokenizer: Any, max_
     batch = sft_collate(features, tokenizer, max_length)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     anchor_ids = [_tokenize_text(tokenizer, feature["prompt"], max_length) for feature in features]
-    positive_ids = [_tokenize_text(tokenizer, feature["positive"], max_length) for feature in features]
-    negative_ids = [_tokenize_text(tokenizer, feature["negative"], max_length) for feature in features]
+    positive_ids = [_tokenize_text(tokenizer, feature["positive_prompt"], max_length) for feature in features]
+    negative_ids = [_tokenize_text(tokenizer, feature["negative_prompt"], max_length) for feature in features]
+    positive_gen_input_ids, positive_gen_attention_mask, positive_gen_labels = _collate_supervised_texts(
+        features,
+        tokenizer,
+        max_length,
+        prompt_key="positive_prompt",
+        text_key="positive_text",
+    )
 
     anchor_input_ids, anchor_attention_mask = _pad_sequences(anchor_ids, int(pad_token_id))
     positive_input_ids, positive_attention_mask = _pad_sequences(positive_ids, int(pad_token_id))
     negative_input_ids, negative_attention_mask = _pad_sequences(negative_ids, int(pad_token_id))
     batch.update(
         {
+            "positive_gen_input_ids": positive_gen_input_ids,
+            "positive_gen_attention_mask": positive_gen_attention_mask,
+            "positive_gen_labels": positive_gen_labels,
             "anchor_input_ids": anchor_input_ids,
             "anchor_attention_mask": anchor_attention_mask,
             "positive_input_ids": positive_input_ids,

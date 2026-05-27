@@ -300,7 +300,7 @@ def contrastive_alignment_loss(model: torch.nn.Module, batch: dict[str, torch.Te
     negative = mean_pool_last_hidden(model, batch["negative_input_ids"], batch["negative_attention_mask"])
     positive_distance = 1.0 - F.cosine_similarity(anchor, positive, dim=-1)
     negative_distance = 1.0 - F.cosine_similarity(anchor, negative, dim=-1)
-    return (positive_distance + F.relu(float(margin) - negative_distance)).mean()
+    return F.relu(float(margin) + positive_distance - negative_distance).mean()
 
 
 def load_pruning_masks(path: str | Path) -> dict[str, torch.Tensor]:
@@ -1031,7 +1031,11 @@ def main(argv: list[str] | None = None) -> None:
         f"micro_batches_per_epoch={len(dataloader)} | optimizer_steps_per_epoch={optimizer_steps_per_epoch}",
     )
     if contrastive:
-        maybe_print(rank, "Contrastive objective: gen_loss + lambda * (d(anchor,pos) + relu(margin - d(anchor,neg)))")
+        maybe_print(
+            rank,
+            "Contrastive objective: GenLoss(anchor,y) + GenLoss(positive,y) "
+            "+ lambda * relu(margin + d(anchor,positive) - d(anchor,negative))",
+        )
     else:
         maybe_print(rank, "Decoder-only SFT labels are unshifted; the causal LM loss shifts labels inside the model.")
 
@@ -1117,11 +1121,20 @@ def main(argv: list[str] | None = None) -> None:
                         labels=batch["labels"],
                         use_cache=False,
                     )
-                    gen_loss = outputs.loss
+                    anchor_gen_loss = outputs.loss
                     if contrastive:
+                        positive_outputs = model(
+                            input_ids=batch["positive_gen_input_ids"],
+                            attention_mask=batch["positive_gen_attention_mask"],
+                            labels=batch["positive_gen_labels"],
+                            use_cache=False,
+                        )
+                        positive_gen_loss = positive_outputs.loss
+                        gen_loss = anchor_gen_loss + positive_gen_loss
                         align_loss = contrastive_alignment_loss(model, batch, margin=margin)
                         raw_loss = gen_loss + align_weight * align_loss
                     else:
+                        gen_loss = anchor_gen_loss
                         align_loss = torch.zeros((), device=device)
                         raw_loss = gen_loss
                     loss = raw_loss / grad_accum_steps
