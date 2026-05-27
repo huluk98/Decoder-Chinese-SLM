@@ -155,7 +155,7 @@ if { [[ -n "${ANCHOR_EVAL_FILE}" && -f "${ANCHOR_EVAL_FILE}" ]]; } || { [[ -n "$
   }
 
   if [[ -n "${ANCHOR_EVAL_FILE}" && -f "${ANCHOR_EVAL_FILE}" ]]; then
-    run_prompt_response_eval "anchor-only" "${ANCHOR_EVAL_FILE}" "${ANCHOR_AUDIT_TRAIN_FILE}" "final_anchor" "true"
+    run_prompt_response_eval "anchor-only" "${ANCHOR_EVAL_FILE}" "${ANCHOR_AUDIT_TRAIN_FILE}" "final_anchor" "false"
   fi
   if [[ -n "${BENCHMARK_FILE}" && -f "${BENCHMARK_FILE}" ]]; then
     run_prompt_response_eval "benchmark" "${BENCHMARK_FILE}" "${TRAIN_FILE}" "final_benchmark" "false"
