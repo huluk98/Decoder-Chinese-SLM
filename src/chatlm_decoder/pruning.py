@@ -741,6 +741,28 @@ def wanda_activation_report(activation_scalers: dict[str, torch.Tensor], masks: 
     return {"modules": modules, "blocking_issues": blocking, "all_modules_valid": not blocking}
 
 
+def linear_masks_for_activation_report(
+    model: torch.nn.Module,
+    masks: dict[str, torch.Tensor],
+    include_lm_head: bool = False,
+    scope: str | None = TRANSFORMER_LINEAR_SCOPE,
+) -> dict[str, torch.Tensor]:
+    normalized_scope = normalize_pruning_scope(scope)
+    report_masks: dict[str, torch.Tensor] = {}
+    for module_name, _module in _named_linears_for_scope(
+        model,
+        include_lm_head=include_lm_head,
+        scope=normalized_scope,
+    ):
+        if normalized_scope == FULL_MODEL_SCOPE:
+            mask = masks.get(f"{module_name}.weight", masks.get(module_name))
+        else:
+            mask = masks.get(module_name)
+        if mask is not None:
+            report_masks[module_name] = mask
+    return report_masks
+
+
 def validate_two_of_four_masks(
     masks: dict[str, torch.Tensor],
     model: torch.nn.Module | None = None,

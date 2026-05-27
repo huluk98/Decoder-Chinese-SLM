@@ -246,6 +246,14 @@ def should_continue_on_error(args: argparse.Namespace, benchmark: dict[str, Any]
     return bool(benchmark.get("continue_on_error", False))
 
 
+def parse_methods(value: Any) -> list[str]:
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(",", " ").split()]
+    else:
+        parts = [str(part).strip() for part in value]
+    return [part for part in parts if part]
+
+
 def parse_cuda_visible_devices(value: Any) -> list[str]:
     if value is None:
         return []
@@ -1057,6 +1065,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run one-shot and SFT-retuned pruning benchmarks for all methods.")
     parser.add_argument("--config", default="configs/pruning_benchmark.yaml", help="YAML file, or a directory containing pruning_benchmark.yaml.")
     parser.add_argument("--eval-file", default=None, help="Override benchmark.eval_file with your prompt/response eval dataset.")
+    parser.add_argument("--methods", default=None, help="Override benchmark.methods, e.g. 'wanda' or 'magnitude,wanda'.")
     parser.add_argument("--dry-run", action="store_true")
     errors = parser.add_mutually_exclusive_group()
     errors.add_argument("--continue-on-error", action="store_true", help="Record a failed method and continue with the next method.")
@@ -1068,7 +1077,7 @@ def main() -> None:
     benchmark = dict(config.get("benchmark", {}) or {})
     one_shot = dict(config.get("one_shot", {}) or {})
     retune = dict(config.get("retune", {}) or {})
-    methods = [str(method) for method in benchmark.get("methods", METHODS)]
+    methods = parse_methods(args.methods if args.methods else benchmark.get("methods", METHODS))
     unknown_methods = [method for method in methods if method not in METHODS]
     if unknown_methods:
         raise ValueError(f"Unknown pruning methods: {unknown_methods}. Expected any of {METHODS}.")

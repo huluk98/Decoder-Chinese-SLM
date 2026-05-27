@@ -27,6 +27,7 @@ from chatlm_decoder.pruning import (
     gradient_score_masks,
     layerwise_gradient_score_masks,
     layerwise_magnitude_masks,
+    linear_masks_for_activation_report,
     masked_weight_stats,
     mask_sparsity,
     module_filter_report,
@@ -184,8 +185,15 @@ def make_masks(
             scope=scope,
             granularity=granularity,
         )
-        linear_mask_names = {f"{name}.weight" if scope == "full_model" else name for name in scalers}
-        report = wanda_activation_report(scalers, {name: mask for name, mask in masks.items() if name in linear_mask_names})
+        report = wanda_activation_report(
+            scalers,
+            linear_masks_for_activation_report(
+                model,
+                masks,
+                include_lm_head=include_lm_head,
+                scope=scope,
+            ),
+        )
         if not report["all_modules_valid"]:
             raise ValueError(f"Invalid Wanda activation statistics: {report['blocking_issues']}")
         return masks, {
