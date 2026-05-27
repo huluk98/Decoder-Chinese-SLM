@@ -909,12 +909,62 @@ That config uses the generic decoder-only pruning code and writes one-shot prune
 
 For the current pruning benchmark, use your own prompt/response eval file through `benchmark.eval_file` or the one-run `EVAL_FILE` override. The IoT benchmark launcher is separate and should only be used for the later final IoT command benchmark.
 
+To run the exact current setup for both trained 0.2B SFT families in one command:
+
+```bash
+conda activate chatlm-decoder
+./run_sft_and_contrastive_pruning_benchmarks.sh
+```
+
+That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pruning_benchmark_contrastive_sft.yaml`. Each config prunes the checkpoint with `magnitude`, `wanda`, `gradient`, and NVIDIA `2of4`; uses full-model, whole-model 50% sparsity with `include_lm_head: true`; evaluates the dense baseline, one-shot pruned checkpoints, and masked-retuned checkpoints; and reports both `exact_match_accuracy` and `exact_match_at_top_k_accuracy` with `top_k_exact_match: 5`.
+
+The regular SFT config evaluates both `sft_dataset` and `benchmark`. The contrastive SFT config evaluates both `anchor_dataset` and `benchmark`. The expensive prune/retune step runs once per method per model, and the saved checkpoint is then evaluated on both named eval files. The benchmark split has difficulty labels (`easy`, `medium`, `hard`; currently 70/65/65 examples), and the summaries include overall accuracy plus per-hardness columns such as `difficulty_easy_exact_match_accuracy`, `difficulty_medium_exact_match_accuracy`, `difficulty_hard_exact_match_accuracy`, and matching exact-match@5 columns.
+
+Quick prune commands:
+
+```bash
+# Run regular SFT + contrastive SFT pruning/eval in one go.
+conda activate chatlm-decoder
+./run_sft_and_contrastive_pruning_benchmarks.sh
+
+# Only regular SFT.
+SKIP_CONTRASTIVE=1 ./run_sft_and_contrastive_pruning_benchmarks.sh
+
+# Only contrastive SFT.
+SKIP_REGULAR=1 ./run_sft_and_contrastive_pruning_benchmarks.sh
+
+# Preview without launching prune/train/eval commands.
+DRY_RUN=1 ./run_sft_and_contrastive_pruning_benchmarks.sh
+```
+
+For one model/config instead of both:
+
+```bash
+MODE=generic CONFIG_PATH=configs/pruning_benchmark_regular_sft.yaml ./scripts/run_pruning_benchmark_8way.sh
+MODE=generic CONFIG_PATH=configs/pruning_benchmark_contrastive_sft.yaml ./scripts/run_pruning_benchmark_8way.sh
+```
+
+For a single method without the full benchmark suite:
+
+```bash
+python scripts/prune.py \
+  --config configs/prune_50.yaml \
+  --method magnitude \
+  --checkpoint outputs/sft_0p2b_8gpu/final \
+  --output-dir runs/pruned-regular-sft-magnitude-50
+```
+
 Edit `configs/pruning_benchmark.yaml`:
 
 ```yaml
 benchmark:
   base_checkpoint: /absolute/path/to/model/latest
   eval_file: /absolute/path/to/eval.json
+  # Or evaluate several files after the same prune/retune pass:
+  eval_files:
+    dataset: /absolute/path/to/model_specific_eval.json
+    benchmark: data/benchmarks/iot_instruction_benchmark_200.json
+  top_k_exact_match: 5
   output_dir: runs/pruning-benchmark-0p2b
 
 prune:
@@ -966,13 +1016,13 @@ Outputs are grouped under `benchmark.output_dir`:
 ```text
 one_shot/<method>/               # 4 one-shot pruned checkpoints
 retuned/<method>/                # 4 SFT-retuned pruned checkpoints
-benchmarks/one_shot/<method>/    # 4 one-shot benchmark outputs
-benchmarks/retuned/<method>/     # 4 retuned benchmark outputs
+benchmarks/one_shot/<method>/    # one-shot eval outputs, or <method>/<eval_name>/ with eval_files
+benchmarks/retuned/<method>/     # retuned eval outputs, or <method>/<eval_name>/ with eval_files
 pruning_benchmark_summary.csv
 pruning_benchmark_summary.json
 ```
 
-That gives 8 model outputs total and 8 benchmark output folders total, plus the dense baseline eval folder. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json` and `exact_match_failure_cases.json`.
+That gives 8 model outputs total and 8 benchmark output folders total for a single eval file, plus the dense baseline eval folder. With `benchmark.eval_files`, the same 8 model outputs are reused across each named eval file and the CSV includes `eval_name` and `eval_file`. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json`, `exact_match_failure_cases.json`, and `top_k_exact_match_failure_cases.json`. When rows contain `difficulty` or `hardness`, the eval summary also writes `by_difficulty` and flat CSV-ready fields for easy/medium/hard top-1 and top-5 accuracy.
 
 Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default full-model scope, both should land at the 50% target for dense checkpoints.
 
