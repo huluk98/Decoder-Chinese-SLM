@@ -10,12 +10,15 @@ sft:
   mode: contrastive
   base_model: /path/to/sft-or-pretrained-checkpoint
   data_path: /path/to/contrastive_train.jsonl
-  eval_path: /path/to/eval.json
+  eval_path: data/cleaned/619_Luke_fixed_dedup.json
+  anchor_eval_path: data/cleaned/619_Luke_fixed_dedup.json
+  benchmark_path: data/benchmarks/iot_instruction_benchmark_200.json
   max_length: 128
   alignment_weight: 0.1
   margin: 0.5
   max_samples: null
   benchmark_runs: 5
+  top_k_exact_match: 5
 
 generation:
   max_new_tokens: 64

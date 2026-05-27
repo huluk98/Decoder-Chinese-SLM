@@ -606,6 +606,57 @@ def generate_completions_batch(
     return completions
 
 
+@torch.no_grad()
+def generate_topk_completions_batch(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompt_texts: list[str],
+    device: torch.device,
+    max_prompt_tokens: int,
+    max_new_tokens: int,
+    exact_match_top_k: int,
+    repetition_penalty: float,
+) -> list[list[tuple[str, int]]]:
+    if not prompt_texts:
+        return []
+    top_k = max(1, int(exact_match_top_k))
+    previous_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    try:
+        inputs = tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max(1, int(max_prompt_tokens)),
+            add_special_tokens=False,
+        ).to(device)
+    finally:
+        tokenizer.padding_side = previous_padding_side
+    prompt_width = int(inputs["input_ids"].shape[-1])
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=int(max_new_tokens),
+        do_sample=False,
+        num_beams=top_k,
+        num_return_sequences=top_k,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        repetition_penalty=float(repetition_penalty),
+        early_stopping=True,
+    )
+    grouped: list[list[tuple[str, int]]] = []
+    for row in range(len(prompt_texts)):
+        candidates: list[tuple[str, int]] = []
+        start = row * top_k
+        for output_row in output_ids[start : start + top_k]:
+            completion_ids = output_row[prompt_width:]
+            completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
+            candidates.append((completion, int(completion_ids.numel())))
+        grouped.append(candidates)
+    return grouped
+
+
 def normalize_whitespace_exact(text: str, tokenizer: Any | None = None) -> str:
     text = unicodedata.normalize("NFKC", str(text))
     text = ZERO_WIDTH_PATTERN.sub("", text)
@@ -735,6 +786,8 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             "raw_label",
             "normalized_label",
             "exact_match",
+            "exact_match_at_top_k",
+            "top_k_match_rank",
             "generated_length",
             "label_length",
         ]
@@ -750,6 +803,8 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
                     "raw_label": result.get("raw_label", result.get("response", "")),
                     "normalized_label": result.get("normalized_label", ""),
                     "exact_match": result.get("exact_match", ""),
+                    "exact_match_at_top_k": result.get("exact_match_at_top_k", ""),
+                    "top_k_match_rank": result.get("top_k_match_rank", ""),
                     "generated_length": result.get("generated_length", result.get("generated_token_count", "")),
                     "label_length": result.get("label_length", result.get("response_token_count", "")),
                 }
@@ -765,12 +820,19 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             "normalized_prediction": result.get("normalized_prediction", ""),
             "normalized_gold": result.get("normalized_label", ""),
             "exact_match": result.get("exact_match"),
+            "exact_match_at_top_k": result.get("exact_match_at_top_k"),
+            "top_k_match_rank": result.get("top_k_match_rank"),
+            "top_k_candidates": result.get("top_k_candidates", []),
             "response_loss": result.get("loss"),
         }
         for result in results[:50]
     ]
     write_json(output_dir / "generation_samples.json", generation_samples)
     write_json(output_dir / "exact_match_failure_cases.json", [row for row in results if not bool(row.get("exact_match"))][:50])
+    write_json(
+        output_dir / "top_k_exact_match_failure_cases.json",
+        [row for row in results if not bool(row.get("exact_match_at_top_k"))][:50],
+    )
 
 
 def write_eval_run_config(
@@ -815,6 +877,7 @@ def write_eval_run_config(
             "temperature": None if not args.do_sample else float(args.temperature),
             "top_p": None if not args.do_sample else float(args.top_p),
             "top_k": None if not args.do_sample else int(args.top_k),
+            "exact_match_top_k": int(args.exact_match_top_k),
             "max_new_tokens": int(args.max_new_tokens),
             "repetition_penalty": float(args.repetition_penalty),
             "eos_token_id": tokenizer.eos_token_id,
@@ -936,6 +999,12 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--num-beams", type=int, default=1)
+    parser.add_argument(
+        "--exact-match-top-k",
+        type=int,
+        default=1,
+        help="Also report whether the target appears in the top K deterministic beam-search generations.",
+    )
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument(
         "--benchmark-runs",
@@ -955,6 +1024,10 @@ def main() -> None:
         raise ValueError("--use-cached-predictions requires --cached-predictions-file.")
     if not args.use_cached_predictions and args.cached_predictions_file:
         raise ValueError("--cached-predictions-file was provided without --use-cached-predictions.")
+    if int(args.exact_match_top_k) < 1:
+        raise ValueError("--exact-match-top-k must be at least 1.")
+    if args.use_cached_predictions and int(args.exact_match_top_k) > 1:
+        raise ValueError("--exact-match-top-k > 1 requires fresh model generation, not cached single predictions.")
 
     seed_info = set_eval_seeds(args.seed, deterministic=bool(args.deterministic_eval))
     device, rank, local_rank, world_size = setup_distributed_eval(args.device)
@@ -1062,6 +1135,7 @@ def main() -> None:
             f"temperature={None if not args.do_sample else float(args.temperature)} "
             f"top_p={None if not args.do_sample else float(args.top_p)} "
             f"top_k={None if not args.do_sample else int(args.top_k)} "
+            f"exact_match_top_k={int(args.exact_match_top_k)} "
             f"max_new_tokens={int(args.max_new_tokens)} repetition_penalty={float(args.repetition_penalty)} "
             f"eos_token_id={tokenizer.eos_token_id} pad_token_id={tokenizer.pad_token_id}"
         )
@@ -1093,6 +1167,7 @@ def main() -> None:
         total_loss_sum = 0.0
         total_tokens = 0
         exact_correct = 0
+        exact_top_k_correct = 0
         generated_token_lengths: list[int] = []
         results: list[dict[str, Any]] = []
         progress = tqdm(
@@ -1105,6 +1180,7 @@ def main() -> None:
             batch = [example for _, example in batch_pairs]
             scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
             generation_by_index: dict[int, tuple[str, int, str]] = {}
+            top_k_generation_by_index: dict[int, list[tuple[str, int]]] = {}
             needs_generation = [
                 (offset, index, batch[offset])
                 for offset, (index, _example) in enumerate(batch_pairs)
@@ -1139,6 +1215,19 @@ def main() -> None:
                     except Exception as exc:
                         for _offset, index, _example in needs_generation:
                             generation_by_index[index] = ("", 0, repr(exc))
+                if bool(args.exact_match) and int(args.exact_match_top_k) > 1:
+                    top_k_generated_batch = generate_topk_completions_batch(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt_texts=[example["prompt_text"] for _offset, _index, example in needs_generation],
+                        device=device,
+                        max_prompt_tokens=max(1, max_length - int(args.max_new_tokens)),
+                        max_new_tokens=int(args.max_new_tokens),
+                        exact_match_top_k=int(args.exact_match_top_k),
+                        repetition_penalty=float(args.repetition_penalty),
+                    )
+                    for (_offset, index, _example), candidates in zip(needs_generation, top_k_generated_batch):
+                        top_k_generation_by_index[index] = candidates
             for offset, score in enumerate(scores):
                 index = batch_pairs[offset][0]
                 token_count = int(score["token_count"])
@@ -1191,12 +1280,61 @@ def main() -> None:
                         generated_token_lengths.append(generated_token_count)
                         result["exact_match"] = is_exact
                         result["mismatch_reason"] = mismatch_reason(comparison_generated, comparison_target)
+                        top_k_candidates: list[dict[str, Any]] = []
+                        top_k_match_rank = None
+                        if int(args.exact_match_top_k) > 1:
+                            raw_candidates = top_k_generation_by_index.get(index, [])
+                            seen_comparisons: set[str] = set()
+                            for candidate_rank, (candidate_text, candidate_token_count) in enumerate(
+                                raw_candidates,
+                                start=1,
+                            ):
+                                candidate_comparison = comparison_text(
+                                    candidate_text,
+                                    tokenizer=tokenizer,
+                                    comparison_mode=args.comparison_mode,
+                                )
+                                candidate_exact = candidate_comparison == comparison_target
+                                if candidate_exact and top_k_match_rank is None:
+                                    top_k_match_rank = candidate_rank
+                                top_k_candidates.append(
+                                    {
+                                        "rank": candidate_rank,
+                                        "raw_prediction": candidate_text,
+                                        "normalized_prediction": candidate_comparison,
+                                        "exact_match": candidate_exact,
+                                        "generated_length": candidate_token_count,
+                                        "duplicate_normalized_prediction": candidate_comparison in seen_comparisons,
+                                    }
+                                )
+                                seen_comparisons.add(candidate_comparison)
+                        else:
+                            top_k_match_rank = 1 if is_exact else None
+                            top_k_candidates.append(
+                                {
+                                    "rank": 1,
+                                    "raw_prediction": generated,
+                                    "normalized_prediction": comparison_generated,
+                                    "exact_match": is_exact,
+                                    "generated_length": generated_token_count,
+                                    "duplicate_normalized_prediction": False,
+                                }
+                            )
+                        result["top_k"] = int(args.exact_match_top_k)
+                        result["top_k_candidates"] = top_k_candidates
+                        result["top_k_match_rank"] = top_k_match_rank
+                        result["exact_match_at_top_k"] = top_k_match_rank is not None
+                        if int(args.exact_match_top_k) == 5:
+                            result["top5_exact_match"] = result["exact_match_at_top_k"]
+                            result["top5_match_rank"] = top_k_match_rank
+                        exact_top_k_correct += int(top_k_match_rank is not None)
                 results.append(result)
 
         local_payload = {
             "total_loss_sum": total_loss_sum,
             "total_tokens": total_tokens,
             "exact_correct": exact_correct,
+            "exact_top_k_correct": exact_top_k_correct,
             "generated_token_lengths": generated_token_lengths,
             "results": results,
         }
@@ -1213,6 +1351,7 @@ def main() -> None:
         total_loss_sum = sum(float(payload["total_loss_sum"]) for payload in payloads)
         total_tokens = sum(int(payload["total_tokens"]) for payload in payloads)
         exact_correct = sum(int(payload["exact_correct"]) for payload in payloads)
+        exact_top_k_correct = sum(int(payload["exact_top_k_correct"]) for payload in payloads)
         generated_token_lengths = [
             int(length)
             for payload in payloads
@@ -1248,6 +1387,7 @@ def main() -> None:
             if prompt_copies / max(1, len(results)) > 0.5:
                 raise RuntimeError("Generated predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
         incorrect = len(records) - exact_correct if args.exact_match else None
+        top_k_exact_match = int(args.exact_match_top_k)
         summary = {
             "benchmark_run": run_index + 1,
             "benchmark_runs": benchmark_runs,
@@ -1261,12 +1401,17 @@ def main() -> None:
             "response_perplexity": math.exp(mean_loss) if total_tokens else math.nan,
             "exact_match_accuracy": exact_correct / len(records) if args.exact_match and records else None,
             "exact_match_correct": exact_correct if args.exact_match else None,
+            "exact_match_at_top_k_accuracy": (
+                exact_top_k_correct / len(records) if args.exact_match and records else None
+            ),
+            "exact_match_at_top_k_correct": exact_top_k_correct if args.exact_match else None,
             "empty_predictions": empty_predictions if args.exact_match else None,
             "invalid_structured_outputs": invalid_outputs if args.exact_match else None,
             "generation_errors": generation_errors if args.exact_match else None,
             "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
             "avg_label_tokens": avg_label_length,
             "max_new_tokens": int(args.max_new_tokens),
+            "top_k_exact_match": int(args.exact_match_top_k) if args.exact_match else None,
             "comparison_mode": args.comparison_mode if args.exact_match else None,
             "max_length": max_length,
             "batch_size": batch_size,
@@ -1275,6 +1420,11 @@ def main() -> None:
             "prediction_debug_file": str((output_dir if benchmark_runs == 1 else output_dir / f"run_{run_index + 1:02d}") / "prediction_debug.csv"),
             "eval_wall_seconds": time.perf_counter() - run_start,
         }
+        if args.exact_match and top_k_exact_match == 5:
+            summary["exact_match_at_5_accuracy"] = summary["exact_match_at_top_k_accuracy"]
+            summary["exact_match_at_5_correct"] = summary["exact_match_at_top_k_correct"]
+            summary["top5_exact_match_accuracy"] = summary["exact_match_at_top_k_accuracy"]
+            summary["top5_exact_match_correct"] = summary["exact_match_at_top_k_correct"]
         run_summaries.append(summary)
 
         write_prediction_files(run_output_dir, results, summary)
@@ -1290,6 +1440,12 @@ def main() -> None:
                 f"({summary['exact_match_correct']}/{summary['total_examples']}) "
                 f"avg_generated_tokens={summary['avg_generated_tokens']:.2f}"
             )
+            if int(args.exact_match_top_k) > 1:
+                print(
+                    f"[run {run_index + 1}/{benchmark_runs}] Exact-match@{int(args.exact_match_top_k)} "
+                    f"accuracy={summary['exact_match_at_top_k_accuracy']:.4f} "
+                    f"({summary['exact_match_at_top_k_correct']}/{summary['total_examples']})"
+                )
             if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
                 print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
 
@@ -1306,6 +1462,7 @@ def main() -> None:
             "benchmark_runs": benchmark_runs,
             "total_examples": len(records),
             "max_new_tokens": int(args.max_new_tokens),
+            "top_k_exact_match": int(args.exact_match_top_k) if args.exact_match else None,
             "comparison_mode": args.comparison_mode if args.exact_match else None,
             "max_length": max_length,
             "batch_size": batch_size,
@@ -1328,6 +1485,45 @@ def main() -> None:
             benchmark_summary.update(benchmark_metric_summary(run_summaries, key))
         if args.exact_match:
             benchmark_summary.update(benchmark_metric_summary(run_summaries, "exact_match_accuracy"))
+            benchmark_summary.update(benchmark_metric_summary(run_summaries, "exact_match_at_top_k_accuracy"))
+            benchmark_summary.update(benchmark_metric_summary(run_summaries, "exact_match_at_top_k_correct"))
+            if int(args.exact_match_top_k) == 5:
+                benchmark_summary["exact_match_at_5_accuracy_mean"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_mean"
+                ]
+                benchmark_summary["exact_match_at_5_accuracy_std"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_std"
+                ]
+                benchmark_summary["exact_match_at_5_accuracy_mean_pm_std"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_mean_pm_std"
+                ]
+                benchmark_summary["top5_exact_match_accuracy_mean"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_mean"
+                ]
+                benchmark_summary["top5_exact_match_accuracy_std"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_std"
+                ]
+                benchmark_summary["top5_exact_match_accuracy_mean_pm_std"] = benchmark_summary[
+                    "exact_match_at_top_k_accuracy_mean_pm_std"
+                ]
+                benchmark_summary["exact_match_at_5_correct_mean"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_mean"
+                ]
+                benchmark_summary["exact_match_at_5_correct_std"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_std"
+                ]
+                benchmark_summary["exact_match_at_5_correct_mean_pm_std"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_mean_pm_std"
+                ]
+                benchmark_summary["top5_exact_match_correct_mean"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_mean"
+                ]
+                benchmark_summary["top5_exact_match_correct_std"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_std"
+                ]
+                benchmark_summary["top5_exact_match_correct_mean_pm_std"] = benchmark_summary[
+                    "exact_match_at_top_k_correct_mean_pm_std"
+                ]
             correct_values = [
                 float(summary["exact_match_correct"])
                 for summary in run_summaries
@@ -1346,6 +1542,7 @@ def main() -> None:
             "prediction_debug.csv",
             "generation_samples.json",
             "exact_match_failure_cases.json",
+            "top_k_exact_match_failure_cases.json",
         ):
             source = last_run_dir / filename
             if source.exists():
@@ -1360,6 +1557,11 @@ def main() -> None:
         )
         if args.exact_match:
             print(f"  exact_match_accuracy={benchmark_summary['exact_match_accuracy_mean_pm_std']}")
+            if int(args.exact_match_top_k) > 1:
+                print(
+                    f"  exact_match@{int(args.exact_match_top_k)}="
+                    f"{benchmark_summary['exact_match_at_top_k_accuracy_mean_pm_std']}"
+                )
         print(f"Wrote benchmark results to {output_dir}")
     else:
         if run_summaries:

@@ -186,6 +186,8 @@ python scripts/eval_prompt_response.py \
 
 The eval file can be `.json`, `.jsonl`, or `.csv`. Rows may use `instruction` + `response`, `prompt` + `response`, `question` + `answer`, or a `messages`/`conversations` transcript. By default the script generates every row and reports whitespace-insensitive exact-match accuracy with `--comparison-mode whitespace`. Use `--comparison-mode normalized` for light formatting cleanup, `--comparison-mode command` only when intentionally measuring semantic smart-home command equivalence, or `--no-exact-match` when you want loss/perplexity without generation.
 
+Add `--exact-match-top-k 5` to also run deterministic beam search and report whether the target appears in the top five generated candidates. The summaries include `exact_match_at_5_accuracy` and `top5_exact_match_accuracy` aliases when K is 5.
+
 For large eval files on your 8x H20 machine, shard generation across all GPUs:
 
 ```bash
@@ -202,7 +204,7 @@ torchrun --standalone --nproc_per_node=8 scripts/eval_prompt_response.py \
   --benchmark-runs 5
 ```
 
-With `--benchmark-runs 5`, rank 0 writes `run_01` through `run_05` prediction folders plus `prompt_response_eval_benchmark_summary.json`, including mean ± sample std for loss, perplexity, exact-match accuracy, generated length, and eval wall time.
+With `--benchmark-runs 5`, rank 0 writes `run_01` through `run_05` prediction folders plus `prompt_response_eval_benchmark_summary.json`, including mean ± sample std for loss, perplexity, exact-match accuracy, exact-match@K, generated length, and eval wall time.
 
 For audit-safe comparisons, eval now writes a unique timestamped child folder under `--output-dir` plus `run_config.json`, `split_audit.json`, `metrics.json`, `prediction_debug.csv`, and `prompt_response_eval_predictions.jsonl`. Compare two runs with:
 
@@ -230,7 +232,7 @@ For structured smart-home command generation, use the dedicated short-output SFT
 
 1. Edit `configs/sft_0p2b_8gpu.yaml`.
 2. Set `model_name_or_path` to the pretrained 0.2B checkpoint directory.
-3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows.
+3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows. The checked-in 8-GPU config now points both at `data/cleaned/619_Luke_fixed_dedup.json` and uses `data/benchmarks/iot_instruction_benchmark_200.json` as `benchmark_file`.
 
 The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. The 8-GPU launch script trains through the configured epochs first, then runs a five-pass exact-match generation benchmark by default. It does not stop at every epoch for full-dataset validation.
 
@@ -246,13 +248,39 @@ Full 8x H20 SFT run followed by final 8-GPU exact-match eval:
 ./run_sft_8gpu.sh
 ```
 
+For this repo's updated smart-home run, set only the base checkpoint in `configs/sft_0p2b_8gpu.yaml`; the SFT data, SFT eval data, benchmark file, five benchmark repeats, and exact-match@5 are already wired:
+
+```yaml
+model_name_or_path: /absolute/path/to/pretrained-or-pruned-checkpoint
+train_file: data/cleaned/619_Luke_fixed_dedup.json
+eval_file: data/cleaned/619_Luke_fixed_dedup.json
+benchmark_file: data/benchmarks/iot_instruction_benchmark_200.json
+benchmark_runs: 5
+top_k_exact_match: 5
+```
+
+Then run:
+
+```bash
+CONFIG_PATH=configs/sft_0p2b_8gpu.yaml ./run_sft_8gpu.sh
+```
+
+The final reports land under:
+
+```text
+outputs/sft_0p2b_8gpu/eval/final_sft_dataset/
+outputs/sft_0p2b_8gpu/eval/final_benchmark/
+```
+
+Read `prompt_response_eval_summary.json` or `metrics.json` in each folder for `exact_match_accuracy`, `exact_match_at_5_accuracy`, and `top5_exact_match_accuracy`.
+
 Equivalent one-line launch:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TOKENIZERS_PARALLELISM=false NCCL_DEBUG=WARN PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=8 scripts/train.py --config configs/sft_0p2b_8gpu.yaml
 ```
 
-The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using exactly `output_dir/final`, the checkpoint written by the run that just completed. It does not fall back to `latest` or `step-*`, so stale SFT checkpoints cannot be evaluated by accident. If `eval_file` exists, it evaluates that file; otherwise it falls back to `train_file`. Set `benchmark_runs` in `configs/sft_0p2b_8gpu.yaml`, or override once with `SFT_BENCHMARK_RUNS=3 ./run_sft_8gpu.sh`.
+The one-line `torchrun` command trains only. `./run_sft_8gpu.sh` trains, then launches `scripts/eval_prompt_response.py` on all 8 GPUs using exactly `output_dir/final`, the checkpoint written by the run that just completed. It does not fall back to `latest` or `step-*`, so stale SFT checkpoints cannot be evaluated by accident. The launcher evaluates the SFT dataset and `benchmark_file`, reporting exact match and exact-match@5 by default. Set `benchmark_runs` or `top_k_exact_match` in `configs/sft_0p2b_8gpu.yaml`, or override once with `SFT_BENCHMARK_RUNS=3 SFT_TOP_K_EXACT_MATCH=5 ./run_sft_8gpu.sh`.
 
 Default SFT settings are `num_train_epochs=3`, `max_seq_length=128`, `max_new_tokens=64`, BF16, TF32, per-device batch size 16, gradient accumulation 1, cosine LR, `eval_strategy=none`, and `save_final_only=true`. Startup logging prints world size, local rank, GPU name, effective batch size, trainable parameter count, sequence length, generation cap, and a decoded tokenized sample showing the supervised response region.
 
@@ -680,6 +708,8 @@ For contrastive SFT, each row also includes a positive semantic example and a ne
 {"anchor": "...", "response": "...", "positive": "...", "negative": "..."}
 ```
 
+The 8-GPU contrastive launcher evaluates only prompt/response anchor rows after training; positive and negative fields are used for the contrastive objective, not as generated-response targets. It also runs the configured smart-home benchmark, using the same exact-match and exact-match@5 evaluator.
+
 Run it with:
 
 ```bash
@@ -695,7 +725,10 @@ For the 8x H20 workflow, edit only `configs/contrastive_sft_8gpu.yaml`:
 sft:
   base_model: /absolute/path/to/base-or-sft-checkpoint
   data_path: /absolute/path/to/contrastive_train.jsonl
-  eval_path: /absolute/path/to/eval.json
+  anchor_eval_path: data/cleaned/619_Luke_fixed_dedup.json
+  benchmark_path: data/benchmarks/iot_instruction_benchmark_200.json
+  benchmark_runs: 5
+  top_k_exact_match: 5
   max_length: 128
   alignment_weight: 0.1
   margin: 0.5
@@ -704,13 +737,20 @@ sft:
 Then run:
 
 ```bash
-./run_contrastive_sft_8gpu.sh
+CONFIG_PATH=configs/contrastive_sft_8gpu.yaml ./run_contrastive_sft_8gpu.sh
 ```
 
-The script uses all 8 visible GPUs, runs contrastive SFT, then evaluates `eval_path` with the same five-pass exact-match benchmark used by regular SFT. If `eval_path` is missing, it falls back to `data_path` for an overfit-style check. Override the config or benchmark count for one run with:
+The script uses all 8 visible GPUs, runs contrastive SFT, then evaluates only the anchor prompt/response rows plus the smart-home benchmark. Positive and negative fields are used only for contrastive training. The final reports land under:
+
+```text
+runs/contrastive-sft-0p2b-8gpu/eval/final_anchor/
+runs/contrastive-sft-0p2b-8gpu/eval/final_benchmark/
+```
+
+Override repeats or top-K once with:
 
 ```bash
-CONFIG_PATH=configs/contrastive_sft_8gpu.yaml CONTRASTIVE_BENCHMARK_RUNS=3 ./run_contrastive_sft_8gpu.sh
+CONTRASTIVE_BENCHMARK_RUNS=3 CONTRASTIVE_TOP_K_EXACT_MATCH=5 ./run_contrastive_sft_8gpu.sh
 ```
 
 The contrastive objective follows the pictured semantic-alignment idea:
