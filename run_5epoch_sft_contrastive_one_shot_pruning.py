@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import os
@@ -43,8 +42,7 @@ CONFIG: dict[str, Any] = {
     "regular_pruning_output_dir": None,  # None -> <run_root>/pruning/base_sft
     "contrastive_pruning_output_dir": None,  # None -> <run_root>/pruning/contrastive_sft
     "generated_config_dir": None,  # None -> <run_root>/generated_configs
-    "summary_csv": None,  # None -> <run_root>/em1_em5_summary.csv
-    "summary_json": None,  # None -> <run_root>/em1_em5_summary.json
+    "results_json": None,  # None -> <run_root>/journal_results.json
     "methods": ["wanda", "gradient", "magnitude", "2of4"],
     "eval_runs": 1,
     "top_k_exact_match": 5,
@@ -84,8 +82,7 @@ ENV_OVERRIDES = {
     "REGULAR_PRUNING_OUTPUT_DIR": "regular_pruning_output_dir",
     "CONTRASTIVE_PRUNING_OUTPUT_DIR": "contrastive_pruning_output_dir",
     "GENERATED_CONFIG_DIR": "generated_config_dir",
-    "SUMMARY_CSV": "summary_csv",
-    "SUMMARY_JSON": "summary_json",
+    "RESULTS_JSON": "results_json",
     "METHODS": "methods",
     "EVAL_RUNS": "eval_runs",
     "TOP_K_EXACT_MATCH": "top_k_exact_match",
@@ -245,8 +242,7 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["regular_pruning_output_dir"] = repo_path(config["regular_pruning_output_dir"]) if config.get("regular_pruning_output_dir") else run_root / "pruning" / "base_sft"
     settings["contrastive_pruning_output_dir"] = repo_path(config["contrastive_pruning_output_dir"]) if config.get("contrastive_pruning_output_dir") else run_root / "pruning" / "contrastive_sft"
     settings["generated_config_dir"] = repo_path(config["generated_config_dir"]) if config.get("generated_config_dir") else run_root / "generated_configs"
-    settings["summary_csv"] = repo_path(config["summary_csv"]) if config.get("summary_csv") else run_root / "em1_em5_summary.csv"
-    settings["summary_json"] = repo_path(config["summary_json"]) if config.get("summary_json") else run_root / "em1_em5_summary.json"
+    settings["results_json"] = repo_path(config["results_json"]) if config.get("results_json") else run_root / "journal_results.json"
     settings["regular_final"] = settings["regular_output_dir"] / "final"
     settings["contrastive_final"] = settings["contrastive_output_dir"] / "final"
     settings["contrastive_base_model"] = config.get("contrastive_base_model") or str(settings["regular_final"])
@@ -473,6 +469,7 @@ def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
             {
                 "model_family": family,
                 "eval_name": row.get("eval_name", ""),
+                "eval_file": row.get("eval_file", ""),
                 "phase": phase,
                 "method": method,
                 "status": row.get("status", ""),
@@ -501,42 +498,99 @@ def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def write_compact_summary(settings: dict[str, Any]) -> None:
+def json_ready(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: json_ready(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_ready(item) for item in value]
+    return value
+
+
+def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
+    expected_model_families = ["base_sft", "contrastive_sft"]
+    expected_eval_names = ["training_dataset", "benchmark"]
+    expected_methods = ["base_model", *list(settings["methods"])]
+    present = {
+        (str(row.get("model_family")), str(row.get("eval_name")), str(row.get("method")))
+        for row in rows
+    }
+    missing = [
+        {
+            "model_family": family,
+            "eval_name": eval_name,
+            "method": method,
+        }
+        for family in expected_model_families
+        for eval_name in expected_eval_names
+        for method in expected_methods
+        if (family, eval_name, method) not in present
+    ]
+    return {
+        "expected_model_families": expected_model_families,
+        "expected_eval_names": expected_eval_names,
+        "expected_methods": expected_methods,
+        "missing": missing,
+        "complete": not missing,
+    }
+
+
+def write_results_json(settings: dict[str, Any], regular_config: Path, contrastive_config: Path) -> None:
+    base_summary = read_pruning_summary(settings["regular_pruning_output_dir"])
+    contrastive_summary = read_pruning_summary(settings["contrastive_pruning_output_dir"])
     rows = rows_for_family("base_sft", settings["regular_pruning_output_dir"]) + rows_for_family(
         "contrastive_sft",
         settings["contrastive_pruning_output_dir"],
     )
-    fieldnames = [
-        "model_family",
-        "eval_name",
-        "phase",
-        "method",
-        "status",
-        "em1",
-        "em5",
-        "em1_correct",
-        "em5_correct",
-        "total_examples",
-        "avg_generated_tokens",
-        "max_token_hit_rate",
-        "achieved_whole_model_sparsity",
-        "achieved_prunable_sparsity",
-        "checkpoint_evaluated",
-        "eval_output_dir",
-        "error",
-    ]
-    summary_csv = Path(settings["summary_csv"])
-    summary_json = Path(settings["summary_json"])
-    summary_csv.parent.mkdir(parents=True, exist_ok=True)
-    with summary_csv.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    with summary_json.open("w", encoding="utf-8") as handle:
-        json.dump({"results": rows}, handle, ensure_ascii=False, indent=2)
+    output_path = Path(settings["results_json"])
+    payload = {
+        "schema_version": 1,
+        "run": {
+            "epochs": settings["epochs"],
+            "methods": settings["methods"],
+            "eval_runs": settings["eval_runs"],
+            "top_k_exact_match": settings["top_k_exact_match"],
+            "comparison_mode": settings["comparison_mode"],
+            "cuda_visible_devices": settings["cuda_visible_devices"],
+            "nproc_per_node": settings["nproc_per_node"],
+            "run_root": settings["run_root"],
+            "config_files": {
+                "base_sft": settings["sft_config"],
+                "contrastive_sft": settings["contrastive_config"],
+                "prune": settings["prune_config"],
+            },
+            "base_model": settings.get("base_model"),
+            "contrastive_base_model": settings["contrastive_base_model"],
+            "checkpoints": {
+                "base_sft_final": settings["regular_final"],
+                "contrastive_sft_final": settings["contrastive_final"],
+            },
+            "generated_configs": {
+                "base_sft": regular_config,
+                "contrastive_sft": contrastive_config,
+            },
+            "pruning": {
+                "sparsity": settings["sparsity"],
+                "scope": settings["pruning_scope"],
+                "sparsity_denominator": settings["sparsity_denominator"],
+                "granularity": settings["granularity"],
+                "include_lm_head": settings["include_lm_head"],
+                "calibration_batches": settings["calibration_batches"],
+            },
+        },
+        "checks": result_completeness(rows, settings),
+        "results": rows,
+        "raw_benchmark_summaries": {
+            "base_sft": base_summary,
+            "contrastive_sft": contrastive_summary,
+        },
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(json_ready(payload), handle, ensure_ascii=False, indent=2)
         handle.write("\n")
-    print(f"\nWrote EM@1/EM@5 CSV:  {summary_csv}")
-    print(f"Wrote EM@1/EM@5 JSON: {summary_json}")
+    print(f"\nWrote consolidated JSON results: {output_path}")
 
 
 def print_plan(settings: dict[str, Any]) -> None:
@@ -552,7 +606,7 @@ def print_plan(settings: dict[str, Any]) -> None:
     print(f"  torchrun:              {settings['torchrun']}")
     print(f"  base SFT checkpoint:   {settings.get('base_model') or 'from SFT config'}")
     print(f"  contrastive base:      {settings['contrastive_base_model']}")
-    print(f"  compact summary CSV:   {settings['summary_csv']}")
+    print(f"  results JSON:          {settings['results_json']}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -597,7 +651,7 @@ def main() -> None:
         print("\nDry run complete.")
         return
 
-    write_compact_summary(settings)
+    write_results_json(settings, regular_config, contrastive_config)
     print("\nDone.")
 
 
