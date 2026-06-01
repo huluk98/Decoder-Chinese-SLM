@@ -81,6 +81,8 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "mean_response_loss",
     "response_perplexity",
     "avg_generated_tokens",
+    "reached_max_new_tokens",
+    "reached_max_new_tokens_rate",
     "pruning_report",
     "error",
 ]
@@ -391,7 +393,7 @@ def print_plan(
     print(f"  prune_config: {display_path(prune_config_path)}", flush=True)
     print(f"  calibration_data_path: {config.get('prune', {}).get('calibration_data_path')}", flush=True)
     print(f"  target_sparsity: {config.get('prune', {}).get('sparsity', 0.5)}", flush=True)
-    print(f"  pruning_scope: {config.get('prune', {}).get('scope', 'full_model')}", flush=True)
+    print(f"  pruning_scope: {config.get('prune', {}).get('scope', 'transformer_linears')}", flush=True)
     print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
     print(f"  exact_match_top_k: {benchmark.get('top_k_exact_match', 5)}", flush=True)
@@ -563,6 +565,8 @@ def dense_baseline_row(
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
+        "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
+        "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
         "error": "",
     }
 
@@ -866,6 +870,8 @@ def summary_row(
         "avg_generated_tokens_mean": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens": metric(summary, "avg_generated_tokens"),
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
+        "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
+        "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
         "error": error,
     }
 
@@ -965,6 +971,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "avg_generated_tokens_mean",
         "avg_generated_tokens",
         "avg_generated_tokens_std",
+        "reached_max_new_tokens",
+        "reached_max_new_tokens_rate",
         "error",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:

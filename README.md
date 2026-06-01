@@ -775,7 +775,7 @@ If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and
 
 ## 50% Pruning
 
-Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The default configs now use `prune.scope: full_model`, `sparsity_denominator: whole_model`, `granularity: global`, and `include_lm_head: true`, so 50% means 50% of all floating-point model parameters. Embeddings, output heads, tied output embeddings, norms, and biases are all inside the mask.
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The default configs now use `prune.scope: transformer_linears`, `sparsity_denominator: whole_model`, `granularity: layer`, and `include_lm_head: false`. That keeps embeddings, output heads, tied output embeddings, norms, biases, and non-Linear tensors protected while still asking the pruning code to resolve enough Linear sparsity for `achieved_whole_model_sparsity` to land at the 50% target on dense checkpoints.
 
 Run one pruning method:
 
@@ -789,10 +789,10 @@ python scripts/prune.py \
 
 Available methods:
 
-- `magnitude`: global unstructured 50% pruning by `abs(parameter)`.
-- `2of4`: exact 2:4 masks on eligible linear weights, plus magnitude fallback for every other floating tensor so the whole model still reaches 50%.
-- `wanda`: activation-aware scoring for linear weights, plus magnitude fallback for non-linear tensors under full-model scope.
-- `gradient`: global gradient-score pruning using `abs(parameter * grad)` on calibration batches.
+- `magnitude`: layerwise unstructured pruning by `abs(parameter)` over protected transformer Linear weights; with the default whole-model denominator, the resolved Linear sparsity is raised above 50% when needed to achieve real 50% model sparsity.
+- `2of4`: exact 2:4 masks on eligible Linear weights. Because exact 2:4 is fixed at 50% within those groups, it is reported as 50% prunable-Linear sparsity when protected parameters remain unchanged.
+- `wanda`: activation-aware rowwise scoring for protected Linear weights.
+- `gradient`: layerwise gradient-score pruning using `abs(parameter * grad)` on calibration batches.
 
 Run all four:
 
@@ -879,7 +879,7 @@ CONFIG_PATH=configs/qwen25_instruct_pruning_benchmark.yaml ./scripts/run_pruning
 
 Base `Qwen/Qwen2.5-0.5B` and custom decoder-only models should use the generic pruning benchmark, not the Qwen2.5-Instruct benchmark. If you want to force that path, run with `MODE=generic`.
 
-This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_eval.json`. It then runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for 50% prunable-transformer-Linear sparsity and zero mask violations, evaluates the reloaded one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
+This first evaluates the dense Qwen SFT checkpoint and writes `dense_baseline_eval.json`. It then runs all four pruning methods with `scripts/prune_qwen25_instruct.py`, checks the saved pruning report for the configured sparsity denominator and zero mask violations, evaluates the reloaded one-shot pruned checkpoint once with `scripts/eval_qwen25_instruct.py`, then retunes for 3 epochs with `scripts/sft_qwen25_instruct.py --pruning-mask ...` so zeroed weights stay zero after every optimizer step. Outputs are grouped under `benchmark.output_dir` with Qwen-specific summaries:
 
 - `one_shot/<method>/`
 - `retuned/<method>/final/`
@@ -916,9 +916,17 @@ conda activate chatlm-decoder
 ./run_sft_and_contrastive_pruning_benchmarks.sh
 ```
 
-That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pruning_benchmark_contrastive_sft.yaml`. Each config prunes the checkpoint with `magnitude`, `wanda`, `gradient`, and NVIDIA `2of4`; uses full-model, whole-model 50% sparsity with `include_lm_head: true`; evaluates the dense baseline, one-shot pruned checkpoints, and masked-retuned checkpoints; and reports both `exact_match_accuracy` and `exact_match_at_top_k_accuracy` with `top_k_exact_match: 5`.
+That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pruning_benchmark_contrastive_sft.yaml`. Each config prunes the checkpoint with `magnitude`, `wanda`, `gradient`, and NVIDIA `2of4`; protects embeddings, norms, biases, and `lm_head` while targeting 50% whole-model sparsity for methods that can satisfy it; evaluates the dense baseline, one-shot pruned checkpoints, and masked-retuned checkpoints; and reports both `exact_match_accuracy` and `exact_match_at_top_k_accuracy` with `top_k_exact_match: 5`. The exact `2of4` row should be read as the fixed 50% prunable-Linear hardware-pattern condition, not as an exact 50% whole-model condition.
 
 The regular SFT config evaluates both `sft_dataset` and `benchmark`. The contrastive SFT config evaluates both `anchor_dataset` and `benchmark`. The expensive prune/retune step runs once per method per model, and the saved checkpoint is then evaluated on both named eval files. The benchmark split has difficulty labels (`easy`, `medium`, `hard`; currently 70/65/65 examples), and the summaries include overall accuracy plus per-hardness columns such as `difficulty_easy_exact_match_accuracy`, `difficulty_medium_exact_match_accuracy`, `difficulty_hard_exact_match_accuracy`, and matching exact-match@5 columns.
+
+For the full journal run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs, evaluates both dense models on the training dataset and benchmark, then runs one-shot `wanda`, `gradient`, `magnitude`, and `2of4`, use:
+
+```bash
+PYTHON=/path/to/training/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh
+```
+
+All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The compact EM@1/EM@5 table is written to `runs/5epoch-sft-contrastive-one-shot/em1_em5_summary.csv`.
 
 Quick prune commands:
 
@@ -1043,9 +1051,9 @@ pruning_benchmark_summary.json
 
 That gives 8 model outputs total and 8 benchmark output folders total for a single eval file, plus the dense baseline eval folder. With `benchmark.eval_files`, the same 8 model outputs are reused across each named eval file and the CSV includes `eval_name` and `eval_file`. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json`, `exact_match_failure_cases.json`, and `top_k_exact_match_failure_cases.json`. When rows contain `difficulty` or `hardness`, the eval summary also writes `by_difficulty` and flat CSV-ready fields for easy/medium/hard top-1 and top-5 accuracy.
 
-Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default full-model scope, both should land at the 50% target for dense checkpoints.
+Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default protected whole-model target, `achieved_whole_model_sparsity` should land at 50% for magnitude, Wanda, and gradient on dense checkpoints, while exact `2of4` remains the fixed 50% prunable-Linear condition.
 
-The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, or generated predictions are all empty/all identical/mostly prompt copies. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance`, any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, generated predictions are all empty/all identical/mostly prompt copies, or too many generations hit `max_new_tokens` without EOS. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
 ### Final IoT Benchmark Eval
 

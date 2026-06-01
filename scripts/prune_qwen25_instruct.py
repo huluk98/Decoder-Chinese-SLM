@@ -118,7 +118,7 @@ def make_masks(
     prune_config: dict[str, Any],
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     requested_sparsity = float(prune_config.get("sparsity", 0.5))
-    scope = normalize_pruning_scope(prune_config.get("scope", "full_model"))
+    scope = normalize_pruning_scope(prune_config.get("scope", "transformer_linears"))
     include_lm_head = bool(prune_config.get("include_lm_head", scope == "full_model"))
     max_batches = int(prune_config.get("calibration_batches", 128))
     granularity = str(prune_config.get("granularity", prune_config.get("pruning_granularity", "layer"))).lower()
@@ -139,6 +139,26 @@ def make_masks(
     prune_config["_pruning_scope"] = scope
 
     if method == "2of4":
+        method_target_note = ""
+        if scope != "full_model" and str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
+            requested_resolution = target_resolution
+            target_resolution = resolve_prunable_sparsity_for_target(
+                model,
+                target_sparsity=0.5,
+                denominator="prunable",
+                include_lm_head=include_lm_head,
+                scope=scope,
+            )
+            sparsity = 0.5
+            prune_config["_target_resolution"] = target_resolution
+            prune_config["_resolved_prunable_sparsity"] = sparsity
+            method_target_note = (
+                "Pure NVIDIA 2:4 is a fixed vanilla method: exactly 50% sparsity within each prunable "
+                "Linear 4-weight group. It cannot also satisfy a 50% whole-model target while protected "
+                "parameters remain unchanged, so this method is run and reported as 50% prunable 2:4. "
+                f"The requested whole-model target would have required "
+                f"{float(requested_resolution['target_prunable_sparsity']):.8f} prunable sparsity."
+            )
         masks = two_of_four_masks(model, include_lm_head=include_lm_head, scope=scope, sparsity=sparsity)
         validation = validate_two_of_four_masks(masks, model=model, include_lm_head=include_lm_head, scope=scope)
         if not validation["valid"]:
@@ -151,6 +171,7 @@ def make_masks(
             "pruning_granularity": "per_group_of_4_input_weights",
             "score_definition": "in each group of 4 weights, keep top 2 by abs(weight)",
             "method_variant": "full_model_2of4_plus_magnitude_fallback" if scope == "full_model" else "vanilla_nvidia_2of4",
+            "method_target_note": method_target_note,
             "target_resolution": target_resolution,
             "nvidia_2of4_validation": validation,
         }
@@ -302,7 +323,7 @@ def save_pruned_model(
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
     target_sparsity = float(prune_config.get("sparsity", 0.5))
-    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "transformer_linears")))
     target_resolution = prune_config.get("_target_resolution") or resolve_prunable_sparsity_for_target(
         model,
         target_sparsity=target_sparsity,
@@ -414,7 +435,7 @@ def main() -> None:
 
     calibration_loader = build_calibration_loader(tokenizer, config, prune_config)
     masks, diagnostics = make_masks(method, model, calibration_loader, device, prune_config)
-    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "transformer_linears")))
     validate_masks_match_prunable_scope(
         model,
         masks,

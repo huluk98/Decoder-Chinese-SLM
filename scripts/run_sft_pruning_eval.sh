@@ -133,10 +133,10 @@ SEED="${SEED:-42}"
 DATA_SEED="${DATA_SEED:-${SEED}}"
 COMPARISON_MODE="${COMPARISON_MODE:-${SCRIPT_COMPARISON_MODE:-whitespace}}"
 SPARSITY="${SPARSITY:-0.5}"
-PRUNING_SCOPE="${PRUNING_SCOPE:-full_model}"
+PRUNING_SCOPE="${PRUNING_SCOPE:-transformer_linears}"
 SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
-GRANULARITY="${GRANULARITY:-global}"
-INCLUDE_LM_HEAD="${INCLUDE_LM_HEAD:-true}"
+GRANULARITY="${GRANULARITY:-layer}"
+INCLUDE_LM_HEAD="${INCLUDE_LM_HEAD:-false}"
 
 mkdir -p "${OUTPUT_DIR}/generated_configs" "${OUTPUT_DIR}/benchmarks/one_shot" "${OUTPUT_DIR}/one_shot"
 
@@ -394,6 +394,8 @@ rows.append(
         "mean_response_loss": metric(dense_eval, "mean_response_loss"),
         "response_perplexity": metric(dense_eval, "response_perplexity"),
         "avg_generated_tokens": metric(dense_eval, "avg_generated_tokens"),
+        "reached_max_new_tokens": metric_count(dense_eval, "reached_max_new_tokens"),
+        "reached_max_new_tokens_rate": metric(dense_eval, "reached_max_new_tokens_rate"),
         "active_model_parameters": "",
         "pruned_prunable_parameters": "",
         "active_prunable_parameters": "",
@@ -443,6 +445,8 @@ for method in methods:
             "mean_response_loss": metric(eval_summary, "mean_response_loss"),
             "response_perplexity": metric(eval_summary, "response_perplexity"),
             "avg_generated_tokens": metric(eval_summary, "avg_generated_tokens"),
+            "reached_max_new_tokens": metric_count(eval_summary, "reached_max_new_tokens"),
+            "reached_max_new_tokens_rate": metric(eval_summary, "reached_max_new_tokens_rate"),
             "active_model_parameters": nonzero_parameters,
             "pruned_prunable_parameters": report_value(report, "pruned_prunable_parameters", "pruned_mask_parameters"),
             "active_prunable_parameters": report_value(report, "active_prunable_parameters", "active_mask_parameters"),

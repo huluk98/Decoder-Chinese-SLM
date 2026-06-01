@@ -81,7 +81,7 @@ def make_masks(
     prune_config: dict[str, Any],
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     requested_sparsity = float(prune_config.get("sparsity", 0.5))
-    scope = normalize_pruning_scope(prune_config.get("scope", "full_model"))
+    scope = normalize_pruning_scope(prune_config.get("scope", "transformer_linears"))
     include_lm_head = bool(prune_config.get("include_lm_head", scope == "full_model"))
     max_batches = int(prune_config.get("calibration_batches", 128))
     granularity = str(prune_config.get("granularity", prune_config.get("pruning_granularity", "layer"))).lower()
@@ -286,7 +286,7 @@ def save_pruned_model(
     mask_path = output_dir / "pruning_masks.pt"
     torch.save({name: mask.cpu() for name, mask in masks.items()}, mask_path)
     requested_sparsity = float(prune_config.get("sparsity", 0.5))
-    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "transformer_linears")))
     target_resolution = prune_config.get("_target_resolution") or resolve_prunable_sparsity_for_target(
         model,
         target_sparsity=requested_sparsity,
@@ -383,7 +383,7 @@ def main() -> None:
 
     calibration_loader = build_calibration_loader(config, tokenizer, prune_config)
     masks, diagnostics = make_masks(method, model, calibration_loader, device, prune_config)
-    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "full_model")))
+    scope = normalize_pruning_scope(prune_config.get("_pruning_scope", prune_config.get("scope", "transformer_linears")))
     validate_masks_match_prunable_scope(
         model,
         masks,
