@@ -547,6 +547,29 @@ def score_batch(
     return results
 
 
+def trim_completion_token_ids(
+    completion_ids: torch.Tensor,
+    tokenizer: AutoTokenizer,
+    max_new_tokens: int,
+) -> tuple[list[int], bool]:
+    token_ids = [int(token_id) for token_id in completion_ids.detach().cpu().tolist()]
+    trimmed_ids: list[int] = []
+    hit_eos = False
+    hit_pad = False
+    eos_token_id = tokenizer.eos_token_id
+    pad_token_id = tokenizer.pad_token_id
+    for token_id in token_ids:
+        if eos_token_id is not None and token_id == int(eos_token_id):
+            hit_eos = True
+            break
+        if pad_token_id is not None and pad_token_id != eos_token_id and token_id == int(pad_token_id):
+            hit_pad = True
+            break
+        trimmed_ids.append(token_id)
+    reached_max_new_tokens = (not hit_eos) and (not hit_pad) and len(trimmed_ids) >= int(max_new_tokens)
+    return trimmed_ids, reached_max_new_tokens
+
+
 @torch.no_grad()
 def generate_completion(
     model: AutoModelForCausalLM,
@@ -560,7 +583,7 @@ def generate_completion(
     top_k: int,
     num_beams: int,
     repetition_penalty: float,
-) -> tuple[str, int]:
+) -> tuple[str, int, bool]:
     inputs = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
@@ -576,8 +599,13 @@ def generate_completion(
         generation_kwargs["top_k"] = int(top_k)
     output_ids = model.generate(**inputs, **generation_kwargs)
     completion_ids = output_ids[0][int(inputs["input_ids"].shape[-1]) :]
-    completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
-    return completion, int(completion_ids.numel())
+    trimmed_ids, reached_max_new_tokens = trim_completion_token_ids(
+        completion_ids,
+        tokenizer=tokenizer,
+        max_new_tokens=max_new_tokens,
+    )
+    completion = tokenizer.decode(trimmed_ids, skip_special_tokens=True).strip()
+    return completion, len(trimmed_ids), reached_max_new_tokens
 
 
 @torch.no_grad()
@@ -594,7 +622,7 @@ def generate_completions_batch(
     top_k: int,
     num_beams: int,
     repetition_penalty: float,
-) -> list[tuple[str, int]]:
+) -> list[tuple[str, int, bool]]:
     if not prompt_texts:
         return []
     previous_padding_side = tokenizer.padding_side
@@ -624,11 +652,16 @@ def generate_completions_batch(
         generation_kwargs["top_p"] = top_p
         generation_kwargs["top_k"] = int(top_k)
     output_ids = model.generate(**inputs, **generation_kwargs)
-    completions: list[tuple[str, int]] = []
+    completions: list[tuple[str, int, bool]] = []
     for row in range(int(output_ids.shape[0])):
         completion_ids = output_ids[row, prompt_width:]
-        completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
-        completions.append((completion, int(completion_ids.numel())))
+        trimmed_ids, reached_max_new_tokens = trim_completion_token_ids(
+            completion_ids,
+            tokenizer=tokenizer,
+            max_new_tokens=max_new_tokens,
+        )
+        completion = tokenizer.decode(trimmed_ids, skip_special_tokens=True).strip()
+        completions.append((completion, len(trimmed_ids), reached_max_new_tokens))
     return completions
 
 
@@ -642,7 +675,7 @@ def generate_topk_completions_batch(
     max_new_tokens: int,
     exact_match_top_k: int,
     repetition_penalty: float,
-) -> list[list[tuple[str, int]]]:
+) -> list[list[tuple[str, int, bool]]]:
     if not prompt_texts:
         return []
     top_k = max(1, int(exact_match_top_k))
@@ -671,14 +704,19 @@ def generate_topk_completions_batch(
         repetition_penalty=float(repetition_penalty),
         early_stopping=True,
     )
-    grouped: list[list[tuple[str, int]]] = []
+    grouped: list[list[tuple[str, int, bool]]] = []
     for row in range(len(prompt_texts)):
-        candidates: list[tuple[str, int]] = []
+        candidates: list[tuple[str, int, bool]] = []
         start = row * top_k
         for output_row in output_ids[start : start + top_k]:
             completion_ids = output_row[prompt_width:]
-            completion = tokenizer.decode(completion_ids, skip_special_tokens=False).strip()
-            candidates.append((completion, int(completion_ids.numel())))
+            trimmed_ids, reached_max_new_tokens = trim_completion_token_ids(
+                completion_ids,
+                tokenizer=tokenizer,
+                max_new_tokens=max_new_tokens,
+            )
+            completion = tokenizer.decode(trimmed_ids, skip_special_tokens=True).strip()
+            candidates.append((completion, len(trimmed_ids), reached_max_new_tokens))
         grouped.append(candidates)
     return grouped
 
@@ -795,6 +833,7 @@ def grouped_exact_metrics(results: list[dict[str, Any]], field: str, exact_match
         top_k_correct = sum(1 for row in rows if bool(row.get("exact_match_at_top_k")))
         loss_values = [float(row["loss"]) for row in rows if row.get("loss") is not None]
         generated_values = [float(row["generated_length"]) for row in rows if row.get("generated_length") is not None]
+        reached_max_count = sum(1 for row in rows if bool(row.get("reached_max_new_tokens")))
         loss = finite_mean(loss_values)
         generated_tokens = finite_mean(generated_values)
         grouped[key] = {
@@ -806,6 +845,8 @@ def grouped_exact_metrics(results: list[dict[str, Any]], field: str, exact_match
             "mean_response_loss": loss,
             "response_perplexity": math.exp(loss) if loss is not None else None,
             "avg_generated_tokens": generated_tokens if exact_match_enabled else None,
+            "reached_max_new_tokens": reached_max_count if exact_match_enabled else None,
+            "reached_max_new_tokens_rate": reached_max_count / float(len(rows) or 1) if exact_match_enabled else None,
         }
     return grouped
 
@@ -826,6 +867,8 @@ def flatten_difficulty_metrics(
         summary[f"{prefix}_mean_response_loss"] = metrics.get("mean_response_loss")
         summary[f"{prefix}_response_perplexity"] = metrics.get("response_perplexity")
         summary[f"{prefix}_avg_generated_tokens"] = metrics.get("avg_generated_tokens")
+        summary[f"{prefix}_reached_max_new_tokens"] = metrics.get("reached_max_new_tokens")
+        summary[f"{prefix}_reached_max_new_tokens_rate"] = metrics.get("reached_max_new_tokens_rate")
         if exact_match_top_k == 5:
             summary[f"{prefix}_exact_match_at_5_correct"] = metrics.get("exact_match_at_top_k_correct")
             summary[f"{prefix}_exact_match_at_5_accuracy"] = metrics.get("exact_match_at_top_k_accuracy")
@@ -916,6 +959,7 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             "exact_match_at_top_k",
             "top_k_match_rank",
             "generated_length",
+            "reached_max_new_tokens",
             "label_length",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -936,6 +980,7 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
                     "exact_match_at_top_k": result.get("exact_match_at_top_k", ""),
                     "top_k_match_rank": result.get("top_k_match_rank", ""),
                     "generated_length": result.get("generated_length", result.get("generated_token_count", "")),
+                    "reached_max_new_tokens": result.get("reached_max_new_tokens", ""),
                     "label_length": result.get("label_length", result.get("response_token_count", "")),
                 }
             )
@@ -957,6 +1002,8 @@ def write_prediction_files(output_dir: Path, results: list[dict[str, Any]], summ
             "top_k_match_rank": result.get("top_k_match_rank"),
             "top_k_candidates": result.get("top_k_candidates", []),
             "response_loss": result.get("loss"),
+            "generated_length": result.get("generated_length"),
+            "reached_max_new_tokens": result.get("reached_max_new_tokens"),
         }
         for result in results[:50]
     ]
@@ -1012,6 +1059,7 @@ def write_eval_run_config(
             "top_k": None if not args.do_sample else int(args.top_k),
             "exact_match_top_k": int(args.exact_match_top_k),
             "max_new_tokens": int(args.max_new_tokens),
+            "max_new_token_hit_rate_threshold": float(args.max_new_token_hit_rate_threshold),
             "repetition_penalty": float(args.repetition_penalty),
             "eos_token_id": tokenizer.eos_token_id,
             "pad_token_id": tokenizer.pad_token_id,
@@ -1127,6 +1175,12 @@ def main() -> None:
     )
     parser.add_argument("--generate-samples", type=int, default=0, help="Generate completions for the first N rows.")
     parser.add_argument("--max-new-tokens", type=int, default=64)
+    parser.add_argument(
+        "--max-new-token-hit-rate-threshold",
+        type=float,
+        default=0.5,
+        help="Fail exact-match eval if more than this fraction of rows hit max_new_tokens without EOS. Set above 1 to disable.",
+    )
     parser.add_argument("--do-sample", action="store_true", help="Enable sampling. Default exact-match eval is greedy.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.9)
@@ -1159,6 +1213,8 @@ def main() -> None:
         raise ValueError("--cached-predictions-file was provided without --use-cached-predictions.")
     if int(args.exact_match_top_k) < 1:
         raise ValueError("--exact-match-top-k must be at least 1.")
+    if float(args.max_new_token_hit_rate_threshold) < 0:
+        raise ValueError("--max-new-token-hit-rate-threshold must be non-negative.")
     if args.use_cached_predictions and int(args.exact_match_top_k) > 1:
         raise ValueError("--exact-match-top-k > 1 requires fresh model generation, not cached single predictions.")
 
@@ -1312,8 +1368,8 @@ def main() -> None:
             batch_pairs = indexed_examples[start : start + batch_size]
             batch = [example for _, example in batch_pairs]
             scores = score_batch(model=model, examples=batch, pad_token_id=int(pad_token_id), device=device)
-            generation_by_index: dict[int, tuple[str, int, str]] = {}
-            top_k_generation_by_index: dict[int, list[tuple[str, int]]] = {}
+            generation_by_index: dict[int, tuple[str, int, str, bool]] = {}
+            top_k_generation_by_index: dict[int, list[tuple[str, int, bool]]] = {}
             needs_generation = [
                 (offset, index, batch[offset])
                 for offset, (index, _example) in enumerate(batch_pairs)
@@ -1324,7 +1380,7 @@ def main() -> None:
                     for _offset, index, _example in needs_generation:
                         generated = cached_predictions[index]
                         generated_token_count = len(tokenizer(generated, add_special_tokens=False)["input_ids"])
-                        generation_by_index[index] = (generated, generated_token_count, "")
+                        generation_by_index[index] = (generated, generated_token_count, "", False)
                 else:
                     try:
                         generated_batch = generate_completions_batch(
@@ -1341,13 +1397,13 @@ def main() -> None:
                             num_beams=int(args.num_beams),
                             repetition_penalty=float(args.repetition_penalty),
                         )
-                        for (_offset, index, _example), (generated, generated_token_count) in zip(
+                        for (_offset, index, _example), (generated, generated_token_count, reached_max) in zip(
                             needs_generation, generated_batch
                         ):
-                            generation_by_index[index] = (generated, generated_token_count, "")
+                            generation_by_index[index] = (generated, generated_token_count, "", reached_max)
                     except Exception as exc:
                         for _offset, index, _example in needs_generation:
-                            generation_by_index[index] = ("", 0, repr(exc))
+                            generation_by_index[index] = ("", 0, repr(exc), False)
                 if bool(args.exact_match) and int(args.exact_match_top_k) > 1:
                     top_k_generated_batch = generate_topk_completions_batch(
                         model=model,
@@ -1387,7 +1443,10 @@ def main() -> None:
                     ),
                 }
                 if bool(args.exact_match) or index < int(args.generate_samples):
-                    generated, generated_token_count, generation_error = generation_by_index.get(index, ("", 0, ""))
+                    generated, generated_token_count, generation_error, reached_max = generation_by_index.get(
+                        index,
+                        ("", 0, "", False),
+                    )
                     normalized_generated = normalize_whitespace_exact(generated, tokenizer=tokenizer)
                     normalized_target = normalize_whitespace_exact(batch[offset]["response_text"], tokenizer=tokenizer)
                     comparison_generated = comparison_text(generated, tokenizer=tokenizer, comparison_mode=args.comparison_mode)
@@ -1407,6 +1466,7 @@ def main() -> None:
                     result["comparison_mode"] = args.comparison_mode
                     result["generated_token_count"] = generated_token_count
                     result["generated_length"] = generated_token_count
+                    result["reached_max_new_tokens"] = bool(reached_max)
                     result["empty_prediction"] = not bool(normalized_generated)
                     result["invalid_structured_output"] = invalid_structured_output(generated, comparison_generated)
                     result["generation_error"] = generation_error
@@ -1421,10 +1481,8 @@ def main() -> None:
                         if int(args.exact_match_top_k) > 1:
                             raw_candidates = top_k_generation_by_index.get(index, [])
                             seen_comparisons: set[str] = set()
-                            for candidate_rank, (candidate_text, candidate_token_count) in enumerate(
-                                raw_candidates,
-                                start=1,
-                            ):
+                            for candidate_rank, candidate in enumerate(raw_candidates, start=1):
+                                candidate_text, candidate_token_count, candidate_reached_max = candidate
                                 candidate_comparison = comparison_text(
                                     candidate_text,
                                     tokenizer=tokenizer,
@@ -1440,6 +1498,7 @@ def main() -> None:
                                         "normalized_prediction": candidate_comparison,
                                         "exact_match": candidate_exact,
                                         "generated_length": candidate_token_count,
+                                        "reached_max_new_tokens": bool(candidate_reached_max),
                                         "duplicate_normalized_prediction": candidate_comparison in seen_comparisons,
                                     }
                                 )
@@ -1453,6 +1512,7 @@ def main() -> None:
                                     "normalized_prediction": comparison_generated,
                                     "exact_match": is_exact,
                                     "generated_length": generated_token_count,
+                                    "reached_max_new_tokens": bool(reached_max),
                                     "duplicate_normalized_prediction": False,
                                 }
                             )
@@ -1506,6 +1566,8 @@ def main() -> None:
         empty_predictions = sum(1 for result in results if result.get("empty_prediction"))
         invalid_outputs = sum(1 for result in results if result.get("invalid_structured_output"))
         generation_errors = sum(1 for result in results if result.get("generation_error"))
+        reached_max_new_tokens = sum(1 for result in results if bool(result.get("reached_max_new_tokens")))
+        reached_max_new_tokens_rate = reached_max_new_tokens / max(1, len(results))
         avg_label_length = sum(label_lengths) / max(1, len(label_lengths))
         if args.exact_match and results:
             generated_texts = [str(result.get("raw_prediction", "")).strip() for result in results]
@@ -1522,6 +1584,12 @@ def main() -> None:
                 raise RuntimeError("Generated predictions are all identical; inspect generation/checkpoint loading before trusting the benchmark.")
             if prompt_copies / max(1, len(results)) > 0.5:
                 raise RuntimeError("Generated predictions are mostly prompt copies; response extraction or chat formatting is likely wrong.")
+            if reached_max_new_tokens_rate > float(args.max_new_token_hit_rate_threshold):
+                raise RuntimeError(
+                    "Generated predictions are frequently hitting max_new_tokens without EOS "
+                    f"({reached_max_new_tokens}/{len(results)} = {reached_max_new_tokens_rate:.4f}); "
+                    "the model may be damaged or the stop-token configuration is wrong."
+                )
         incorrect = len(records) - exact_correct if args.exact_match else None
         top_k_exact_match = int(args.exact_match_top_k)
         by_difficulty = grouped_exact_metrics(results, "difficulty", exact_match_enabled=bool(args.exact_match))
@@ -1548,6 +1616,8 @@ def main() -> None:
             "invalid_structured_outputs": invalid_outputs if args.exact_match else None,
             "generation_errors": generation_errors if args.exact_match else None,
             "avg_generated_tokens": avg_generated_tokens if args.exact_match else None,
+            "reached_max_new_tokens": reached_max_new_tokens if args.exact_match else None,
+            "reached_max_new_tokens_rate": reached_max_new_tokens_rate if args.exact_match else None,
             "avg_label_tokens": avg_label_length,
             "max_new_tokens": int(args.max_new_tokens),
             "top_k_exact_match": int(args.exact_match_top_k) if args.exact_match else None,
@@ -1581,7 +1651,8 @@ def main() -> None:
             print(
                 f"[run {run_index + 1}/{benchmark_runs}] Exact-match accuracy={summary['exact_match_accuracy']:.4f} "
                 f"({summary['exact_match_correct']}/{summary['total_examples']}) "
-                f"avg_generated_tokens={summary['avg_generated_tokens']:.2f}"
+                f"avg_generated_tokens={summary['avg_generated_tokens']:.2f} "
+                f"max_token_hits={summary['reached_max_new_tokens']}/{summary['total_examples']}"
             )
             if int(args.exact_match_top_k) > 1:
                 print(
@@ -1607,6 +1678,12 @@ def main() -> None:
                     print(f"[run {run_index + 1}/{benchmark_runs}] Difficulty accuracy: " + "; ".join(difficulty_parts))
             if summary["avg_generated_tokens"] is not None and summary["avg_generated_tokens"] >= 0.9 * int(args.max_new_tokens):
                 print("[warning] Average generated length is close to max_new_tokens; the model may not be stopping cleanly.")
+            if summary["reached_max_new_tokens_rate"] is not None and summary["reached_max_new_tokens_rate"] > 0:
+                print(
+                    "[warning] Some generations reached max_new_tokens without EOS: "
+                    f"{summary['reached_max_new_tokens']} / {summary['total_examples']} "
+                    f"({summary['reached_max_new_tokens_rate']:.4f})."
+                )
 
     if rank != 0:
         if world_size > 1:
@@ -1635,6 +1712,8 @@ def main() -> None:
             "mean_response_loss",
             "response_perplexity",
             "avg_generated_tokens",
+            "reached_max_new_tokens",
+            "reached_max_new_tokens_rate",
             "avg_label_tokens",
             "empty_predictions",
             "invalid_structured_outputs",
@@ -1725,7 +1804,8 @@ def main() -> None:
             "Prompt/response benchmark summary:\n"
             f"  loss={benchmark_summary['mean_response_loss_mean_pm_std']}\n"
             f"  ppl={benchmark_summary['response_perplexity_mean_pm_std']}\n"
-            f"  avg_generated_tokens={benchmark_summary['avg_generated_tokens_mean_pm_std']}"
+            f"  avg_generated_tokens={benchmark_summary['avg_generated_tokens_mean_pm_std']}\n"
+            f"  reached_max_new_tokens_rate={benchmark_summary['reached_max_new_tokens_rate_mean_pm_std']}"
         )
         if args.exact_match:
             print(f"  exact_match_accuracy={benchmark_summary['exact_match_accuracy_mean_pm_std']}")

@@ -12,10 +12,10 @@ prune:
   output_dir: runs/pruned-qwen25-0p5b
   method: magnitude
   sparsity: 0.5
-  scope: full_model
+  scope: transformer_linears
   sparsity_denominator: whole_model
-  granularity: global
-  include_lm_head: true
+  granularity: layer
+  include_lm_head: false
   calibration_data_path: /path/to/calibration_or_sft.json
   calibration_batches: 128
   max_length: 256
