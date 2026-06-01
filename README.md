@@ -926,7 +926,7 @@ For the full journal run that trains regular SFT for 5 epochs, trains contrastiv
 PYTHON=/path/to/training/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh
 ```
 
-All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The compact EM@1/EM@5 table is written to `runs/5epoch-sft-contrastive-one-shot/em1_em5_summary.csv`.
+All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains the run settings, generated config paths, dense baseline rows, one-shot pruning rows, compact EM@1/EM@5 records for the training dataset and benchmark, and the raw pruning benchmark summaries. Change `results_json` in `CONFIG` or set `RESULTS_JSON=/path/to/results.json` to write it somewhere else.
 
 Quick prune commands:
 
