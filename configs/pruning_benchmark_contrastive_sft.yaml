@@ -4,7 +4,7 @@ benchmark:
   prune_config: configs/prune_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
   eval_files:
-    anchor_dataset: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_training_dataset.json"
+    anchor_dataset: data/scenic/SCENIC_full_training_dataset.json
     benchmark: data/benchmarks/iot_instruction_benchmark_200.json
   run_dense_baseline: true
   min_dense_exact_match_accuracy: null
@@ -27,7 +27,7 @@ prune:
   sparsity_denominator: whole_model
   granularity: layer
   include_lm_head: false
-  calibration_data_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_training_dataset.json"
+  calibration_data_path: data/scenic/SCENIC_full_training_dataset.json
   calibration_batches: 128
   max_length: 128
   batch_size: 2
@@ -40,7 +40,7 @@ retune:
   enabled: true
   config: configs/contrastive_sft_8gpu.yaml
   mode: contrastive
-  data_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_anchor_positive_negative.json"
+  data_path: data/scenic/SCENIC_full_anchor_positive_negative.json
   max_steps: null
   epochs: 3
   per_device_train_batch_size: null
