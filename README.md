@@ -920,13 +920,13 @@ That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pru
 
 The regular SFT config evaluates both `sft_dataset` and `benchmark`. The contrastive SFT config evaluates both `anchor_dataset` and `benchmark`. The expensive prune/retune step runs once per method per model, and the saved checkpoint is then evaluated on both named eval files. The benchmark split has difficulty labels (`easy`, `medium`, `hard`; currently 70/65/65 examples), and the summaries include overall accuracy plus per-hardness columns such as `difficulty_easy_exact_match_accuracy`, `difficulty_medium_exact_match_accuracy`, `difficulty_hard_exact_match_accuracy`, and matching exact-match@5 columns.
 
-For the full journal run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs, evaluates both dense models on the training dataset and benchmark, then runs one-shot `wanda`, `gradient`, `magnitude`, and `2of4`, use:
+For the full journal run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs, evaluates the original decoder, dense regular SFT, and dense contrastive SFT on the original SFT dataset and benchmark, then runs one-shot `wanda`, `gradient`, `magnitude`, and NVIDIA `2of4` on both SFT checkpoints, use:
 
 ```bash
 PYTHON=/path/to/training/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh
 ```
 
-All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains the run settings, generated config paths, dense baseline rows, one-shot pruning rows, compact EM@1/EM@5 records for the training dataset and benchmark, and the raw pruning benchmark summaries. Change `results_json` in `CONFIG` or set `RESULTS_JSON=/path/to/results.json` to write it somewhere else.
+All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
 
 Quick prune commands:
 

@@ -35,8 +35,10 @@ CONFIG: dict[str, Any] = {
     "sft_config": "configs/sft_0p2b_8gpu.yaml",
     "contrastive_config": "configs/contrastive_sft_8gpu.yaml",
     "prune_config": "configs/prune_50.yaml",
+    "original_model": None,  # None -> base_model override, then the base model in sft_config.
     "base_model": None,  # Optional override for regular/base SFT starting checkpoint.
     "contrastive_base_model": None,  # None means use the freshly trained regular SFT final checkpoint.
+    "original_eval_output_dir": None,  # None -> <run_root>/dense/original_decoder
     "regular_output_dir": None,  # None -> <run_root>/training/base_sft_5ep
     "contrastive_output_dir": None,  # None -> <run_root>/training/contrastive_sft_5ep
     "regular_pruning_output_dir": None,  # None -> <run_root>/pruning/base_sft
@@ -57,6 +59,7 @@ CONFIG: dict[str, Any] = {
     "prune_num_workers": 0,
     "sparsity_tolerance": 1.0e-3,
     "keep_going": True,
+    "run_original_decoder_eval": True,
     "train_regular_sft": True,
     "train_contrastive_sft": True,
     "run_pruning_benchmarks": True,
@@ -75,8 +78,10 @@ ENV_OVERRIDES = {
     "SFT_CONFIG": "sft_config",
     "CONTRASTIVE_CONFIG": "contrastive_config",
     "PRUNE_CONFIG": "prune_config",
+    "ORIGINAL_MODEL": "original_model",
     "BASE_MODEL": "base_model",
     "CONTRASTIVE_BASE_MODEL": "contrastive_base_model",
+    "ORIGINAL_EVAL_OUTPUT_DIR": "original_eval_output_dir",
     "REGULAR_OUTPUT_DIR": "regular_output_dir",
     "CONTRASTIVE_OUTPUT_DIR": "contrastive_output_dir",
     "REGULAR_PRUNING_OUTPUT_DIR": "regular_pruning_output_dir",
@@ -87,6 +92,7 @@ ENV_OVERRIDES = {
     "EVAL_RUNS": "eval_runs",
     "TOP_K_EXACT_MATCH": "top_k_exact_match",
     "KEEP_GOING": "keep_going",
+    "RUN_ORIGINAL_DECODER_EVAL": "run_original_decoder_eval",
     "DRY_RUN": "dry_run",
 }
 
@@ -223,6 +229,12 @@ def int_from_config(config: dict[str, Any], *keys: str, default: int) -> int:
     return int(default)
 
 
+def sft_base_model_from_config(config: dict[str, Any]) -> str:
+    sft = config.get("sft", {}) or {}
+    run = config.get("run", {}) or {}
+    return first_value(config.get("model_name_or_path"), sft.get("base_model"), run.get("base_model"))
+
+
 def dtype_from_config(config: dict[str, Any]) -> str:
     train = config.get("train", {}) or {}
     precision = str(train.get("precision", "")).lower()
@@ -235,8 +247,10 @@ def dtype_from_config(config: dict[str, Any]) -> str:
 
 def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     run_root = repo_path(config["run_root"])
+    sft_config = read_yaml(config["sft_config"])
     settings = dict(config)
     settings["run_root"] = run_root
+    settings["original_eval_output_dir"] = repo_path(config["original_eval_output_dir"]) if config.get("original_eval_output_dir") else run_root / "dense" / "original_decoder"
     settings["regular_output_dir"] = repo_path(config["regular_output_dir"]) if config.get("regular_output_dir") else run_root / "training" / "base_sft_5ep"
     settings["contrastive_output_dir"] = repo_path(config["contrastive_output_dir"]) if config.get("contrastive_output_dir") else run_root / "training" / "contrastive_sft_5ep"
     settings["regular_pruning_output_dir"] = repo_path(config["regular_pruning_output_dir"]) if config.get("regular_pruning_output_dir") else run_root / "pruning" / "base_sft"
@@ -245,6 +259,9 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["results_json"] = repo_path(config["results_json"]) if config.get("results_json") else run_root / "journal_results.json"
     settings["regular_final"] = settings["regular_output_dir"] / "final"
     settings["contrastive_final"] = settings["contrastive_output_dir"] / "final"
+    settings["original_model"] = config.get("original_model") or config.get("base_model") or sft_base_model_from_config(sft_config)
+    if not settings["original_model"]:
+        raise ValueError("Set original_model, base_model, or model_name_or_path in the base SFT config.")
     settings["contrastive_base_model"] = config.get("contrastive_base_model") or str(settings["regular_final"])
     settings["python"] = str(repo_path(config["python"])) if config.get("python") else sys.executable
     torchrun = config.get("torchrun")
@@ -324,10 +341,12 @@ def benchmark_config(
     source_config: dict[str, Any],
     config_path: str | Path,
     settings: dict[str, Any],
-    base_checkpoint: Path,
+    base_checkpoint: str | Path,
     output_dir: Path,
     inputs: dict[str, str],
+    methods: list[str] | None = None,
 ) -> dict[str, Any]:
+    benchmark_methods = list(settings["methods"] if methods is None else methods)
     max_length = int_from_config(source_config, "max_seq_length", "sft.max_length", default=128)
     max_new_tokens = int_from_config(source_config, "max_new_tokens", "generation.max_new_tokens", default=64)
     eval_batch_size = int_from_config(
@@ -346,7 +365,7 @@ def benchmark_config(
             "output_dir": str(output_dir),
             "base_checkpoint": str(base_checkpoint),
             "prune_config": str(settings["prune_config"]),
-            "methods": list(settings["methods"]),
+            "methods": benchmark_methods,
             "eval_files": eval_files,
             "run_dense_baseline": True,
             "min_dense_exact_match_accuracy": None,
@@ -375,19 +394,33 @@ def benchmark_config(
             "batch_size": int(settings["prune_batch_size"]),
             "num_workers": int(settings["prune_num_workers"]),
         },
-        "one_shot": {"enabled": True},
+        "one_shot": {"enabled": bool(benchmark_methods)},
         "retune": {"enabled": False},
         "_source_config": str(config_path),
     }
 
 
-def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, Path]:
+def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, Path, Path]:
     sft_config = read_yaml(settings["sft_config"])
     contrastive_config = read_yaml(settings["contrastive_config"])
     generated_dir = Path(settings["generated_config_dir"])
     generated_dir.mkdir(parents=True, exist_ok=True)
+    original_path = generated_dir / "original_decoder_dense_eval.yaml"
     regular_path = generated_dir / "base_sft_one_shot_pruning.yaml"
     contrastive_path = generated_dir / "contrastive_sft_one_shot_pruning.yaml"
+    write_yaml(
+        original_path,
+        benchmark_config(
+            label="original_decoder",
+            source_config=sft_config,
+            config_path=settings["sft_config"],
+            settings=settings,
+            base_checkpoint=settings["original_model"],
+            output_dir=settings["original_eval_output_dir"],
+            inputs=sft_eval_inputs(sft_config, settings["sft_config"]),
+            methods=[],
+        ),
+    )
     write_yaml(
         regular_path,
         benchmark_config(
@@ -412,17 +445,23 @@ def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, P
             inputs=contrastive_eval_inputs(contrastive_config, settings["contrastive_config"]),
         ),
     )
-    return regular_path, contrastive_path
+    return original_path, regular_path, contrastive_path
 
 
-def run_pruning_benchmark(config_path: Path, settings: dict[str, Any], env: dict[str, str]) -> None:
+def run_pruning_benchmark(
+    config_path: Path,
+    settings: dict[str, Any],
+    env: dict[str, str],
+    methods: list[str] | None = None,
+) -> None:
+    benchmark_methods = list(settings["methods"] if methods is None else methods)
     cmd = [
         str(settings["python"]),
         "scripts/run_pruning_benchmark.py",
         "--config",
         str(config_path),
         "--methods",
-        " ".join(str(method) for method in settings["methods"]),
+        " ".join(str(method) for method in benchmark_methods),
     ]
     cmd.append("--continue-on-error" if settings["keep_going"] else "--stop-on-error")
     if settings["dry_run"]:
@@ -509,40 +548,58 @@ def json_ready(value: Any) -> Any:
 
 
 def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
-    expected_model_families = ["base_sft", "contrastive_sft"]
     expected_eval_names = ["training_dataset", "benchmark"]
-    expected_methods = ["base_model", *list(settings["methods"])]
+    expected_rows: list[dict[str, str]] = []
+    if settings.get("run_original_decoder_eval", True):
+        expected_rows.extend(
+            {"model_family": "original_decoder", "eval_name": eval_name, "method": "base_model"}
+            for eval_name in expected_eval_names
+        )
+    for family in ("base_sft", "contrastive_sft"):
+        expected_rows.extend(
+            {"model_family": family, "eval_name": eval_name, "method": "base_model"}
+            for eval_name in expected_eval_names
+        )
+        expected_rows.extend(
+            {"model_family": family, "eval_name": eval_name, "method": str(method)}
+            for eval_name in expected_eval_names
+            for method in settings["methods"]
+        )
     present = {
         (str(row.get("model_family")), str(row.get("eval_name")), str(row.get("method")))
         for row in rows
     }
     missing = [
-        {
-            "model_family": family,
-            "eval_name": eval_name,
-            "method": method,
-        }
-        for family in expected_model_families
-        for eval_name in expected_eval_names
-        for method in expected_methods
-        if (family, eval_name, method) not in present
+        expected
+        for expected in expected_rows
+        if (expected["model_family"], expected["eval_name"], expected["method"]) not in present
     ]
     return {
-        "expected_model_families": expected_model_families,
         "expected_eval_names": expected_eval_names,
-        "expected_methods": expected_methods,
+        "expected_rows": expected_rows,
         "missing": missing,
         "complete": not missing,
     }
 
 
-def write_results_json(settings: dict[str, Any], regular_config: Path, contrastive_config: Path) -> None:
+def write_results_json(
+    settings: dict[str, Any],
+    original_config: Path,
+    regular_config: Path,
+    contrastive_config: Path,
+) -> None:
+    original_summary = (
+        read_pruning_summary(settings["original_eval_output_dir"])
+        if settings.get("run_original_decoder_eval", True)
+        else {}
+    )
     base_summary = read_pruning_summary(settings["regular_pruning_output_dir"])
     contrastive_summary = read_pruning_summary(settings["contrastive_pruning_output_dir"])
-    rows = rows_for_family("base_sft", settings["regular_pruning_output_dir"]) + rows_for_family(
-        "contrastive_sft",
-        settings["contrastive_pruning_output_dir"],
-    )
+    rows: list[dict[str, Any]] = []
+    if settings.get("run_original_decoder_eval", True):
+        rows.extend(rows_for_family("original_decoder", settings["original_eval_output_dir"]))
+    rows.extend(rows_for_family("base_sft", settings["regular_pruning_output_dir"]))
+    rows.extend(rows_for_family("contrastive_sft", settings["contrastive_pruning_output_dir"]))
     output_path = Path(settings["results_json"])
     payload = {
         "schema_version": 1,
@@ -556,17 +613,21 @@ def write_results_json(settings: dict[str, Any], regular_config: Path, contrasti
             "nproc_per_node": settings["nproc_per_node"],
             "run_root": settings["run_root"],
             "config_files": {
+                "original_decoder_source": settings["sft_config"],
                 "base_sft": settings["sft_config"],
                 "contrastive_sft": settings["contrastive_config"],
                 "prune": settings["prune_config"],
             },
+            "original_model": settings["original_model"],
             "base_model": settings.get("base_model"),
             "contrastive_base_model": settings["contrastive_base_model"],
             "checkpoints": {
+                "original_decoder": settings["original_model"],
                 "base_sft_final": settings["regular_final"],
                 "contrastive_sft_final": settings["contrastive_final"],
             },
             "generated_configs": {
+                "original_decoder": original_config,
                 "base_sft": regular_config,
                 "contrastive_sft": contrastive_config,
             },
@@ -582,6 +643,7 @@ def write_results_json(settings: dict[str, Any], regular_config: Path, contrasti
         "checks": result_completeness(rows, settings),
         "results": rows,
         "raw_benchmark_summaries": {
+            "original_decoder": original_summary,
             "base_sft": base_summary,
             "contrastive_sft": contrastive_summary,
         },
@@ -604,6 +666,7 @@ def print_plan(settings: dict[str, Any]) -> None:
     print(f"  nproc_per_node:        {settings['nproc_per_node']}")
     print(f"  Python:                {settings['python']}")
     print(f"  torchrun:              {settings['torchrun']}")
+    print(f"  original decoder:      {settings['original_model']}")
     print(f"  base SFT checkpoint:   {settings.get('base_model') or 'from SFT config'}")
     print(f"  contrastive base:      {settings['contrastive_base_model']}")
     print(f"  results JSON:          {settings['results_json']}")
@@ -640,9 +703,11 @@ def main() -> None:
     if settings["train_contrastive_sft"]:
         train_contrastive(settings, env)
 
-    regular_config, contrastive_config = write_generated_benchmark_configs(settings)
-    print(f"\nGenerated benchmark configs:\n  {regular_config}\n  {contrastive_config}")
+    original_config, regular_config, contrastive_config = write_generated_benchmark_configs(settings)
+    print(f"\nGenerated benchmark configs:\n  {original_config}\n  {regular_config}\n  {contrastive_config}")
 
+    if settings["run_original_decoder_eval"]:
+        run_pruning_benchmark(original_config, settings, env, methods=[])
     if settings["run_pruning_benchmarks"]:
         run_pruning_benchmark(regular_config, settings, env)
         run_pruning_benchmark(contrastive_config, settings, env)
@@ -651,7 +716,7 @@ def main() -> None:
         print("\nDry run complete.")
         return
 
-    write_results_json(settings, regular_config, contrastive_config)
+    write_results_json(settings, original_config, regular_config, contrastive_config)
     print("\nDone.")
 
 
