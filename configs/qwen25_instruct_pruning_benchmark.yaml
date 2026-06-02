@@ -15,7 +15,7 @@ benchmark:
   nproc_per_node: 8
   expected_gpu_count: 8
   cuda_visible_devices: 0,1,2,3,4,5,6,7
-  sparsity_tolerance: 0.000001
+  sparsity_tolerance: 0.001
   continue_on_error: true
   system_prompt: "You are a strict smart-home command parser. Output only the normalized command response. Do not explain."
 

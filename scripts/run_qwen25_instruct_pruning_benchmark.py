@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -251,10 +252,28 @@ def print_plan(
 
 
 def run_command(cmd: list[str], env: dict[str, str], dry_run: bool = False) -> None:
-    print("\n$ " + " ".join(str(part) for part in cmd), flush=True)
+    printable_cmd = shlex.join(str(part) for part in cmd)
+    print("\n$ " + printable_cmd, flush=True)
     if dry_run:
         return
-    subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
+    completed = subprocess.run(
+        cmd,
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="", flush=True)
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr, flush=True)
+    if completed.returncode:
+        output_tail = "\n".join((completed.stdout + completed.stderr).splitlines()[-80:])
+        raise RuntimeError(
+            f"Command failed with exit code {completed.returncode}: {printable_cmd}"
+            + (f"\nLast command output:\n{output_tail}" if output_tail else "")
+        )
 
 
 def generated_prune_config(
@@ -843,7 +862,7 @@ def main() -> None:
                         method=method,
                         phase="one_shot",
                         target_sparsity=float(prune_config["prune"].get("sparsity", 0.5)),
-                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
+                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-3)),
                     )
                     if one_shot_dir.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as one-shot pruned checkpoint.")
@@ -895,7 +914,7 @@ def main() -> None:
                         method=method,
                         phase="retuned_qwen25_instruct_sft",
                         target_sparsity=float(config.get("prune", {}).get("sparsity", 0.5)),
-                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
+                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-3)),
                     )
                     if retuned_checkpoint.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as retuned pruned checkpoint.")

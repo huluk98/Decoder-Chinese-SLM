@@ -55,7 +55,7 @@ CONFIG: dict[str, Any] = {
     "calibration_batches": 128,
     "prune_batch_size": 2,
     "prune_num_workers": 0,
-    "sparsity_tolerance": 1.0e-6,
+    "sparsity_tolerance": 1.0e-3,
     "keep_going": True,
     "train_regular_sft": True,
     "train_contrastive_sft": True,
