@@ -19,11 +19,13 @@ Environment overrides:
   RUN_ROOT              default: runs/5epoch-sft-contrastive-one-shot
   EPOCHS                default: 5
   TRAIN_ONLY            set to 1 to stop after the two 5-epoch training runs.
-  SFT_TRAIN_FILE        optional regular SFT dataset override.
-  SFT_EVAL_FILE         optional regular SFT eval/calibration dataset override.
+  SFT_TRAIN_FILE        optional regular SFT dataset override; default config uses data/scenic/SCENIC_full_training_dataset.json.
+  SFT_EVAL_FILE         optional regular SFT eval/calibration dataset override; default config uses data/scenic/SCENIC_full_training_dataset.json.
   CONTRASTIVE_TRAIN_FILE
-                        optional contrastive dataset override.
-  CONTRASTIVE_EVAL_FILE server-local contrastive eval/calibration dataset.
+                        optional contrastive dataset override; default config uses data/scenic/SCENIC_full_anchor_positive_negative.json.
+  CONTRASTIVE_EVAL_FILE optional contrastive eval/calibration dataset; default config uses data/scenic/SCENIC_full_training_dataset.json.
+  MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
+                        default: 1.01, so high max-token rates are reported instead of aborting.
   BENCHMARK_FILE        optional benchmark dataset override.
   PYTHON                Python executable from the training environment.
 

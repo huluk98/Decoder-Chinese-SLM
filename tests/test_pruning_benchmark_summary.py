@@ -128,6 +128,47 @@ def test_summary_row_uses_real_pruning_stats(tmp_path: Path) -> None:
     assert row["checkpoint_evaluated"] != str(tmp_path)
 
 
+def test_dense_baseline_generation_failure_is_written_as_diagnostic_row(tmp_path: Path) -> None:
+    row = benchmark.dense_baseline_row(
+        tmp_path / "base",
+        tmp_path / "benchmarks" / "dense_baseline" / "training_dataset",
+        {},
+        eval_spec={"name": "training_dataset", "path": "data/scenic/SCENIC_full_training_dataset.json"},
+        status="failed",
+        error="Generated predictions are frequently hitting max_new_tokens without EOS (3094/3474 = 0.8906)",
+    )
+
+    benchmark.write_summary(tmp_path, [row])
+    dense_summary = json.loads((tmp_path / "dense_baseline_summary.json").read_text(encoding="utf-8"))
+
+    assert row["status"] == "failed"
+    assert row["error_type"] == "generation"
+    assert row["exact_match_accuracy"] is None
+    assert dense_summary["results"][0]["error_type"] == "generation"
+
+
+def test_run_eval_passes_max_new_token_hit_rate_threshold(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run_command(cmd: list[str], *, env: dict[str, str], dry_run: bool) -> None:
+        captured["cmd"] = cmd
+
+    monkeypatch.setattr(benchmark, "run_command", fake_run_command)
+
+    benchmark.run_eval(
+        Path("/tmp/model"),
+        Path("/tmp/eval.json"),
+        tmp_path / "eval",
+        benchmark={"max_new_token_hit_rate_threshold": 1.01},
+        env={},
+        dry_run=True,
+    )
+
+    cmd = captured["cmd"]
+    threshold_index = cmd.index("--max-new-token-hit-rate-threshold")
+    assert cmd[threshold_index + 1] == "1.01"
+
+
 def test_write_summary_has_eight_pruning_rows_with_missing_retuned(tmp_path: Path) -> None:
     rows: list[dict] = []
     for method in benchmark.METHODS:

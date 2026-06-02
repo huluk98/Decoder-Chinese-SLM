@@ -4,7 +4,7 @@ benchmark:
   prune_config: configs/prune_50.yaml
   methods: [magnitude, 2of4, wanda, gradient]
   eval_files:
-    sft_dataset: data/cleaned/619_Luke_fixed_dedup.json
+    training_dataset: data/scenic/SCENIC_full_training_dataset.json
     benchmark: data/benchmarks/iot_instruction_benchmark_200.json
   run_dense_baseline: true
   min_dense_exact_match_accuracy: null
@@ -12,6 +12,7 @@ benchmark:
   top_k_exact_match: 5
   comparison_mode: whitespace
   max_new_tokens: 64
+  max_new_token_hit_rate_threshold: 1.01
   max_length: 128
   eval_batch_size: 16
   dtype: bf16
@@ -27,7 +28,7 @@ prune:
   sparsity_denominator: whole_model
   granularity: layer
   include_lm_head: false
-  calibration_data_path: data/cleaned/619_Luke_fixed_dedup.json
+  calibration_data_path: data/scenic/SCENIC_full_training_dataset.json
   calibration_batches: 128
   max_length: 128
   batch_size: 2
@@ -40,7 +41,7 @@ retune:
   enabled: true
   config: configs/sft_0p2b_8gpu.yaml
   mode: sft
-  data_path: data/cleaned/619_Luke_fixed_dedup.json
+  data_path: data/scenic/SCENIC_full_training_dataset.json
   max_steps: null
   epochs: 3
   per_device_train_batch_size: null

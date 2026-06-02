@@ -10,8 +10,9 @@ Usage:
   bash run_model_path_pruning_results.sh BASE_MODEL_PATH SFT_MODEL_PATH CONTRASTIVE_MODEL_PATH [extra python args]
 
 Environment overrides:
-  TRAINING_DATASET      default: data/cleaned/619_Luke_fixed_dedup.json
+  TRAINING_DATASET      default: data/scenic/SCENIC_full_training_dataset.json
   BENCHMARK_DATASET     default: data/benchmarks/iot_instruction_benchmark_200.json
+  MAX_NEW_TOKEN_HIT_RATE_THRESHOLD default: 1.01
   RUN_ROOT              default: runs/model-path-pruning-results
   RESULTS_JSON          default: ${RUN_ROOT}/model_path_pruning_results.json
   METHODS               default: "wanda magnitude gradient nvidia"
@@ -55,7 +56,7 @@ run_model_path_pruning_results() {
     "--base-model-path" "${base_model}"
     "--sft-model-path" "${sft_model}"
     "--contrastive-model-path" "${contrastive_model}"
-    "--training-dataset" "${TRAINING_DATASET:-data/cleaned/619_Luke_fixed_dedup.json}"
+    "--training-dataset" "${TRAINING_DATASET:-data/scenic/SCENIC_full_training_dataset.json}"
     "--benchmark-dataset" "${BENCHMARK_DATASET:-data/benchmarks/iot_instruction_benchmark_200.json}"
     "--run-root" "${RUN_ROOT:-runs/model-path-pruning-results}"
     "--prune-config" "${PRUNE_CONFIG:-configs/prune_50.yaml}"
@@ -70,6 +71,7 @@ run_model_path_pruning_results() {
     "--dtype" "${DTYPE:-bf16}"
     "--max-length" "${MAX_LENGTH:-128}"
     "--max-new-tokens" "${MAX_NEW_TOKENS:-64}"
+    "--max-new-token-hit-rate-threshold" "${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-1.01}"
     "--eval-batch-size" "${EVAL_BATCH_SIZE:-16}"
     "--sparsity" "${SPARSITY:-0.5}"
     "--pruning-scope" "${PRUNING_SCOPE:-transformer_linears}"

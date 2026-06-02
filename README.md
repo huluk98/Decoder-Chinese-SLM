@@ -232,7 +232,7 @@ For structured smart-home command generation, use the dedicated short-output SFT
 
 1. Edit `configs/sft_0p2b_8gpu.yaml`.
 2. Set `model_name_or_path` to the pretrained 0.2B checkpoint directory.
-3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows. The checked-in 8-GPU config now points both at `data/cleaned/619_Luke_fixed_dedup.json` and uses `data/benchmarks/iot_instruction_benchmark_200.json` as `benchmark_file`.
+3. Set `train_file` and `eval_file` to JSON/JSONL files containing prompt/response rows. The checked-in 8-GPU config now points both at `data/scenic/SCENIC_full_training_dataset.json` and uses `data/benchmarks/iot_instruction_benchmark_200.json` as `benchmark_file`.
 
 The SFT trainer formats each row as decoder-only `prompt + response`, masks all prompt and padding labels with `-100`, and computes loss only on response tokens. The 8-GPU launch script trains through the configured epochs first, then runs a five-pass exact-match generation benchmark by default. It does not stop at every epoch for full-dataset validation.
 
@@ -252,8 +252,8 @@ For this repo's updated smart-home run, set only the base checkpoint in `configs
 
 ```yaml
 model_name_or_path: /absolute/path/to/pretrained-or-pruned-checkpoint
-train_file: data/cleaned/619_Luke_fixed_dedup.json
-eval_file: data/cleaned/619_Luke_fixed_dedup.json
+train_file: data/scenic/SCENIC_full_training_dataset.json
+eval_file: data/scenic/SCENIC_full_training_dataset.json
 benchmark_file: data/benchmarks/iot_instruction_benchmark_200.json
 benchmark_runs: 5
 top_k_exact_match: 5
@@ -934,7 +934,7 @@ PYTHON=/path/to/training/env/bin/python \
 bash run_5epoch_sft_contrastive_from_base.sh /path/to/base_model
 ```
 
-The contrastive SCENIC data is versioned under `data/scenic/`, so this command runs from a normal project checkout without extra dataset path variables. It writes the regular SFT checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/base_sft_5ep/final` and the contrastive checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/contrastive_sft_5ep/final` by default. All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main full-journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
+The SCENIC full-training and contrastive data are versioned under `data/scenic/`, so this command runs from a normal project checkout without extra dataset path variables. It writes the regular SFT checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/base_sft_5ep/final` and the contrastive checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/contrastive_sft_5ep/final` by default. All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main full-journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
 
 If you already have the three checkpoint paths and only want dense EM@1/EM@5 plus 50% one-shot pruning results in one JSON, use the path-driven wrapper:
 
@@ -946,7 +946,7 @@ bash run_model_path_pruning_results.sh \
   /path/to/contrastive/final
 ```
 
-By default it evaluates all three dense checkpoints on `data/cleaned/619_Luke_fixed_dedup.json` and `data/benchmarks/iot_instruction_benchmark_200.json`, then runs `wanda`, `magnitude`, `gradient`, and NVIDIA `2of4` one-shot 50% pruning for `base_model`, `sft`, and `contrastive`. It writes `runs/model-path-pruning-results/model_path_pruning_results.json`. Set `TRAINING_DATASET`, `BENCHMARK_DATASET`, `RESULTS_JSON`, `METHODS`, or `PRUNE_FAMILIES="sft contrastive"` to override the default shape.
+By default it evaluates all three dense checkpoints on `data/scenic/SCENIC_full_training_dataset.json` and `data/benchmarks/iot_instruction_benchmark_200.json`, then runs `wanda`, `magnitude`, `gradient`, and NVIDIA `2of4` one-shot 50% pruning for `base_model`, `sft`, and `contrastive`. It writes `runs/model-path-pruning-results/model_path_pruning_results.json`. Set `TRAINING_DATASET`, `BENCHMARK_DATASET`, `RESULTS_JSON`, `METHODS`, or `PRUNE_FAMILIES="sft contrastive"` to override the default shape.
 
 Quick prune commands:
 
@@ -1073,7 +1073,7 @@ That gives 8 model outputs total and 8 benchmark output folders total for a sing
 
 Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default protected whole-model target, `achieved_whole_model_sparsity` should land at 50% for magnitude, Wanda, and gradient on dense checkpoints, while exact `2of4` remains the fixed 50% prunable-Linear condition.
 
-The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance` (`0.001` by default for protected whole-model pruning), any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, generated predictions are all empty/all identical/mostly prompt copies, or too many generations hit `max_new_tokens` without EOS. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance` (`0.001` by default for protected whole-model pruning), any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, generated predictions are all empty/all identical/mostly prompt copies, or too many generations hit `max_new_tokens` without EOS when `benchmark.max_new_token_hit_rate_threshold` is at or below the observed rate. The SCENIC journal defaults set that threshold to `1.01`, so high length-cap rates remain visible as `reached_max_new_tokens_rate` diagnostics instead of stopping the whole report. Failed rows include `error_type` so generation/eval issues can be separated from pruning failures. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
 ### Final IoT Benchmark Eval
 

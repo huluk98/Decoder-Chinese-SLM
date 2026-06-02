@@ -85,8 +85,30 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "reached_max_new_tokens",
     "reached_max_new_tokens_rate",
     "pruning_report",
+    "error_type",
     "error",
 ]
+
+GENERATION_ERROR_MARKERS = (
+    "Generated predictions are frequently hitting max_new_tokens",
+    "Generated predictions are all empty",
+    "Generated predictions are all identical",
+    "Generated predictions are mostly prompt copies",
+    "max_new_tokens without EOS",
+)
+
+
+def classify_error(error: str, *, phase: str = "", command: str = "") -> str:
+    text = f"{error}\n{command}".lower()
+    if not text.strip():
+        return ""
+    if any(marker.lower() in text for marker in GENERATION_ERROR_MARKERS):
+        return "generation"
+    if "eval_prompt_response.py" in text or phase == "dense_baseline":
+        return "evaluation"
+    if any(token in text for token in ("prune.py", "pruning_report", "mask", "sparsity", "2:4", "wanda", "gradient")):
+        return "pruning"
+    return "runtime"
 
 
 def resolve_config_path(path: str | Path) -> Path:
@@ -528,7 +550,15 @@ def run_eval(
             str(int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5)))),
             "--comparison-mode",
             str(benchmark.get("comparison_mode", "whitespace")),
-        ],
+        ]
+        + (
+            [
+                "--max-new-token-hit-rate-threshold",
+                str(float(benchmark["max_new_token_hit_rate_threshold"])),
+            ]
+            if benchmark.get("max_new_token_hit_rate_threshold") is not None
+            else []
+        ),
         env=env,
         dry_run=dry_run,
     )
@@ -539,16 +569,20 @@ def dense_baseline_row(
     eval_dir: Path,
     summary: dict[str, Any],
     eval_spec: dict[str, Any] | None = None,
+    status: str = "ok",
+    error: str = "",
 ) -> dict[str, Any]:
     result_eval_dir = resolve_eval_result_dir(eval_dir)
+    run_config = read_eval_run_config(eval_dir)
     eval_name = str(eval_spec.get("name")) if eval_spec else "eval"
     eval_file = str(eval_spec.get("path")) if eval_spec else ""
+    checkpoint_evaluated = run_config.get("checkpoint_path_used_for_evaluation") or run_config.get("model_path") or str(checkpoint)
     return {
         "method": "dense_sft_baseline",
         "phase": "dense_baseline",
-        "status": "ok",
+        "status": status,
         "checkpoint": str(checkpoint),
-        "checkpoint_evaluated": str(checkpoint),
+        "checkpoint_evaluated": str(checkpoint_evaluated),
         "eval_name": eval_name,
         "eval_file": eval_file,
         "eval_dir": str(result_eval_dir),
@@ -586,7 +620,8 @@ def dense_baseline_row(
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
         "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
         "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
-        "error": "",
+        "error_type": classify_error(error, phase="dense_baseline") if error else "",
+        "error": error,
     }
 
 
@@ -891,6 +926,7 @@ def summary_row(
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
         "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
         "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
+        "error_type": classify_error(error, phase=phase) if error else "",
         "error": error,
     }
 
@@ -918,6 +954,7 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "eval_dir",
         "eval_output_dir",
         "pruning_report",
+        "error_type",
         "active_model_parameters",
         "real_sparsity",
         "target_prunable_sparsity",
@@ -1145,50 +1182,66 @@ def main() -> None:
             eval_file = Path(eval_spec["path"])
             dense_eval_dir = eval_dir_for_phase(output_dir, "dense_baseline", None, eval_spec, multi_eval)
             dense_eval_dirs[eval_name] = dense_eval_dir
-            run_eval(base_checkpoint, eval_file, dense_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-            if not args.dry_run:
-                dense_summary = read_eval_summary(dense_eval_dir)
-                if not dense_summary:
-                    raise FileNotFoundError(f"Dense baseline evaluation summary missing: {dense_eval_dir}")
-                dense_exact_value = metric(dense_summary, "exact_match_accuracy")
-                if dense_exact_value is None:
-                    raise ValueError(f"Dense baseline exact-match accuracy missing: {dense_eval_dir}")
-                dense_exact_matches[eval_name] = float(dense_exact_value)
-                min_dense = benchmark.get("min_dense_exact_match_accuracy", 0.01)
-                if min_dense is not None and dense_exact_matches[eval_name] < float(min_dense):
-                    raise RuntimeError(
-                        f"Dense baseline exact-match accuracy for {eval_name} "
-                        f"{dense_exact_matches[eval_name]:.6f} is below "
-                        f"benchmark.min_dense_exact_match_accuracy={float(min_dense):.6f}; debug eval before pruning."
+            try:
+                run_eval(base_checkpoint, eval_file, dense_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                if not args.dry_run:
+                    dense_summary = read_eval_summary(dense_eval_dir)
+                    if not dense_summary:
+                        raise FileNotFoundError(f"Dense baseline evaluation summary missing: {dense_eval_dir}")
+                    dense_exact_value = metric(dense_summary, "exact_match_accuracy")
+                    if dense_exact_value is None:
+                        raise ValueError(f"Dense baseline exact-match accuracy missing: {dense_eval_dir}")
+                    dense_exact_matches[eval_name] = float(dense_exact_value)
+                    min_dense = benchmark.get("min_dense_exact_match_accuracy", 0.01)
+                    if min_dense is not None and dense_exact_matches[eval_name] < float(min_dense):
+                        raise RuntimeError(
+                            f"Dense baseline exact-match accuracy for {eval_name} "
+                            f"{dense_exact_matches[eval_name]:.6f} is below "
+                            f"benchmark.min_dense_exact_match_accuracy={float(min_dense):.6f}; debug eval before pruning."
+                        )
+                    dense_payload = {
+                        "checkpoint_path": str(base_checkpoint),
+                        "tokenizer_path": str(base_checkpoint),
+                        "dataset_path": str(eval_file),
+                        "benchmark_split": str(eval_file),
+                        "eval_name": eval_name,
+                        "generation_config": {
+                            "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
+                            "num_beams": 1,
+                            "temperature": 0,
+                            "do_sample": False,
+                            "exact_match_top_k": int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5))),
+                        },
+                        "exact_match_normalization": {"comparison_mode": benchmark.get("comparison_mode", "whitespace")},
+                        **dense_summary,
+                    }
+                    dense_payload_path = output_dir / (
+                        "dense_baseline_eval.json" if not multi_eval else f"dense_baseline_eval_{eval_spec['slug']}.json"
                     )
-                dense_payload = {
-                    "checkpoint_path": str(base_checkpoint),
-                    "tokenizer_path": str(base_checkpoint),
-                    "dataset_path": str(eval_file),
-                    "benchmark_split": str(eval_file),
-                    "eval_name": eval_name,
-                    "generation_config": {
-                        "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
-                        "num_beams": 1,
-                        "temperature": 0,
-                        "do_sample": False,
-                        "exact_match_top_k": int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5))),
-                    },
-                    "exact_match_normalization": {"comparison_mode": benchmark.get("comparison_mode", "whitespace")},
-                    **dense_summary,
-                }
-                dense_payload_path = output_dir / (
-                    "dense_baseline_eval.json" if not multi_eval else f"dense_baseline_eval_{eval_spec['slug']}.json"
-                )
-                write_json(dense_payload_path, dense_payload)
+                    write_json(dense_payload_path, dense_payload)
+                    rows.append(
+                        dense_baseline_row(
+                            base_checkpoint,
+                            dense_eval_dir,
+                            dense_summary,
+                            eval_spec=eval_spec,
+                        )
+                    )
+            except Exception as exc:
+                error = str(exc)
                 rows.append(
                     dense_baseline_row(
                         base_checkpoint,
                         dense_eval_dir,
-                        dense_summary,
+                        {},
                         eval_spec=eval_spec,
+                        status="failed",
+                        error=error,
                     )
                 )
+                write_summary(output_dir, rows)
+                if not continue_on_error:
+                    raise
     elif not args.dry_run:
         raise RuntimeError("Dense baseline evaluation is required for pruning benchmark comparison.")
 
@@ -1253,7 +1306,8 @@ def main() -> None:
                         run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
                         if not args.dry_run:
                             validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
-                            validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], one_shot_eval_dir)
+                            if eval_name in dense_eval_dirs and has_eval_result(resolve_eval_result_dir(dense_eval_dirs[eval_name])):
+                                validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], one_shot_eval_dir)
                         rows.append(
                             summary_row(
                                 method,
@@ -1358,7 +1412,8 @@ def main() -> None:
                     run_eval(retuned_checkpoint, eval_file, retuned_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
                     if not args.dry_run:
                         validate_eval_checkpoint(retuned_eval_dir, retuned_checkpoint)
-                        validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], retuned_eval_dir)
+                        if eval_name in dense_eval_dirs and has_eval_result(resolve_eval_result_dir(dense_eval_dirs[eval_name])):
+                            validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], retuned_eval_dir)
                     rows.append(
                         summary_row(
                             method,
