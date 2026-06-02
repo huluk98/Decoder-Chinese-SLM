@@ -1479,30 +1479,51 @@ def main() -> None:
                         top_k_candidates: list[dict[str, Any]] = []
                         top_k_match_rank = None
                         if int(args.exact_match_top_k) > 1:
+                            top_k_match_rank = 1 if is_exact else None
+                            top_k_candidates.append(
+                                {
+                                    "rank": 1,
+                                    "raw_prediction": generated,
+                                    "normalized_prediction": comparison_generated,
+                                    "exact_match": is_exact,
+                                    "generated_length": generated_token_count,
+                                    "reached_max_new_tokens": bool(reached_max),
+                                    "duplicate_normalized_prediction": False,
+                                    "source": "greedy",
+                                }
+                            )
                             raw_candidates = top_k_generation_by_index.get(index, [])
-                            seen_comparisons: set[str] = set()
-                            for candidate_rank, candidate in enumerate(raw_candidates, start=1):
+                            seen_comparisons: set[str] = {comparison_generated}
+                            next_rank = 2
+                            for candidate in raw_candidates:
+                                if next_rank > int(args.exact_match_top_k):
+                                    break
                                 candidate_text, candidate_token_count, candidate_reached_max = candidate
                                 candidate_comparison = comparison_text(
                                     candidate_text,
                                     tokenizer=tokenizer,
                                     comparison_mode=args.comparison_mode,
                                 )
+                                duplicate = candidate_comparison in seen_comparisons
+                                if duplicate:
+                                    continue
                                 candidate_exact = candidate_comparison == comparison_target
                                 if candidate_exact and top_k_match_rank is None:
-                                    top_k_match_rank = candidate_rank
+                                    top_k_match_rank = next_rank
                                 top_k_candidates.append(
                                     {
-                                        "rank": candidate_rank,
+                                        "rank": next_rank,
                                         "raw_prediction": candidate_text,
                                         "normalized_prediction": candidate_comparison,
                                         "exact_match": candidate_exact,
                                         "generated_length": candidate_token_count,
                                         "reached_max_new_tokens": bool(candidate_reached_max),
-                                        "duplicate_normalized_prediction": candidate_comparison in seen_comparisons,
+                                        "duplicate_normalized_prediction": False,
+                                        "source": "beam",
                                     }
                                 )
                                 seen_comparisons.add(candidate_comparison)
+                                next_rank += 1
                         else:
                             top_k_match_rank = 1 if is_exact else None
                             top_k_candidates.append(
@@ -1592,6 +1613,11 @@ def main() -> None:
                 )
         incorrect = len(records) - exact_correct if args.exact_match else None
         top_k_exact_match = int(args.exact_match_top_k)
+        if args.exact_match and top_k_exact_match > 1 and exact_top_k_correct < exact_correct:
+            raise RuntimeError(
+                f"Exact-match@{top_k_exact_match} cannot be lower than exact-match@1 "
+                f"({exact_top_k_correct} < {exact_correct}); inspect top-k candidate accounting."
+            )
         by_difficulty = grouped_exact_metrics(results, "difficulty", exact_match_enabled=bool(args.exact_match))
         by_task_type = grouped_exact_metrics(results, "task_type", exact_match_enabled=bool(args.exact_match))
         difficulty_distribution = {level: int(metrics["total_examples"]) for level, metrics in by_difficulty.items()}

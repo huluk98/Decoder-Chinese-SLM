@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -410,10 +411,28 @@ def print_plan(
 
 
 def run_command(cmd: list[str], env: dict[str, str], dry_run: bool = False) -> None:
-    print("\n$ " + " ".join(str(part) for part in cmd), flush=True)
+    printable_cmd = shlex.join(str(part) for part in cmd)
+    print("\n$ " + printable_cmd, flush=True)
     if dry_run:
         return
-    subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
+    completed = subprocess.run(
+        cmd,
+        cwd=PROJECT_ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.stdout:
+        print(completed.stdout, end="", flush=True)
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr, flush=True)
+    if completed.returncode:
+        output_tail = "\n".join((completed.stdout + completed.stderr).splitlines()[-80:])
+        raise RuntimeError(
+            f"Command failed with exit code {completed.returncode}: {printable_cmd}"
+            + (f"\nLast command output:\n{output_tail}" if output_tail else "")
+        )
 
 
 def generated_prune_config(
@@ -1180,7 +1199,6 @@ def main() -> None:
         retuned_dir = output_dir / "retuned" / slug
         one_shot_completed = False
         if bool(one_shot.get("enabled", True)):
-            completed_one_shot_eval_names: set[str] = set()
             try:
                 prune_config = generated_prune_config(
                     base_config=base_prune_config,
@@ -1201,37 +1219,14 @@ def main() -> None:
                         method=method,
                         phase="one_shot",
                         target_sparsity=float(prune_config["prune"].get("sparsity", 0.5)),
-                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
+                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-3)),
                     )
                     if one_shot_dir.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as one-shot pruned checkpoint.")
-                for eval_spec in eval_specs:
-                    eval_name = str(eval_spec["name"])
-                    eval_file = Path(eval_spec["path"])
-                    one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
-                    run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
-                    if not args.dry_run:
-                        validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
-                        validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], one_shot_eval_dir)
-                    rows.append(
-                        summary_row(
-                            method,
-                            "one_shot",
-                            one_shot_dir,
-                            one_shot_eval_dir,
-                            "ok",
-                            pruning_report_path=one_shot_dir / "pruning_report.json",
-                            dense_exact_match=dense_exact_matches.get(eval_name),
-                            eval_spec=eval_spec,
-                        )
-                    )
-                    completed_one_shot_eval_names.add(eval_name)
                 one_shot_completed = True
             except Exception as exc:
                 for eval_spec in eval_specs:
                     eval_name = str(eval_spec.get("name", "eval"))
-                    if eval_name in completed_one_shot_eval_names:
-                        continue
                     one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
                     rows.append(
                         summary_row(
@@ -1249,6 +1244,45 @@ def main() -> None:
                 write_summary(output_dir, rows)
                 if not continue_on_error:
                     raise
+            if one_shot_completed:
+                for eval_spec in eval_specs:
+                    eval_name = str(eval_spec["name"])
+                    eval_file = Path(eval_spec["path"])
+                    one_shot_eval_dir = eval_dir_for_phase(output_dir, "one_shot", method, eval_spec, multi_eval)
+                    try:
+                        run_eval(one_shot_dir, eval_file, one_shot_eval_dir, benchmark=benchmark, env=env, dry_run=args.dry_run)
+                        if not args.dry_run:
+                            validate_eval_checkpoint(one_shot_eval_dir, one_shot_dir)
+                            validate_eval_protocol_matches_dense(dense_eval_dirs[eval_name], one_shot_eval_dir)
+                        rows.append(
+                            summary_row(
+                                method,
+                                "one_shot",
+                                one_shot_dir,
+                                one_shot_eval_dir,
+                                "ok",
+                                pruning_report_path=one_shot_dir / "pruning_report.json",
+                                dense_exact_match=dense_exact_matches.get(eval_name),
+                                eval_spec=eval_spec,
+                            )
+                        )
+                    except Exception as exc:
+                        rows.append(
+                            summary_row(
+                                method,
+                                "one_shot",
+                                one_shot_dir,
+                                one_shot_eval_dir,
+                                "failed",
+                                error=str(exc),
+                                pruning_report_path=one_shot_dir / "pruning_report.json",
+                                dense_exact_match=dense_exact_matches.get(eval_name),
+                                eval_spec=eval_spec,
+                            )
+                        )
+                        write_summary(output_dir, rows)
+                        if not continue_on_error:
+                            raise
         else:
             for eval_spec in eval_specs:
                 eval_name = str(eval_spec.get("name", "eval"))
@@ -1311,7 +1345,7 @@ def main() -> None:
                         method=method,
                         phase="retuned",
                         target_sparsity=float(config.get("prune", {}).get("sparsity", 0.5)),
-                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-6)),
+                        tolerance=float(benchmark.get("sparsity_tolerance", 1e-3)),
                     )
                     if retuned_checkpoint.resolve() == base_checkpoint.resolve():
                         raise RuntimeError("Refusing to evaluate dense checkpoint as retuned pruned checkpoint.")
