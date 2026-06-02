@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - the pruning runner itself still needs 
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_TRAINING_DATASET = "data/cleaned/619_Luke_fixed_dedup.json"
+DEFAULT_TRAINING_DATASET = "data/scenic/SCENIC_full_training_dataset.json"
 DEFAULT_BENCHMARK_DATASET = "data/benchmarks/iot_instruction_benchmark_200.json"
 DEFAULT_METHODS = ("wanda", "magnitude", "gradient", "nvidia")
 DEFAULT_PRUNE_FAMILIES = ("base_model", "sft", "contrastive")
@@ -80,6 +80,7 @@ class RunSettings:
     dtype: str
     max_length: int
     max_new_tokens: int
+    max_new_token_hit_rate_threshold: float
     eval_batch_size: int
     sparsity: float
     pruning_scope: str
@@ -282,6 +283,7 @@ def benchmark_config_for_family(settings: RunSettings, family: ModelFamily, meth
             "top_k_exact_match": int(settings.top_k_exact_match),
             "comparison_mode": str(settings.comparison_mode),
             "max_new_tokens": int(settings.max_new_tokens),
+            "max_new_token_hit_rate_threshold": float(settings.max_new_token_hit_rate_threshold),
             "max_length": int(settings.max_length),
             "eval_batch_size": int(settings.eval_batch_size),
             "dtype": str(settings.dtype),
@@ -570,6 +572,7 @@ def build_settings(args: argparse.Namespace) -> RunSettings:
         dtype=str(args.dtype),
         max_length=int(args.max_length),
         max_new_tokens=int(args.max_new_tokens),
+        max_new_token_hit_rate_threshold=float(args.max_new_token_hit_rate_threshold),
         eval_batch_size=int(args.eval_batch_size),
         sparsity=float(args.sparsity),
         pruning_scope=str(args.pruning_scope),
@@ -618,6 +621,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"), default=os.environ.get("DTYPE", "bf16"))
     parser.add_argument("--max-length", type=int, default=int(os.environ.get("MAX_LENGTH", "128")))
     parser.add_argument("--max-new-tokens", type=int, default=int(os.environ.get("MAX_NEW_TOKENS", "64")))
+    parser.add_argument(
+        "--max-new-token-hit-rate-threshold",
+        type=float,
+        default=float(os.environ.get("MAX_NEW_TOKEN_HIT_RATE_THRESHOLD", "1.01")),
+        help="Pass through to eval_prompt_response.py; values above 1 keep high length-cap rates as diagnostics instead of hard errors.",
+    )
     parser.add_argument("--eval-batch-size", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", "16")))
     parser.add_argument("--sparsity", type=float, default=float(os.environ.get("SPARSITY", "0.5")))
     parser.add_argument("--pruning-scope", default=os.environ.get("PRUNING_SCOPE", "transformer_linears"))

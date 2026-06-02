@@ -12,6 +12,7 @@ benchmark:
   top_k_exact_match: 5
   comparison_mode: whitespace
   max_new_tokens: 64
+  max_new_token_hit_rate_threshold: 1.01
   max_length: 128
   eval_batch_size: 16
   dtype: bf16
