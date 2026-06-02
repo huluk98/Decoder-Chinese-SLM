@@ -928,6 +928,18 @@ PYTHON=/path/to/training/env/bin/python bash run_5epoch_sft_contrastive_one_shot
 
 All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
 
+If you already have the three checkpoint paths and only want dense EM@1/EM@5 plus 50% one-shot pruning results in one JSON, use the path-driven wrapper:
+
+```bash
+PYTHON=/path/to/training/env/bin/python \
+bash run_model_path_pruning_results.sh \
+  /path/to/base_model \
+  /path/to/sft/final \
+  /path/to/contrastive/final
+```
+
+By default it evaluates all three dense checkpoints on `data/cleaned/619_Luke_fixed_dedup.json` and `data/benchmarks/iot_instruction_benchmark_200.json`, then runs `wanda`, `magnitude`, `gradient`, and NVIDIA `2of4` one-shot 50% pruning for `base_model`, `sft`, and `contrastive`. It writes `runs/model-path-pruning-results/model_path_pruning_results.json`. Set `TRAINING_DATASET`, `BENCHMARK_DATASET`, `RESULTS_JSON`, `METHODS`, or `PRUNE_FAMILIES="sft contrastive"` to override the default shape.
+
 Quick prune commands:
 
 ```bash
