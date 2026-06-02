@@ -19,11 +19,18 @@ Environment overrides:
   RUN_ROOT              default: runs/5epoch-sft-contrastive-one-shot
   EPOCHS                default: 5
   TRAIN_ONLY            set to 1 to stop after the two 5-epoch training runs.
+  SFT_TRAIN_FILE        optional regular SFT dataset override.
+  SFT_EVAL_FILE         optional regular SFT eval/calibration dataset override.
+  CONTRASTIVE_TRAIN_FILE
+                        required when configs/contrastive_sft_8gpu.yaml points
+                        at a path that does not exist on this server.
+  CONTRASTIVE_EVAL_FILE server-local contrastive eval/calibration dataset.
+  BENCHMARK_FILE        optional benchmark dataset override.
   PYTHON                Python executable from the training environment.
 
 Examples:
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
-  TRAIN_ONLY=1 bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
+  TRAIN_ONLY=1 CONTRASTIVE_TRAIN_FILE=/path/to/anchor_positive_negative.json bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
 EOF
 }
 
