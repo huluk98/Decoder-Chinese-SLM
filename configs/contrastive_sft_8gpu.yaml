@@ -9,9 +9,9 @@ model:
 sft:
   mode: contrastive
   base_model: /path/to/sft-or-pretrained-checkpoint
-  data_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_anchor_positive_negative.json"
-  eval_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_training_dataset.json"
-  anchor_eval_path: "/Users/luke/Documents/SCENIC agent/data/SCENIC_full_training_dataset.json"
+  data_path: data/scenic/SCENIC_full_anchor_positive_negative.json
+  eval_path: data/scenic/SCENIC_full_training_dataset.json
+  anchor_eval_path: data/scenic/SCENIC_full_training_dataset.json
   benchmark_path: data/benchmarks/iot_instruction_benchmark_200.json
   max_length: 128
   alignment_weight: 0.1
