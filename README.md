@@ -934,6 +934,14 @@ PYTHON=/path/to/training/env/bin/python \
 bash run_5epoch_sft_contrastive_from_base.sh /path/to/base_model
 ```
 
+On the H20 server, set the contrastive dataset paths if `configs/contrastive_sft_8gpu.yaml` still points at a Mac-local `/Users/luke/...` path:
+
+```bash
+CONTRASTIVE_TRAIN_FILE=/nvme/path/to/SCENIC_full_anchor_positive_negative.json \
+CONTRASTIVE_EVAL_FILE=/nvme/path/to/SCENIC_full_training_dataset.json \
+bash run_5epoch_sft_contrastive_from_base.sh /path/to/base_model
+```
+
 That writes the regular SFT checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/base_sft_5ep/final` and the contrastive checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/contrastive_sft_5ep/final` by default. All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main full-journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
 
 If you already have the three checkpoint paths and only want dense EM@1/EM@5 plus 50% one-shot pruning results in one JSON, use the path-driven wrapper:

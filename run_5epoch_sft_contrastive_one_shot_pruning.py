@@ -38,6 +38,12 @@ CONFIG: dict[str, Any] = {
     "original_model": None,  # None -> base_model override, then the base model in sft_config.
     "base_model": None,  # Optional override for regular/base SFT starting checkpoint.
     "contrastive_base_model": None,  # None means use the freshly trained regular SFT final checkpoint.
+    "sft_train_file": None,  # Optional server-local override for regular SFT data.
+    "sft_eval_file": None,  # Optional server-local override for regular SFT dense/pruning eval data.
+    "benchmark_file": None,  # Optional shared benchmark override for both generated benchmark configs.
+    "contrastive_train_file": None,  # Optional server-local override for contrastive anchor/positive/negative data.
+    "contrastive_eval_file": None,  # Optional server-local override for contrastive dense/pruning eval data.
+    "contrastive_anchor_eval_file": None,  # Optional alias when anchor eval differs from contrastive_eval_file.
     "original_eval_output_dir": None,  # None -> <run_root>/dense/original_decoder
     "regular_output_dir": None,  # None -> <run_root>/training/base_sft_5ep
     "contrastive_output_dir": None,  # None -> <run_root>/training/contrastive_sft_5ep
@@ -82,6 +88,12 @@ ENV_OVERRIDES = {
     "ORIGINAL_MODEL": "original_model",
     "BASE_MODEL": "base_model",
     "CONTRASTIVE_BASE_MODEL": "contrastive_base_model",
+    "SFT_TRAIN_FILE": "sft_train_file",
+    "SFT_EVAL_FILE": "sft_eval_file",
+    "BENCHMARK_FILE": "benchmark_file",
+    "CONTRASTIVE_TRAIN_FILE": "contrastive_train_file",
+    "CONTRASTIVE_EVAL_FILE": "contrastive_eval_file",
+    "CONTRASTIVE_ANCHOR_EVAL_FILE": "contrastive_anchor_eval_file",
     "ORIGINAL_EVAL_OUTPUT_DIR": "original_eval_output_dir",
     "REGULAR_OUTPUT_DIR": "regular_output_dir",
     "CONTRASTIVE_OUTPUT_DIR": "contrastive_output_dir",
@@ -165,11 +177,51 @@ def resolve_path(value: str | None, config_path: str | Path) -> str:
     return str(Path.cwd() / path)
 
 
+def require_data_path(value: str | None, config_path: str | Path, label: str, env_hint: str, *, dry_run: bool) -> str:
+    resolved = resolve_path(value, config_path)
+    if not resolved:
+        raise ValueError(f"{label} is not configured. Set {env_hint} or update {config_path}.")
+    if not dry_run and not Path(resolved).expanduser().exists():
+        raise FileNotFoundError(
+            f"{label} not found: {resolved}. "
+            f"Set {env_hint} to the server-local dataset path, or update {config_path}."
+        )
+    return resolved
+
+
 def first_value(*values: Any) -> str:
     for value in values:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def sft_config_with_overrides(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    config = dict(config)
+    if settings.get("sft_train_file"):
+        config["train_file"] = str(settings["sft_train_file"])
+    if settings.get("sft_eval_file"):
+        config["eval_file"] = str(settings["sft_eval_file"])
+    if settings.get("benchmark_file"):
+        config["benchmark_file"] = str(settings["benchmark_file"])
+    return config
+
+
+def contrastive_config_with_overrides(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    config = dict(config)
+    sft = dict(config.get("sft", {}) or {})
+    if settings.get("contrastive_train_file"):
+        sft["data_path"] = str(settings["contrastive_train_file"])
+    if settings.get("contrastive_eval_file"):
+        sft["eval_path"] = str(settings["contrastive_eval_file"])
+        if not settings.get("contrastive_anchor_eval_file"):
+            sft["anchor_eval_path"] = str(settings["contrastive_eval_file"])
+    if settings.get("contrastive_anchor_eval_file"):
+        sft["anchor_eval_path"] = str(settings["contrastive_anchor_eval_file"])
+    if settings.get("benchmark_file"):
+        sft["benchmark_path"] = str(settings["benchmark_file"])
+    config["sft"] = sft
+    return config
 
 
 def sft_eval_inputs(config: dict[str, Any], config_path: str | Path) -> dict[str, str]:
@@ -296,6 +348,16 @@ def run_command(cmd: list[str], *, env: dict[str, str], dry_run: bool) -> None:
 
 
 def train_regular(settings: dict[str, Any], env: dict[str, str]) -> None:
+    sft_config = read_yaml(settings["sft_config"])
+    sft = sft_config.get("sft", {}) or {}
+    train_file = first_value(settings.get("sft_train_file"), sft_config.get("train_file"), sft.get("data_path"))
+    data_path = require_data_path(
+        train_file,
+        settings["sft_config"],
+        "Regular SFT training dataset",
+        "SFT_TRAIN_FILE",
+        dry_run=bool(settings["dry_run"]),
+    )
     cmd = [
         str(settings["torchrun"]),
         "--standalone",
@@ -307,6 +369,8 @@ def train_regular(settings: dict[str, Any], env: dict[str, str]) -> None:
         str(settings["epochs"]),
         "--output-dir",
         str(settings["regular_output_dir"]),
+        "--data-path",
+        data_path,
     ]
     if settings.get("base_model"):
         cmd.extend(["--checkpoint", str(settings["base_model"])])
@@ -316,6 +380,16 @@ def train_regular(settings: dict[str, Any], env: dict[str, str]) -> None:
 
 
 def train_contrastive(settings: dict[str, Any], env: dict[str, str]) -> None:
+    contrastive_config = read_yaml(settings["contrastive_config"])
+    sft = contrastive_config.get("sft", {}) or {}
+    train_file = first_value(settings.get("contrastive_train_file"), contrastive_config.get("train_file"), sft.get("data_path"))
+    data_path = require_data_path(
+        train_file,
+        settings["contrastive_config"],
+        "Contrastive SFT training dataset",
+        "CONTRASTIVE_TRAIN_FILE",
+        dry_run=bool(settings["dry_run"]),
+    )
     cmd = [
         str(settings["torchrun"]),
         "--standalone",
@@ -331,6 +405,8 @@ def train_contrastive(settings: dict[str, Any], env: dict[str, str]) -> None:
         str(settings["contrastive_base_model"]),
         "--output-dir",
         str(settings["contrastive_output_dir"]),
+        "--data-path",
+        data_path,
     ]
     run_command(cmd, env=env, dry_run=bool(settings["dry_run"]))
     if not settings["dry_run"] and not settings["contrastive_final"].is_dir():
@@ -403,8 +479,8 @@ def benchmark_config(
 
 
 def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, Path, Path]:
-    sft_config = read_yaml(settings["sft_config"])
-    contrastive_config = read_yaml(settings["contrastive_config"])
+    sft_config = sft_config_with_overrides(read_yaml(settings["sft_config"]), settings)
+    contrastive_config = contrastive_config_with_overrides(read_yaml(settings["contrastive_config"]), settings)
     generated_dir = Path(settings["generated_config_dir"])
     generated_dir.mkdir(parents=True, exist_ok=True)
     original_path = generated_dir / "original_decoder_dense_eval.yaml"
