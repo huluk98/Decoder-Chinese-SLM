@@ -62,6 +62,7 @@ CONFIG: dict[str, Any] = {
     "run_original_decoder_eval": True,
     "train_regular_sft": True,
     "train_contrastive_sft": True,
+    "train_only": False,
     "run_pruning_benchmarks": True,
     "dry_run": False,
 }
@@ -93,6 +94,7 @@ ENV_OVERRIDES = {
     "TOP_K_EXACT_MATCH": "top_k_exact_match",
     "KEEP_GOING": "keep_going",
     "RUN_ORIGINAL_DECODER_EVAL": "run_original_decoder_eval",
+    "TRAIN_ONLY": "train_only",
     "DRY_RUN": "dry_run",
 }
 
@@ -702,6 +704,12 @@ def main() -> None:
         train_regular(settings, env)
     if settings["train_contrastive_sft"]:
         train_contrastive(settings, env)
+
+    if settings["train_only"]:
+        print("\nTrain-only run complete.")
+        print(f"Regular 5-epoch SFT checkpoint:      {settings['regular_final']}")
+        print(f"Contrastive 5-epoch SFT checkpoint:  {settings['contrastive_final']}")
+        return
 
     original_config, regular_config, contrastive_config = write_generated_benchmark_configs(settings)
     print(f"\nGenerated benchmark configs:\n  {original_config}\n  {regular_config}\n  {contrastive_config}")
