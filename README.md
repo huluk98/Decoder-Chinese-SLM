@@ -923,10 +923,18 @@ The regular SFT config evaluates both `sft_dataset` and `benchmark`. The contras
 For the full journal run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs, evaluates the original decoder, dense regular SFT, and dense contrastive SFT on the original SFT dataset and benchmark, then runs one-shot `wanda`, `gradient`, `magnitude`, and NVIDIA `2of4` on both SFT checkpoints, use:
 
 ```bash
-PYTHON=/path/to/training/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh
+PYTHON=/path/to/training/env/bin/python \
+bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
 ```
 
-All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
+If you only want to generate the two 5-epoch checkpoints from a base model path, use the train-only wrapper:
+
+```bash
+PYTHON=/path/to/training/env/bin/python \
+bash run_5epoch_sft_contrastive_from_base.sh /path/to/base_model
+```
+
+That writes the regular SFT checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/base_sft_5ep/final` and the contrastive checkpoint to `runs/5epoch-sft-contrastive-one-shot/training/contrastive_sft_5ep/final` by default. All paths and knobs are editable in the top-level `CONFIG` dictionary inside `run_5epoch_sft_contrastive_one_shot_pruning.py`. The main full-journal artifact is one consolidated JSON file at `runs/5epoch-sft-contrastive-one-shot/journal_results.json`; it contains 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `wanda`, `gradient`, `magnitude`, and `2of4` one-shot 50% pruning rows for both SFT checkpoints on both eval splits. Change `original_model`, `base_model`, dataset paths, or `results_json` in `CONFIG`, or set `ORIGINAL_MODEL=/path/to/model` and `RESULTS_JSON=/path/to/results.json` from the environment.
 
 If you already have the three checkpoint paths and only want dense EM@1/EM@5 plus 50% one-shot pruning results in one JSON, use the path-driven wrapper:
 
