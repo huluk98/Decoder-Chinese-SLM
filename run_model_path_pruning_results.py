@@ -91,6 +91,11 @@ class RunSettings:
     prune_batch_size: int
     prune_num_workers: int
     sparsity_tolerance: float
+    eos_retune: bool
+    eos_loss_weight: float
+    eos_retune_epochs: float
+    eos_retune_max_steps: int | None
+    eos_retune_mode: str
     keep_going: bool
     dry_run: bool
 
@@ -306,7 +311,17 @@ def benchmark_config_for_family(settings: RunSettings, family: ModelFamily, meth
             "num_workers": int(settings.prune_num_workers),
         },
         "one_shot": {"enabled": bool(methods)},
-        "retune": {"enabled": False},
+        "retune": {
+            "enabled": bool(methods) and bool(settings.eos_retune),
+            "config": "configs/sft_0p2b_8gpu.yaml",
+            "mode": str(settings.eos_retune_mode),
+            "data_path": str(settings.training_dataset),
+            "max_steps": settings.eos_retune_max_steps,
+            "epochs": float(settings.eos_retune_epochs),
+            "max_seq_length": int(settings.max_length),
+            "keep_pruning_masks": True,
+            "eos_loss_weight": float(settings.eos_loss_weight),
+        },
         "_source": "run_model_path_pruning_results.py",
         "_model_family": family.key,
     }
@@ -376,6 +391,8 @@ def rows_for_family(family: ModelFamily) -> list[dict[str, Any]]:
                 "em1_correct": metric(row, "correct_examples", "exact_match_correct"),
                 "em5_correct": metric(row, "exact_match_at_top_k_correct", "exact_match_at_5_correct"),
                 "total_examples": metric(row, "total_examples"),
+                "mean_response_loss": safe_float(metric(row, "mean_response_loss", "mean_response_loss_mean")),
+                "response_perplexity": safe_float(metric(row, "response_perplexity", "response_perplexity_mean")),
                 "avg_generated_tokens": safe_float(metric(row, "avg_generated_tokens", "avg_generated_tokens_mean")),
                 "max_token_hit_rate": safe_float(metric(row, "reached_max_new_tokens_rate")),
                 "target_sparsity": 0.0 if phase == "dense_baseline" else safe_float(metric(row, "target_whole_model_sparsity", "target_prunable_sparsity")),
@@ -413,6 +430,16 @@ def expected_rows(settings: RunSettings) -> list[dict[str, str]]:
                     }
                     for method in settings.methods
                 )
+                if settings.eos_retune:
+                    expected.extend(
+                        {
+                            "model_family": family_display_name(family.key),
+                            "eval_name": eval_name,
+                            "phase": "retuned",
+                            "method": display_method(method),
+                        }
+                        for method in settings.methods
+                    )
     return expected
 
 
@@ -494,6 +521,14 @@ def write_results_json(settings: RunSettings, generated_configs: dict[str, Path]
             "include_lm_head": settings.include_lm_head,
             "calibration_batches": settings.calibration_batches,
         },
+        "eos_reinforcement": {
+            "enabled": settings.eos_retune,
+            "eos_loss_weight": settings.eos_loss_weight,
+            "retune_epochs": settings.eos_retune_epochs,
+            "retune_max_steps": settings.eos_retune_max_steps,
+            "retune_mode": settings.eos_retune_mode,
+            "fixed_pruning_masks": True,
+        },
         "checks": result_completeness(rows, settings),
         "results": rows,
         "raw_benchmark_summaries": raw_summaries,
@@ -518,6 +553,13 @@ def print_plan(settings: RunSettings) -> None:
     print(f"  CUDA_VISIBLE_DEVICES:  {settings.cuda_visible_devices}", flush=True)
     print(f"  nproc_per_node:        {settings.nproc_per_node}", flush=True)
     print(f"  Python:                {settings.python}", flush=True)
+    if settings.eos_retune:
+        print(
+            "  EOS retune:            "
+            f"enabled, weight={settings.eos_loss_weight}, "
+            f"epochs={settings.eos_retune_epochs}, max_steps={settings.eos_retune_max_steps}",
+            flush=True,
+        )
 
 
 def run_model_path_pruning_results(settings: RunSettings) -> Path:
@@ -583,6 +625,11 @@ def build_settings(args: argparse.Namespace) -> RunSettings:
         prune_batch_size=int(args.prune_batch_size),
         prune_num_workers=int(args.prune_num_workers),
         sparsity_tolerance=float(args.sparsity_tolerance),
+        eos_retune=bool(args.eos_retune),
+        eos_loss_weight=float(args.eos_loss_weight),
+        eos_retune_epochs=float(args.eos_retune_epochs),
+        eos_retune_max_steps=int(args.eos_retune_max_steps) if args.eos_retune_max_steps is not None else None,
+        eos_retune_mode=str(args.eos_retune_mode),
         keep_going=bool(args.keep_going),
         dry_run=bool(args.dry_run),
     )
@@ -637,6 +684,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prune-batch-size", type=int, default=int(os.environ.get("PRUNE_BATCH_SIZE", "2")))
     parser.add_argument("--prune-num-workers", type=int, default=int(os.environ.get("PRUNE_NUM_WORKERS", "0")))
     parser.add_argument("--sparsity-tolerance", type=float, default=float(os.environ.get("SPARSITY_TOLERANCE", "0.001")))
+    parser.add_argument("--eos-retune", action="store_true", default=bool_from_text(os.environ.get("EOS_RETUNE")))
+    parser.add_argument("--eos-loss-weight", type=float, default=float(os.environ.get("EOS_LOSS_WEIGHT", "5.0")))
+    parser.add_argument("--eos-retune-epochs", type=float, default=float(os.environ.get("EOS_RETUNE_EPOCHS", "1.0")))
+    parser.add_argument(
+        "--eos-retune-max-steps",
+        type=int,
+        default=int(os.environ["EOS_RETUNE_MAX_STEPS"]) if os.environ.get("EOS_RETUNE_MAX_STEPS") else None,
+    )
+    parser.add_argument("--eos-retune-mode", choices=("sft",), default=os.environ.get("EOS_RETUNE_MODE", "sft"))
     parser.add_argument("--dry-run", action="store_true", default=bool_from_text(os.environ.get("DRY_RUN")))
     errors = parser.add_mutually_exclusive_group()
     errors.add_argument("--continue-on-error", dest="keep_going", action="store_true", default=not bool_from_text(os.environ.get("STOP_ON_ERROR")))
