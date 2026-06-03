@@ -7,11 +7,16 @@ cd "${SCRIPT_DIR}"
 usage() {
   cat <<'EOF'
 Usage:
-  bash run_5epoch_sft_contrastive_one_shot_pruning.sh [BASE_MODEL_PATH] [extra python args]
+  bash run_5epoch_sft_contrastive_one_shot_pruning.sh [COMMAND] [BASE_MODEL_PATH] [extra python args]
 
 Runs the 5-epoch regular SFT, then the 5-epoch contrastive SFT from the fresh
 regular SFT checkpoint, followed by the configured dense eval and one-shot
 pruning benchmark.
+
+Commands:
+  retune, eos-retune   run 50% pruning, then add fixed-mask EOS retune rows.
+  one-shot, no-retune  run the original one-shot pruning benchmark only.
+  train-only           stop after the two 5-epoch training runs.
 
 Environment overrides:
   BASE_MODEL            Same as first positional argument.
@@ -34,7 +39,9 @@ Environment overrides:
 
 Examples:
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
+  PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh retune /path/to/base_model
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_eos_reinforced_pruning.sh /path/to/base_model
+  PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_eos_reinforced_pruning.sh retune /path/to/base_model
   TRAIN_ONLY=1 bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
 EOF
 }
@@ -43,6 +50,23 @@ run_5epoch_sft_contrastive_from_base() {
   if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     usage
     return 0
+  fi
+
+  if [[ $# -gt 0 && "${1}" != -* ]]; then
+    case "${1}" in
+      retune|eos-retune)
+        export EOS_RETUNE=1
+        shift
+        ;;
+      one-shot|oneshot|no-retune)
+        export EOS_RETUNE=0
+        shift
+        ;;
+      train-only)
+        export TRAIN_ONLY=1
+        shift
+        ;;
+    esac
   fi
 
   if [[ $# -gt 0 && "${1}" != -* ]]; then
