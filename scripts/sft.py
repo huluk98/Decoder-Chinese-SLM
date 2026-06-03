@@ -152,6 +152,49 @@ def autocast_for(device: torch.device, precision: str):
     return nullcontext()
 
 
+def causal_lm_loss(
+    model: torch.nn.Module,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    eos_token_id: int | None,
+    eos_loss_weight: float = 1.0,
+) -> tuple[torch.Tensor, Any]:
+    """Return causal LM loss, optionally upweighting supervised EOS labels."""
+    if float(eos_loss_weight) <= 1.0 or eos_token_id is None:
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            use_cache=False,
+        )
+        return outputs.loss, outputs
+
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=False,
+    )
+    logits = outputs.logits
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    flat_labels = shift_labels.view(-1)
+    token_loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        flat_labels,
+        ignore_index=-100,
+        reduction="none",
+    )
+    valid = flat_labels.ne(-100)
+    weights = torch.ones_like(token_loss)
+    eos_positions = valid & flat_labels.eq(int(eos_token_id))
+    weights = torch.where(eos_positions, weights * float(eos_loss_weight), weights)
+    denominator = weights[valid].sum().clamp_min(1.0)
+    loss = (token_loss * weights).sum() / denominator
+    return loss, outputs
+
+
 def configure_cuda(train_config: dict[str, Any], rank: int) -> None:
     if not torch.cuda.is_available():
         return
@@ -866,6 +909,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable deterministic PyTorch algorithms where available. This can reduce speed.",
     )
     parser.add_argument("--pruning-mask", "--pruning_mask", default=None, help="Optional pruning_masks.pt to keep zeros fixed during SFT retuning.")
+    parser.add_argument(
+        "--eos-loss-weight",
+        type=float,
+        default=None,
+        help="Optional SFT/retune loss multiplier for supervised EOS labels. Values above 1 reinforce stopping behavior.",
+    )
     return parser.parse_args(argv)
 
 
@@ -892,6 +941,8 @@ def main(argv: list[str] | None = None) -> None:
         train_config["data_seed"] = int(args.data_seed)
     if args.pruning_mask is not None:
         sft_config["pruning_mask_path"] = args.pruning_mask
+    if args.eos_loss_weight is not None:
+        sft_config["eos_loss_weight"] = float(args.eos_loss_weight)
 
     mode = str(args.mode or sft_config.get("mode", "sft"))
     contrastive = mode == "contrastive"
@@ -944,6 +995,9 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("Set train_file, sft.data_path, or pass --data-path to an SFT .jsonl or .json file.")
     max_seq_length = int(sft_config.get("max_length", 128))
     max_new_tokens = int(generation_config.get("max_new_tokens", 64))
+    eos_loss_weight = float(sft_config.get("eos_loss_weight", 1.0))
+    if eos_loss_weight < 1.0:
+        raise ValueError(f"eos_loss_weight must be >= 1.0, got {eos_loss_weight}.")
     if max_new_tokens > 64:
         maybe_print(rank, f"[warning] max_new_tokens={max_new_tokens} is too long for this SFT task; capping to 64.")
         max_new_tokens = 64
@@ -1038,6 +1092,12 @@ def main(argv: list[str] | None = None) -> None:
         )
     else:
         maybe_print(rank, "Decoder-only SFT labels are unshifted; the causal LM loss shifts labels inside the model.")
+    if eos_loss_weight > 1.0:
+        maybe_print(
+            rank,
+            f"EOS reinforcement: supervised EOS labels use loss weight {eos_loss_weight:g}; "
+            "fixed pruning masks are reapplied after every optimizer step when --pruning-mask is set.",
+        )
 
     align_weight = float(sft_config.get("alignment_weight", 0.1))
     margin = float(sft_config.get("margin", 0.5))
@@ -1115,21 +1175,23 @@ def main(argv: list[str] | None = None) -> None:
             )
             with sync_context:
                 with autocast_for(device, str(train_config["precision"]).lower()):
-                    outputs = model(
+                    anchor_gen_loss, _ = causal_lm_loss(
+                        model,
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         labels=batch["labels"],
-                        use_cache=False,
+                        eos_token_id=tokenizer.eos_token_id,
+                        eos_loss_weight=eos_loss_weight,
                     )
-                    anchor_gen_loss = outputs.loss
                     if contrastive:
-                        positive_outputs = model(
+                        positive_gen_loss, _ = causal_lm_loss(
+                            model,
                             input_ids=batch["positive_gen_input_ids"],
                             attention_mask=batch["positive_gen_attention_mask"],
                             labels=batch["positive_gen_labels"],
-                            use_cache=False,
+                            eos_token_id=tokenizer.eos_token_id,
+                            eos_loss_weight=eos_loss_weight,
                         )
-                        positive_gen_loss = positive_outputs.loss
                         gen_loss = anchor_gen_loss + positive_gen_loss
                         align_loss = contrastive_alignment_loss(model, batch, margin=margin)
                         raw_loss = gen_loss + align_weight * align_loss

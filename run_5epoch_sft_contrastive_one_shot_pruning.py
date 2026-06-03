@@ -66,6 +66,11 @@ CONFIG: dict[str, Any] = {
     "prune_num_workers": 0,
     "sparsity_tolerance": 1.0e-3,
     "keep_going": True,
+    "eos_retune": False,
+    "eos_loss_weight": 5.0,
+    "eos_retune_epochs": 1.0,
+    "eos_retune_max_steps": None,
+    "eos_retune_mode": "sft",
     "run_original_decoder_eval": True,
     "train_regular_sft": True,
     "train_contrastive_sft": True,
@@ -107,6 +112,11 @@ ENV_OVERRIDES = {
     "TOP_K_EXACT_MATCH": "top_k_exact_match",
     "MAX_NEW_TOKEN_HIT_RATE_THRESHOLD": "max_new_token_hit_rate_threshold",
     "KEEP_GOING": "keep_going",
+    "EOS_RETUNE": "eos_retune",
+    "EOS_LOSS_WEIGHT": "eos_loss_weight",
+    "EOS_RETUNE_EPOCHS": "eos_retune_epochs",
+    "EOS_RETUNE_MAX_STEPS": "eos_retune_max_steps",
+    "EOS_RETUNE_MODE": "eos_retune_mode",
     "RUN_ORIGINAL_DECODER_EVAL": "run_original_decoder_eval",
     "TRAIN_ONLY": "train_only",
     "DRY_RUN": "dry_run",
@@ -305,6 +315,10 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     run_root = repo_path(config["run_root"])
     sft_config = read_yaml(config["sft_config"])
     settings = dict(config)
+    if bool(settings.get("eos_retune")) and str(settings.get("eos_retune_mode", "sft")) != "sft":
+        raise ValueError("EOS_RETUNE_MODE currently supports only 'sft' so the fixed-mask recovery isolates EOS reinforcement.")
+    if float(settings.get("eos_loss_weight", 1.0)) < 1.0:
+        raise ValueError("EOS_LOSS_WEIGHT must be >= 1.0.")
     settings["run_root"] = run_root
     settings["original_eval_output_dir"] = repo_path(config["original_eval_output_dir"]) if config.get("original_eval_output_dir") else run_root / "dense" / "original_decoder"
     settings["regular_output_dir"] = repo_path(config["regular_output_dir"]) if config.get("regular_output_dir") else run_root / "training" / "base_sft_5ep"
@@ -476,7 +490,17 @@ def benchmark_config(
             "num_workers": int(settings["prune_num_workers"]),
         },
         "one_shot": {"enabled": bool(benchmark_methods)},
-        "retune": {"enabled": False},
+        "retune": {
+            "enabled": bool(benchmark_methods) and bool(settings["eos_retune"]),
+            "config": str(settings["sft_config"]),
+            "mode": str(settings["eos_retune_mode"]),
+            "data_path": inputs["training_dataset"],
+            "max_steps": settings.get("eos_retune_max_steps"),
+            "epochs": float(settings["eos_retune_epochs"]),
+            "max_seq_length": max_length,
+            "keep_pruning_masks": True,
+            "eos_loss_weight": float(settings["eos_loss_weight"]),
+        },
         "_source_config": str(config_path),
     }
 
@@ -582,8 +606,6 @@ def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
     all_rows = list(payload.get("dense_baseline", []) or []) + list(payload.get("results", []) or [])
     for row in all_rows:
         phase = str(row.get("phase", ""))
-        if phase == "retuned":
-            continue
         method = "base_model" if phase == "dense_baseline" else str(row.get("method", ""))
         rows.append(
             {
@@ -606,6 +628,8 @@ def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
                 "em1_correct": metric(row, "correct_examples", "exact_match_correct"),
                 "em5_correct": metric(row, "exact_match_at_top_k_correct", "exact_match_at_5_correct"),
                 "total_examples": metric(row, "total_examples"),
+                "mean_response_loss": safe_float(metric(row, "mean_response_loss", "mean_response_loss_mean")),
+                "response_perplexity": safe_float(metric(row, "response_perplexity", "response_perplexity_mean")),
                 "avg_generated_tokens": safe_float(metric(row, "avg_generated_tokens", "avg_generated_tokens_mean")),
                 "max_token_hit_rate": safe_float(metric(row, "reached_max_new_tokens_rate")),
                 "achieved_whole_model_sparsity": safe_float(metric(row, "achieved_whole_model_sparsity", "real_sparsity")),
@@ -646,14 +670,26 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
             for eval_name in expected_eval_names
             for method in settings["methods"]
         )
+        if settings.get("eos_retune", False):
+            expected_rows.extend(
+                {"model_family": family, "eval_name": eval_name, "method": str(method), "phase": "retuned"}
+                for eval_name in expected_eval_names
+                for method in settings["methods"]
+            )
     present = {
-        (str(row.get("model_family")), str(row.get("eval_name")), str(row.get("method")))
+        (str(row.get("model_family")), str(row.get("eval_name")), str(row.get("method")), str(row.get("phase", "")))
         for row in rows
     }
     missing = [
         expected
         for expected in expected_rows
-        if (expected["model_family"], expected["eval_name"], expected["method"]) not in present
+        if (
+            expected["model_family"],
+            expected["eval_name"],
+            expected["method"],
+            str(expected.get("phase", "one_shot" if expected["method"] != "base_model" else "dense_baseline")),
+        )
+        not in present
     ]
     return {
         "expected_eval_names": expected_eval_names,
@@ -720,6 +756,14 @@ def write_results_json(
                 "include_lm_head": settings["include_lm_head"],
                 "calibration_batches": settings["calibration_batches"],
             },
+            "eos_reinforcement": {
+                "enabled": bool(settings["eos_retune"]),
+                "eos_loss_weight": settings["eos_loss_weight"],
+                "retune_epochs": settings["eos_retune_epochs"],
+                "retune_max_steps": settings.get("eos_retune_max_steps"),
+                "retune_mode": settings["eos_retune_mode"],
+                "fixed_pruning_masks": True,
+            },
         },
         "checks": result_completeness(rows, settings),
         "results": rows,
@@ -751,6 +795,12 @@ def print_plan(settings: dict[str, Any]) -> None:
     print(f"  base SFT checkpoint:   {settings.get('base_model') or 'from SFT config'}")
     print(f"  contrastive base:      {settings['contrastive_base_model']}")
     print(f"  results JSON:          {settings['results_json']}")
+    if settings.get("eos_retune"):
+        print(
+            "  EOS retune:            "
+            f"enabled, weight={settings['eos_loss_weight']}, "
+            f"epochs={settings['eos_retune_epochs']}, max_steps={settings.get('eos_retune_max_steps')}"
+        )
 
 
 def parse_args() -> argparse.Namespace:

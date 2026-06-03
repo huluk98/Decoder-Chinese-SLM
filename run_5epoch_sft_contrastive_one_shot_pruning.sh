@@ -26,11 +26,15 @@ Environment overrides:
   CONTRASTIVE_EVAL_FILE optional contrastive eval/calibration dataset; default config uses data/scenic/SCENIC_full_training_dataset.json.
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
                         default: 1.01, so high max-token rates are reported instead of aborting.
+  EOS_RETUNE            set to 1 to add masked SFT recovery rows after one-shot pruning.
+  EOS_LOSS_WEIGHT       default when EOS_RETUNE=1 via wrapper: 5.0.
+  EOS_RETUNE_EPOCHS     default when EOS_RETUNE=1 via wrapper: 1.0.
   BENCHMARK_FILE        optional benchmark dataset override.
   PYTHON                Python executable from the training environment.
 
 Examples:
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
+  PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_eos_reinforced_pruning.sh /path/to/base_model
   TRAIN_ONLY=1 bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
 EOF
 }

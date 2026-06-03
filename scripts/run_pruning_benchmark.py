@@ -667,6 +667,8 @@ def run_retune(
         cmd.extend(["--gradient_accumulation_steps", str(int(retune["gradient_accumulation_steps"]))])
     if retune.get("max_seq_length") is not None:
         cmd.extend(["--max_seq_length", str(int(retune["max_seq_length"]))])
+    if retune.get("eos_loss_weight") is not None:
+        cmd.extend(["--eos-loss-weight", str(float(retune["eos_loss_weight"]))])
     run_command(cmd, env=env, dry_run=dry_run)
 
 

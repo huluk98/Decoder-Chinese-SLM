@@ -13,6 +13,9 @@ Environment overrides:
   TRAINING_DATASET      default: data/scenic/SCENIC_full_training_dataset.json
   BENCHMARK_DATASET     default: data/benchmarks/iot_instruction_benchmark_200.json
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD default: 1.01
+  EOS_RETUNE            default: 0; set to 1 to add masked EOS-weighted recovery rows.
+  EOS_LOSS_WEIGHT       default: 5.0 when EOS_RETUNE=1.
+  EOS_RETUNE_EPOCHS     default: 1.0 when EOS_RETUNE=1.
   RUN_ROOT              default: runs/model-path-pruning-results
   RESULTS_JSON          default: ${RUN_ROOT}/model_path_pruning_results.json
   METHODS               default: "wanda magnitude gradient nvidia"
@@ -83,6 +86,18 @@ run_model_path_pruning_results() {
     "--prune-num-workers" "${PRUNE_NUM_WORKERS:-0}"
     "--sparsity-tolerance" "${SPARSITY_TOLERANCE:-0.001}"
   )
+
+  if [[ "${EOS_RETUNE:-0}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
+    args+=(
+      "--eos-retune"
+      "--eos-loss-weight" "${EOS_LOSS_WEIGHT:-5.0}"
+      "--eos-retune-epochs" "${EOS_RETUNE_EPOCHS:-1.0}"
+      "--eos-retune-mode" "${EOS_RETUNE_MODE:-sft}"
+    )
+    if [[ -n "${EOS_RETUNE_MAX_STEPS:-}" ]]; then
+      args+=("--eos-retune-max-steps" "${EOS_RETUNE_MAX_STEPS}")
+    fi
+  fi
 
   if [[ -n "${CALIBRATION_DATASET:-}" ]]; then
     args+=("--calibration-dataset" "${CALIBRATION_DATASET}")
