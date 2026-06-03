@@ -943,6 +943,13 @@ PYTHON=/path/to/training/env/bin/python \
 bash run_5epoch_sft_contrastive_eos_reinforced_pruning.sh /path/to/base_model
 ```
 
+The same retune path can also be requested explicitly as a shell command:
+
+```bash
+PYTHON=/path/to/training/env/bin/python \
+bash run_5epoch_sft_contrastive_one_shot_pruning.sh retune /path/to/base_model
+```
+
 The EOS experiment writes both `one_shot` and `retuned` rows in the same `journal_results.json`. Treat EOS as a major cause only if the `retuned` rows reduce `max_token_hit_rate` and recover EM/loss under the same sparsity. If `max_token_hit_rate` improves but `mean_response_loss` and EM stay collapsed, EOS was a symptom of broader token-distribution damage.
 
 If you already have the three checkpoint paths and only want dense EM@1/EM@5 plus 50% one-shot pruning results in one JSON, use the path-driven wrapper:
