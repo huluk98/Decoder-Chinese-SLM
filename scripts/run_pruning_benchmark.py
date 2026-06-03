@@ -420,6 +420,13 @@ def print_plan(
     print(f"  sparsity_denominator: {config.get('prune', {}).get('sparsity_denominator', 'prunable')}", flush=True)
     print(f"  benchmark_runs: {benchmark.get('benchmark_runs', 1)}", flush=True)
     print(f"  exact_match_top_k: {benchmark.get('top_k_exact_match', 5)}", flush=True)
+    print(
+        "  generation: "
+        f"max_length={benchmark.get('max_length', benchmark.get('max_seq_length', 2048))}, "
+        f"max_new_tokens={benchmark.get('max_new_tokens', 64)}, "
+        f"num_beams={benchmark_num_beams(benchmark)}",
+        flush=True,
+    )
     print(f"  retune.enabled: {bool(retune.get('enabled', True))}", flush=True)
     print(f"  retune.data_path: {retune.get('data_path')}", flush=True)
     print(f"  retune.max_steps: {retune.get('max_steps')}", flush=True)
@@ -510,6 +517,13 @@ def run_prune(
     )
 
 
+def benchmark_num_beams(benchmark: dict[str, Any]) -> int:
+    generation = benchmark.get("generation")
+    if not isinstance(generation, dict):
+        generation = {}
+    return int(benchmark.get("num_beams", generation.get("num_beams", 1)))
+
+
 def run_eval(
     model_path: Path,
     eval_file: Path,
@@ -539,7 +553,7 @@ def run_eval(
             "--temperature",
             "0",
             "--num-beams",
-            "1",
+            str(benchmark_num_beams(benchmark)),
             "--batch-size",
             str(int(benchmark.get("eval_batch_size", 16))),
             "--dtype",
@@ -1209,7 +1223,7 @@ def main() -> None:
                         "eval_name": eval_name,
                         "generation_config": {
                             "max_new_tokens": int(benchmark.get("max_new_tokens", 64)),
-                            "num_beams": 1,
+                            "num_beams": benchmark_num_beams(benchmark),
                             "temperature": 0,
                             "do_sample": False,
                             "exact_match_top_k": int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5))),
