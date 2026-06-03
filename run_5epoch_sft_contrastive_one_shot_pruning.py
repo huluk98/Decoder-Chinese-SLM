@@ -31,7 +31,7 @@ CONFIG: dict[str, Any] = {
     "nproc_per_node": 8,
     "omp_num_threads": 8,
     "epochs": 5,
-    "run_root": "runs/5epoch-sft-contrastive-one-shot",
+    "run_root": "runs/5epoch-sft-contrastive-prunable50-comparable",
     "sft_config": "configs/sft_0p2b_8gpu.yaml",
     "contrastive_config": "configs/contrastive_sft_8gpu.yaml",
     "prune_config": "configs/prune_50.yaml",
@@ -55,13 +55,16 @@ CONFIG: dict[str, Any] = {
     "eval_runs": 1,
     "top_k_exact_match": 5,
     "comparison_mode": "whitespace",
+    "max_length": 256,
+    "max_new_tokens": 128,
+    "num_beams": 5,
     "max_new_token_hit_rate_threshold": 1.01,
     "sparsity": 0.5,
     "pruning_scope": "transformer_linears",
-    "sparsity_denominator": "whole_model",
-    "granularity": "layer",
+    "sparsity_denominator": "prunable",
+    "granularity": "global",
     "include_lm_head": False,
-    "calibration_batches": 128,
+    "calibration_batches": 64,
     "prune_batch_size": 2,
     "prune_num_workers": 0,
     "sparsity_tolerance": 1.0e-3,
@@ -110,7 +113,20 @@ ENV_OVERRIDES = {
     "METHODS": "methods",
     "EVAL_RUNS": "eval_runs",
     "TOP_K_EXACT_MATCH": "top_k_exact_match",
+    "COMPARISON_MODE": "comparison_mode",
+    "MAX_LENGTH": "max_length",
+    "MAX_NEW_TOKENS": "max_new_tokens",
+    "NUM_BEAMS": "num_beams",
     "MAX_NEW_TOKEN_HIT_RATE_THRESHOLD": "max_new_token_hit_rate_threshold",
+    "SPARSITY": "sparsity",
+    "PRUNING_SCOPE": "pruning_scope",
+    "SPARSITY_DENOMINATOR": "sparsity_denominator",
+    "GRANULARITY": "granularity",
+    "INCLUDE_LM_HEAD": "include_lm_head",
+    "CALIBRATION_BATCHES": "calibration_batches",
+    "PRUNE_BATCH_SIZE": "prune_batch_size",
+    "PRUNE_NUM_WORKERS": "prune_num_workers",
+    "SPARSITY_TOLERANCE": "sparsity_tolerance",
     "KEEP_GOING": "keep_going",
     "EOS_RETUNE": "eos_retune",
     "EOS_LOSS_WEIGHT": "eos_loss_weight",
@@ -210,6 +226,8 @@ def first_value(*values: Any) -> str:
 
 def sft_config_with_overrides(config: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     config = dict(config)
+    if settings.get("base_model"):
+        config["model_name_or_path"] = str(settings["base_model"])
     if settings.get("sft_train_file"):
         config["train_file"] = str(settings["sft_train_file"])
     if settings.get("sft_eval_file"):
@@ -301,6 +319,11 @@ def sft_base_model_from_config(config: dict[str, Any]) -> str:
     return first_value(config.get("model_name_or_path"), sft.get("base_model"), run.get("base_model"))
 
 
+def is_placeholder_model_path(value: Any) -> bool:
+    text = str(value or "").strip()
+    return not text or text.startswith("/path/to/")
+
+
 def dtype_from_config(config: dict[str, Any]) -> str:
     train = config.get("train", {}) or {}
     precision = str(train.get("precision", "")).lower()
@@ -329,9 +352,15 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["results_json"] = repo_path(config["results_json"]) if config.get("results_json") else run_root / "journal_results.json"
     settings["regular_final"] = settings["regular_output_dir"] / "final"
     settings["contrastive_final"] = settings["contrastive_output_dir"] / "final"
-    settings["original_model"] = config.get("original_model") or config.get("base_model") or sft_base_model_from_config(sft_config)
-    if not settings["original_model"]:
-        raise ValueError("Set original_model, base_model, or model_name_or_path in the base SFT config.")
+    base_model = config.get("base_model") or config.get("original_model") or sft_base_model_from_config(sft_config)
+    if is_placeholder_model_path(base_model):
+        raise ValueError(
+            "Set BASE_MODEL to the untuned base checkpoint, or pass it as the first argument to "
+            "run_5epoch_sft_contrastive_one_shot_pruning.sh. The launcher uses that one model path "
+            "for original dense eval and regular SFT training."
+        )
+    settings["base_model"] = str(base_model)
+    settings["original_model"] = str(config.get("original_model") or settings["base_model"])
     settings["contrastive_base_model"] = config.get("contrastive_base_model") or str(settings["regular_final"])
     settings["python"] = str(repo_path(config["python"])) if config.get("python") else sys.executable
     torchrun = config.get("torchrun")
@@ -341,6 +370,28 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
         beside_python = Path(settings["python"]).with_name("torchrun")
         settings["torchrun"] = str(beside_python) if beside_python.exists() else "torchrun"
     return settings
+
+
+def dataset_summary(settings: dict[str, Any]) -> dict[str, str]:
+    sft_config = sft_config_with_overrides(read_yaml(settings["sft_config"]), settings)
+    contrastive_config = contrastive_config_with_overrides(read_yaml(settings["contrastive_config"]), settings)
+    sft = sft_config.get("sft", {}) or {}
+    contrastive_sft = contrastive_config.get("sft", {}) or {}
+    sft_inputs = sft_eval_inputs(sft_config, settings["sft_config"])
+    contrastive_inputs = contrastive_eval_inputs(contrastive_config, settings["contrastive_config"])
+    return {
+        "regular_sft_train": resolve_path(first_value(sft_config.get("train_file"), sft.get("data_path")), settings["sft_config"]),
+        "regular_sft_eval": sft_inputs["training_dataset"],
+        "regular_sft_calibration": sft_inputs["calibration"],
+        "contrastive_train": resolve_path(
+            first_value(contrastive_config.get("train_file"), contrastive_sft.get("data_path")),
+            settings["contrastive_config"],
+        ),
+        "contrastive_eval": contrastive_inputs["training_dataset"],
+        "contrastive_calibration": contrastive_inputs["calibration"],
+        "benchmark": sft_inputs["benchmark"],
+        "contrastive_benchmark": contrastive_inputs["benchmark"],
+    }
 
 
 def command_env(settings: dict[str, Any]) -> dict[str, str]:
@@ -441,8 +492,16 @@ def benchmark_config(
     methods: list[str] | None = None,
 ) -> dict[str, Any]:
     benchmark_methods = list(settings["methods"] if methods is None else methods)
-    max_length = int_from_config(source_config, "max_seq_length", "sft.max_length", default=128)
-    max_new_tokens = int_from_config(source_config, "max_new_tokens", "generation.max_new_tokens", default=64)
+    max_length = (
+        int(settings["max_length"])
+        if settings.get("max_length") not in (None, "")
+        else int_from_config(source_config, "max_seq_length", "sft.max_length", default=128)
+    )
+    max_new_tokens = (
+        int(settings["max_new_tokens"])
+        if settings.get("max_new_tokens") not in (None, "")
+        else int_from_config(source_config, "max_new_tokens", "generation.max_new_tokens", default=64)
+    )
     eval_batch_size = int_from_config(
         source_config,
         "per_device_eval_batch_size",
@@ -467,6 +526,7 @@ def benchmark_config(
             "top_k_exact_match": int(settings["top_k_exact_match"]),
             "comparison_mode": str(settings["comparison_mode"]),
             "max_new_tokens": max_new_tokens,
+            "num_beams": int(settings["num_beams"]),
             "max_new_token_hit_rate_threshold": float(settings["max_new_token_hit_rate_threshold"]),
             "max_length": max_length,
             "eval_batch_size": eval_batch_size,
@@ -717,6 +777,7 @@ def write_results_json(
         rows.extend(rows_for_family("original_decoder", settings["original_eval_output_dir"]))
     rows.extend(rows_for_family("base_sft", settings["regular_pruning_output_dir"]))
     rows.extend(rows_for_family("contrastive_sft", settings["contrastive_pruning_output_dir"]))
+    datasets = dataset_summary(settings)
     output_path = Path(settings["results_json"])
     payload = {
         "schema_version": 1,
@@ -743,6 +804,7 @@ def write_results_json(
                 "base_sft_final": settings["regular_final"],
                 "contrastive_sft_final": settings["contrastive_final"],
             },
+            "datasets": datasets,
             "generated_configs": {
                 "original_decoder": original_config,
                 "base_sft": regular_config,
@@ -755,6 +817,13 @@ def write_results_json(
                 "granularity": settings["granularity"],
                 "include_lm_head": settings["include_lm_head"],
                 "calibration_batches": settings["calibration_batches"],
+            },
+            "generation": {
+                "max_length": settings["max_length"],
+                "max_new_tokens": settings["max_new_tokens"],
+                "num_beams": settings["num_beams"],
+                "top_k_exact_match": settings["top_k_exact_match"],
+                "comparison_mode": settings["comparison_mode"],
             },
             "eos_reinforcement": {
                 "enabled": bool(settings["eos_retune"]),
@@ -781,19 +850,36 @@ def write_results_json(
 
 
 def print_plan(settings: dict[str, Any]) -> None:
+    datasets = dataset_summary(settings)
     print("5-epoch SFT + contrastive SFT + one-shot pruning benchmark")
     print(f"  epochs:                {settings['epochs']}")
     print(f"  methods:               {' '.join(settings['methods'])}")
     print(f"  eval runs:             {settings['eval_runs']}")
     print(f"  exact-match top-k:     {settings['top_k_exact_match']}")
+    print(
+        "  generation:            "
+        f"max_length={settings['max_length']}, "
+        f"max_new_tokens={settings['max_new_tokens']}, "
+        f"num_beams={settings['num_beams']}"
+    )
+    print(
+        "  pruning target:        "
+        f"{float(settings['sparsity']):.0%} {settings['sparsity_denominator']} "
+        f"{settings['pruning_scope']} ({settings['granularity']})"
+    )
+    print(f"  calibration batches:   {settings['calibration_batches']}")
     print(f"  run root:              {settings['run_root']}")
     print(f"  CUDA_VISIBLE_DEVICES:  {settings['cuda_visible_devices']}")
     print(f"  nproc_per_node:        {settings['nproc_per_node']}")
     print(f"  Python:                {settings['python']}")
     print(f"  torchrun:              {settings['torchrun']}")
     print(f"  original decoder:      {settings['original_model']}")
-    print(f"  base SFT checkpoint:   {settings.get('base_model') or 'from SFT config'}")
+    print(f"  base SFT checkpoint:   {settings['base_model']}")
     print(f"  contrastive base:      {settings['contrastive_base_model']}")
+    print(f"  regular SFT data:      {datasets['regular_sft_train']}")
+    print(f"  contrastive data:      {datasets['contrastive_train']}")
+    print(f"  eval dataset:          {datasets['regular_sft_eval']}")
+    print(f"  benchmark dataset:     {datasets['benchmark']}")
     print(f"  results JSON:          {settings['results_json']}")
     if settings.get("eos_retune"):
         print(

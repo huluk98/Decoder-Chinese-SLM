@@ -20,8 +20,7 @@ Commands:
 
 Environment overrides:
   BASE_MODEL            Same as first positional argument.
-  ORIGINAL_MODEL        Defaults to BASE_MODEL for original decoder dense eval.
-  RUN_ROOT              default: runs/5epoch-sft-contrastive-one-shot
+  RUN_ROOT              default: runs/5epoch-sft-contrastive-prunable50-comparable
   EPOCHS                default: 5
   TRAIN_ONLY            set to 1 to stop after the two 5-epoch training runs.
   SFT_TRAIN_FILE        optional regular SFT dataset override; default config uses data/scenic/SCENIC_full_training_dataset.json.
@@ -71,10 +70,10 @@ run_5epoch_sft_contrastive_from_base() {
 
   if [[ $# -gt 0 && "${1}" != -* ]]; then
     export BASE_MODEL="${1}"
-    export ORIGINAL_MODEL="${ORIGINAL_MODEL:-${1}}"
+    export ORIGINAL_MODEL="${1}"
     shift
   elif [[ -n "${BASE_MODEL:-}" ]]; then
-    export ORIGINAL_MODEL="${ORIGINAL_MODEL:-${BASE_MODEL}}"
+    export ORIGINAL_MODEL="${BASE_MODEL}"
   fi
   export EPOCHS="${EPOCHS:-5}"
 

@@ -159,14 +159,16 @@ def test_run_eval_passes_max_new_token_hit_rate_threshold(monkeypatch: pytest.Mo
         Path("/tmp/model"),
         Path("/tmp/eval.json"),
         tmp_path / "eval",
-        benchmark={"max_new_token_hit_rate_threshold": 1.01},
+        benchmark={"max_new_token_hit_rate_threshold": 1.01, "num_beams": 5},
         env={},
         dry_run=True,
     )
 
     cmd = captured["cmd"]
     threshold_index = cmd.index("--max-new-token-hit-rate-threshold")
+    beam_index = cmd.index("--num-beams")
     assert cmd[threshold_index + 1] == "1.01"
+    assert cmd[beam_index + 1] == "5"
 
 
 def test_write_summary_has_eight_pruning_rows_with_missing_retuned(tmp_path: Path) -> None:

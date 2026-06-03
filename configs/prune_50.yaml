@@ -12,19 +12,18 @@ prune:
   output_dir: runs/pruned-0p2b
   method: magnitude
   sparsity: 0.5
-  # Protected decoder-only pruning with a true whole-model sparsity target.
-  # Embeddings, lm_head/output heads, norms, biases, and non-Linear tensors stay
-  # fixed; the resolved prunable Linear sparsity is raised as needed so the
-  # reported achieved_whole_model_sparsity lands at 50% for dense checkpoints.
-  # Exact NVIDIA 2:4 is a separate fixed-pattern condition and is reported as
-  # 50% prunable Linear sparsity because protected parameters cannot be pruned.
+  # ED-comparable target accounting: prune 50% of the targeted Linear weights,
+  # not 50% of all model parameters. Embeddings, lm_head/output heads, norms,
+  # biases, and non-Linear tensors stay dense, so whole-model sparsity is lower.
+  # Exact NVIDIA 2:4 is a separate fixed-pattern condition and is also reported
+  # as 50% prunable Linear sparsity because protected parameters cannot be pruned.
   scope: transformer_linears
-  sparsity_denominator: whole_model
-  granularity: layer
+  sparsity_denominator: prunable
+  granularity: global
   include_lm_head: false
   calibration_data_path: data/sft/contrastive_train.jsonl
-  calibration_batches: 128
-  max_length: 2048
+  calibration_batches: 64
+  max_length: 256
   batch_size: 2
   num_workers: 0
   recovery_steps: 0
