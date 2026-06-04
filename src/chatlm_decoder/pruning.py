@@ -1119,6 +1119,8 @@ def wanda_masks(
         else:
             score = module.weight.detach().abs() * scaler.to(module.weight.device).sqrt().view(1, -1)
         scores[name] = score
+    if granularity == "global":
+        return exact_global_score_masks(scores, sparsity=sparsity)
     return exact_rowwise_score_masks(scores, sparsity=sparsity)
 
 
