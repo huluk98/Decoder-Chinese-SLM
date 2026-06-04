@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -31,7 +32,7 @@ CONFIG: dict[str, Any] = {
     "nproc_per_node": 8,
     "omp_num_threads": 8,
     "epochs": 5,
-    "run_root": "runs/5epoch-sft-contrastive-prunable50-comparable",
+    "run_root": "runs/full-decoder-sft-contrastive-pruning",
     "sft_config": "configs/sft_0p2b_8gpu.yaml",
     "contrastive_config": "configs/contrastive_sft_8gpu.yaml",
     "prune_config": "configs/prune_50.yaml",
@@ -51,18 +52,18 @@ CONFIG: dict[str, Any] = {
     "contrastive_pruning_output_dir": None,  # None -> <run_root>/pruning/contrastive_sft
     "generated_config_dir": None,  # None -> <run_root>/generated_configs
     "results_json": None,  # None -> <run_root>/journal_results.json
-    "methods": ["wanda", "gradient", "magnitude", "2of4"],
+    "methods": ["magnitude", "wanda", "gradient", "2of4"],
     "eval_runs": 1,
     "top_k_exact_match": 5,
     "comparison_mode": "whitespace",
     "max_length": 256,
-    "max_new_tokens": 128,
+    "max_new_tokens": 64,
     "num_beams": 5,
-    "max_new_token_hit_rate_threshold": 1.01,
+    "max_new_token_hit_rate_threshold": 0.5,
     "sparsity": 0.5,
     "pruning_scope": "transformer_linears",
-    "sparsity_denominator": "prunable",
-    "granularity": "global",
+    "sparsity_denominator": "whole_model",
+    "granularity": "layer",
     "include_lm_head": False,
     "calibration_batches": 64,
     "prune_batch_size": 2,
@@ -822,6 +823,7 @@ def write_results_json(
                 "max_length": settings["max_length"],
                 "max_new_tokens": settings["max_new_tokens"],
                 "num_beams": settings["num_beams"],
+                "max_new_token_hit_rate_threshold": settings["max_new_token_hit_rate_threshold"],
                 "top_k_exact_match": settings["top_k_exact_match"],
                 "comparison_mode": settings["comparison_mode"],
             },
@@ -846,7 +848,34 @@ def write_results_json(
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(json_ready(payload), handle, ensure_ascii=False, indent=2)
         handle.write("\n")
+    csv_path = output_path.with_suffix(".csv")
+    csv_fields = [
+        "model_family",
+        "eval_name",
+        "phase",
+        "method",
+        "status",
+        "em1",
+        "em5",
+        "em1_correct",
+        "em5_correct",
+        "total_examples",
+        "mean_response_loss",
+        "response_perplexity",
+        "avg_generated_tokens",
+        "max_token_hit_rate",
+        "achieved_whole_model_sparsity",
+        "achieved_prunable_sparsity",
+        "checkpoint_evaluated",
+        "eval_output_dir",
+        "error",
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=csv_fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(json_ready(rows))
     print(f"\nWrote consolidated JSON results: {output_path}")
+    print(f"Wrote consolidated CSV results:  {csv_path}")
 
 
 def print_plan(settings: dict[str, Any]) -> None:
@@ -860,7 +889,8 @@ def print_plan(settings: dict[str, Any]) -> None:
         "  generation:            "
         f"max_length={settings['max_length']}, "
         f"max_new_tokens={settings['max_new_tokens']}, "
-        f"num_beams={settings['num_beams']}"
+        f"num_beams={settings['num_beams']}, "
+        f"max_token_hit_rate_threshold={settings['max_new_token_hit_rate_threshold']}"
     )
     print(
         "  pruning target:        "

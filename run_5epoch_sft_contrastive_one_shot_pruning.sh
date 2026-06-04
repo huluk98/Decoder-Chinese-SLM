@@ -20,7 +20,7 @@ Commands:
 
 Environment overrides:
   BASE_MODEL            Same as first positional argument.
-  RUN_ROOT              default: runs/5epoch-sft-contrastive-prunable50-comparable
+  RUN_ROOT              default: runs/full-decoder-sft-contrastive-pruning
   EPOCHS                default: 5
   TRAIN_ONLY            set to 1 to stop after the two 5-epoch training runs.
   SFT_TRAIN_FILE        optional regular SFT dataset override; default config uses data/scenic/SCENIC_full_training_dataset.json.
@@ -29,7 +29,7 @@ Environment overrides:
                         optional contrastive dataset override; default config uses data/scenic/SCENIC_full_anchor_positive_negative.json.
   CONTRASTIVE_EVAL_FILE optional contrastive eval/calibration dataset; default config uses data/scenic/SCENIC_full_training_dataset.json.
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
-                        default: 1.01, so high max-token rates are reported instead of aborting.
+                        default: 0.5, so eval fails when most generations hit max_new_tokens without EOS.
   EOS_RETUNE            set to 1 to add masked SFT recovery rows after one-shot pruning.
   EOS_LOSS_WEIGHT       default when EOS_RETUNE=1 via wrapper: 5.0.
   EOS_RETUNE_EPOCHS     default when EOS_RETUNE=1 via wrapper: 1.0.
@@ -37,6 +37,7 @@ Environment overrides:
   PYTHON                Python executable from the training environment.
 
 Examples:
+  PYTHON=/path/to/env/bin/python bash run_full_decoder_sft_contrastive_pruning.sh /path/to/base_model
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh /path/to/base_model
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_one_shot_pruning.sh retune /path/to/base_model
   PYTHON=/path/to/env/bin/python bash run_5epoch_sft_contrastive_eos_reinforced_pruning.sh /path/to/base_model
