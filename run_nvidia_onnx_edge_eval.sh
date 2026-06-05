@@ -34,6 +34,7 @@ Common overrides:
   BENCHMARK_MAX_SAMPLES=0    # 0 means full benchmark dataset, normally 200 rows
   MAX_SAMPLES=20             # optional quick smoke override for both eval datasets
   CALIB_SAMPLES=128
+  EDGE_ATTN_IMPLEMENTATION=eager
   PROMPT_FORMAT=raw          # raw, legacy, or chat-template
   COMPARISON_MODE=whitespace # whitespace, normalized, or command
   TRUST_REMOTE_CODE=1
@@ -99,6 +100,7 @@ OPSET="${OPSET:-18}"
 SPARSITY="${SPARSITY:-0.5}"
 SPARSE_WEIGHTS_FOR_2OF4="${SPARSE_WEIGHTS_FOR_2OF4:-1}"
 RUN_INT8="${RUN_INT8:-1}"
+EDGE_ATTN_IMPLEMENTATION="${EDGE_ATTN_IMPLEMENTATION:-eager}"
 TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-8}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
@@ -154,13 +156,17 @@ max_grad_norm: 1.0
 bf16: true
 fp16: false
 tf32: true
+attn_implementation: ${EDGE_ATTN_IMPLEMENTATION}
+sdp_flash: false
+sdp_mem_efficient: false
+sdp_math: true
 
 per_device_train_batch_size: 16
 per_device_eval_batch_size: 16
 gradient_accumulation_steps: 1
 
 gradient_checkpointing: false
-flash_attention: true
+flash_attention: false
 torch_compile: false
 
 logging_steps: 10
@@ -198,6 +204,7 @@ prune:
   sparsity_denominator: prunable
   granularity: global
   include_lm_head: false
+  attn_implementation: ${EDGE_ATTN_IMPLEMENTATION}
   calibration_data_path: ${CALIB_DATASET}
   calibration_batches: ${CALIB_SAMPLES}
   max_length: ${MAX_SEQ_LEN}
@@ -240,6 +247,7 @@ export_model() {
     --opset "${OPSET}" \
     --seq-len "${OPT_SEQ_LEN}" \
     --batch-size "${BATCH_SIZE}" \
+    --attn-implementation "${EDGE_ATTN_IMPLEMENTATION}" \
     --no-export-cache \
     "${TRUST_ARGS[@]}" \
     "${OVERWRITE_ARGS[@]}"
@@ -345,6 +353,7 @@ echo "  benchmark data:   ${BENCHMARK_DATASET}"
 echo "  run root:         ${RUN_ROOT}"
 echo "  sparse TRT flag:  ${SPARSE_WEIGHTS_FOR_2OF4}"
 echo "  run INT8:         ${RUN_INT8}"
+echo "  attention impl:   ${EDGE_ATTN_IMPLEMENTATION}"
 echo "  SFT epochs:       ${SFT_EPOCHS}"
 echo "  train GPUs:       ${TRAIN_NPROC_PER_NODE}"
 echo "  training limit:   ${TRAINING_MAX_SAMPLES} (0 means full; full can be slow with no-cache EM@K)"

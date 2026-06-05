@@ -311,6 +311,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1, help="Edge deployment batch size; defaults to 1.")
     parser.add_argument("--device", default="auto", help="auto, cuda, cuda:0, or cpu.")
     parser.add_argument("--dtype", default="auto", choices=("auto", "fp16", "bf16", "fp32"))
+    parser.add_argument(
+        "--attn-implementation",
+        default=None,
+        choices=("eager", "sdpa", "flash_attention_2"),
+        help="Optional Hugging Face attention implementation override. Use eager for the most export-stable path.",
+    )
     parser.add_argument("--trust-remote-code", action="store_true", help="Allow custom HF model/tokenizer code.")
     parser.add_argument("--export-cache", action=argparse.BooleanOptionalAction, default=True, help="Attempt cached decode ONNX export.")
     parser.add_argument("--dynamo", action="store_true", help="Use torch.onnx.export(..., dynamo=True) when supported.")
@@ -337,11 +343,24 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=bool(args.trust_remote_code))
     configure_tokenizer(tokenizer)
     logging.info("Loading model from %s on %s dtype=%s", args.model_path, device, dtype)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_path,
-        torch_dtype=dtype,
-        trust_remote_code=bool(args.trust_remote_code),
-    ).to(device)
+    model_kwargs = {
+        "torch_dtype": dtype,
+        "trust_remote_code": bool(args.trust_remote_code),
+    }
+    if args.attn_implementation:
+        model_kwargs["attn_implementation"] = args.attn_implementation
+    try:
+        model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs).to(device)
+    except Exception as exc:
+        if not args.attn_implementation:
+            raise
+        logging.warning(
+            "Requested attention implementation %r failed (%s); loading checkpoint defaults.",
+            args.attn_implementation,
+            exc,
+        )
+        model_kwargs.pop("attn_implementation", None)
+        model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs).to(device)
     model.eval()
 
     Path(args.onnx_dir).expanduser().mkdir(parents=True, exist_ok=True)
