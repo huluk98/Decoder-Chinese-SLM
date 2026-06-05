@@ -2,7 +2,7 @@ benchmark:
   output_dir: runs/pruning-benchmark-contrastive-sft-0p2b
   base_checkpoint: runs/contrastive-sft-0p2b-8gpu/final
   prune_config: configs/prune_50.yaml
-  methods: [magnitude, 2of4, wanda, gradient]
+  methods: [magnitude, 2of4, wanda, taylor]
   eval_files:
     anchor_dataset: data/scenic/SCENIC_full_training_dataset.json
     benchmark: data/benchmarks/iot_instruction_benchmark_200.json
@@ -25,8 +25,8 @@ benchmark:
 prune:
   sparsity: 0.5
   scope: transformer_linears
-  sparsity_denominator: whole_model
-  granularity: layer
+  sparsity_denominator: prunable
+  granularity: global
   include_lm_head: false
   calibration_data_path: data/scenic/SCENIC_full_training_dataset.json
   calibration_batches: 128

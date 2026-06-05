@@ -23,12 +23,12 @@ def test_full_decoder_launcher_defaults_are_guarded_and_report_em5() -> None:
     config = launcher.CONFIG
 
     assert config["epochs"] == 5
-    assert config["methods"] == ["magnitude", "wanda", "gradient", "2of4"]
+    assert config["methods"] == ["magnitude", "wanda", "taylor", "2of4"]
     assert config["top_k_exact_match"] == 5
     assert config["max_new_tokens"] == 64
     assert config["max_new_token_hit_rate_threshold"] == 0.5
-    assert config["sparsity_denominator"] == "whole_model"
-    assert config["granularity"] == "layer"
+    assert config["sparsity_denominator"] == "prunable"
+    assert config["granularity"] == "global"
     assert config["pruning_scope"] == "transformer_linears"
     assert config["include_lm_head"] is False
 

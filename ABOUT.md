@@ -15,7 +15,7 @@ The project is inspired by the public size target and Chinese data direction of 
 - Exact-match and command-normalized evaluation for short generated responses.
 - C-Eval evaluation support for Chinese benchmark comparison.
 - Loss plotting and training metrics for model-card style reporting.
-- Optional post-training pruning workflows including magnitude, Wanda, gradient-tuned pruning, and NVIDIA 2:4-style sparsity experiments.
+- Optional post-training pruning workflows including magnitude, Wanda, Taylor-saliency pruning, and NVIDIA 2:4-style sparsity experiments.
 
 ## Why This Size
 

@@ -2,7 +2,7 @@ benchmark:
   output_dir: runs/pruning-benchmark-0p2b
   base_checkpoint: runs/contrastive-sft-0p2b-8gpu/latest
   prune_config: configs/prune_50.yaml
-  methods: [magnitude, 2of4, wanda, gradient]
+  methods: [magnitude, 2of4, wanda, taylor]
   eval_file: /path/to/eval.json
   run_dense_baseline: true
   min_dense_exact_match_accuracy: 0.01
@@ -22,11 +22,12 @@ benchmark:
 
 prune:
   sparsity: 0.5
-  # Protected decoder-only pruning with a true whole-model sparsity target.
-  # Exact NVIDIA 2:4 remains a separate fixed-pattern condition.
+  # Protected decoder-only pruning: prune exactly 50% of selected Linear weights.
+  # Embeddings, lm_head/output heads, norms, biases, and non-Linear tensors stay dense
+  # so EOS token representation/logits are not directly pruned.
   scope: transformer_linears
-  sparsity_denominator: whole_model
-  granularity: layer
+  sparsity_denominator: prunable
+  granularity: global
   include_lm_head: false
   calibration_data_path: /path/to/calibration_or_sft.jsonl
   calibration_batches: 128

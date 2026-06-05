@@ -11,7 +11,9 @@ Usage:
 
 Runs the 5-epoch regular SFT, then the 5-epoch contrastive SFT from the fresh
 regular SFT checkpoint, followed by the configured dense eval and one-shot
-pruning benchmark.
+pruning benchmark. Defaults to 50% prunable Linear-weight pruning for magnitude,
+WANDA, Taylor saliency, and NVIDIA 2:4 while keeping embeddings, norms, and
+lm_head dense for EOS stability.
 
 Commands:
   retune, eos-retune   run 50% pruning, then add fixed-mask EOS retune rows.
@@ -30,6 +32,9 @@ Environment overrides:
   CONTRASTIVE_EVAL_FILE optional contrastive eval/calibration dataset; default config uses data/scenic/SCENIC_full_training_dataset.json.
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
                         default: 0.5, so eval fails when most generations hit max_new_tokens without EOS.
+  METHODS               default: "magnitude wanda taylor 2of4".
+  SPARSITY_DENOMINATOR  default: prunable, so 50% means selected Linear weights rather than whole model parameters.
+  GRANULARITY           default: global for magnitude/WANDA/Taylor; 2:4 remains fixed per 4-weight group.
   EOS_RETUNE            set to 1 to add masked SFT recovery rows after one-shot pruning.
   EOS_LOSS_WEIGHT       default when EOS_RETUNE=1 via wrapper: 5.0.
   EOS_RETUNE_EPOCHS     default when EOS_RETUNE=1 via wrapper: 1.0.

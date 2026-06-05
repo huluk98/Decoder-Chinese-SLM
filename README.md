@@ -775,7 +775,7 @@ If the best two are close, expand to a 3x3 grid with `margin: 0.3, 0.5, 0.7` and
 
 ## 50% Pruning
 
-Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The default configs now use `prune.scope: transformer_linears`, `sparsity_denominator: whole_model`, `granularity: layer`, and `include_lm_head: false`. That keeps embeddings, output heads, tied output embeddings, norms, biases, and non-Linear tensors protected while still asking the pruning code to resolve enough Linear sparsity for `achieved_whole_model_sparsity` to land at the 50% target on dense checkpoints.
+Pruning is a post-training checkpoint transform. It writes a new checkpoint with zeroed weights and a `pruning_report.json`; it does not mutate your original model. The default configs now use `prune.scope: transformer_linears`, `sparsity_denominator: prunable`, `granularity: global`, and `include_lm_head: false`. That prunes exactly 50% of selected Linear weights while keeping embeddings, output heads, tied output embeddings, norms, biases, and non-Linear tensors dense so EOS token representation and logits are not directly pruned.
 
 Run one pruning method:
 
@@ -789,10 +789,10 @@ python scripts/prune.py \
 
 Available methods:
 
-- `magnitude`: layerwise unstructured pruning by `abs(parameter)` over protected transformer Linear weights; with the default whole-model denominator, the resolved Linear sparsity is raised above 50% when needed to achieve real 50% model sparsity.
+- `magnitude`: global unstructured pruning by `abs(parameter)` over protected transformer Linear weights.
 - `2of4`: exact 2:4 masks on eligible Linear weights. Because exact 2:4 is fixed at 50% within those groups, it is reported as 50% prunable-Linear sparsity when protected parameters remain unchanged.
-- `wanda`: activation-aware rowwise scoring for protected Linear weights.
-- `gradient`: layerwise gradient-score pruning using `abs(parameter * grad)` on calibration batches.
+- `wanda`: activation-aware scoring for protected Linear weights.
+- `taylor`: first-order Taylor saliency pruning using `abs(parameter * grad)` on calibration batches. `gradient` is still accepted as a legacy alias.
 
 Run all four:
 
@@ -831,14 +831,14 @@ bash scripts/run_sft_pruning_eval.sh
 Useful overrides:
 
 ```bash
-METHODS="magnitude 2of4 wanda gradient" \
+METHODS="magnitude 2of4 wanda taylor" \
 CALIBRATION_FILE=/absolute/path/to/calibration_or_sft.jsonl \
 OUTPUT_DIR=runs/sft-pruning-eval \
 NPROC=8 \
 bash scripts/run_sft_pruning_eval.sh /absolute/path/to/model /absolute/path/to/eval.json
 ```
 
-The summary is written to `OUTPUT_DIR/sft_pruning_eval_summary.csv` and `OUTPUT_DIR/sft_pruning_eval_summary.json`. The `checkpoint_evaluated` column is the exact dense or saved pruned checkpoint passed to `scripts/eval_prompt_response.py`; pruned checkpoints are saved under `OUTPUT_DIR/one_shot/{magnitude,nvidia-2of4,wanda,gradient}/`.
+The summary is written to `OUTPUT_DIR/sft_pruning_eval_summary.csv` and `OUTPUT_DIR/sft_pruning_eval_summary.json`. The `checkpoint_evaluated` column is the exact dense or saved pruned checkpoint passed to `scripts/eval_prompt_response.py`; pruned checkpoints are saved under `OUTPUT_DIR/one_shot/{magnitude,nvidia-2of4,wanda,taylor}/`.
 
 For one-off dense/pruned exact-match eval on one local model, use the standalone scripts in `single_pruning/`:
 
@@ -853,13 +853,13 @@ They auto-launch with `torchrun` on up to 8 GPUs, evaluate the dense model, appl
 
 You can also edit `MODEL_PATH` and `EVAL_DATASET_PATH` at the top of any `single_pruning/*.py` file and run it with no path arguments. These scripts use one full model copy per GPU and shard evaluation across up to 8 visible GPUs; increase `BATCH_SIZE` near the top of the script if GPU utilization is low and memory allows it. The pruned model is saved immediately after pruning, then the pruned benchmark reloads that saved `pruned_model/` checkpoint from disk. The terminal prints dense accuracy, pruned accuracy, real whole-model sparsity, selected-linear sparsity, and output paths at the end.
 
-Wanda and gradient pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for one-shot pruning. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
+Wanda and Taylor pruning require `prune.calibration_data_path`; the default config points at `data/sft/contrastive_train.jsonl`. Keep `prune.recovery_steps: 0` for one-shot pruning. Use the benchmark suite's separate retune phase for post-pruning SFT; that path reapplies masks after every optimizer step and reloads the final checkpoint to confirm pruned weights stayed zero.
 
 Important: the `2of4` method creates the correct 2:4 zero pattern in linear weights. Real NVIDIA sparse Tensor Core speedups still require an inference/training stack that actually dispatches 2:4 kernels, such as a compatible TensorRT-LLM, cuSPARSELt, or other semi-structured sparse runtime path.
 
 ### Qwen2.5-Instruct Pruning
 
-Qwen2.5-0.5B-Instruct has a separate pruning path because Wanda/gradient calibration and prune+retune must use the same Qwen chat template as Qwen SFT. Do not use `scripts/run_pruning_benchmark.py` for Qwen-Instruct comparisons.
+Qwen2.5-0.5B-Instruct has a separate pruning path because Wanda/Taylor calibration and prune+retune must use the same Qwen chat template as Qwen SFT. Do not use `scripts/run_pruning_benchmark.py` for Qwen-Instruct comparisons.
 
 Edit `configs/qwen25_instruct_pruning_benchmark.yaml`:
 
@@ -917,7 +917,7 @@ For base Qwen2.5-0.5B, start from `configs/qwen25_0p5b_pruning_benchmark.yaml`:
 MODE=generic CONFIG_PATH=configs/qwen25_0p5b_pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
 
-That config uses the generic decoder-only pruning code and writes one-shot pruned checkpoints under `runs/qwen25-0p5b-pruning-benchmark/one_shot/{magnitude,nvidia-2of4,wanda,gradient}/`.
+That config uses the generic decoder-only pruning code and writes one-shot pruned checkpoints under `runs/qwen25-0p5b-pruning-benchmark/one_shot/{magnitude,nvidia-2of4,wanda,taylor}/`.
 
 For the current pruning benchmark, use your own prompt/response eval file through `benchmark.eval_file` or the one-run `EVAL_FILE` override. The IoT benchmark launcher is separate and should only be used for the later final IoT command benchmark.
 
@@ -928,15 +928,22 @@ conda activate chatlm-decoder
 ./run_sft_and_contrastive_pruning_benchmarks.sh
 ```
 
-That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pruning_benchmark_contrastive_sft.yaml`. Each config prunes the checkpoint with `magnitude`, `wanda`, `gradient`, and NVIDIA `2of4`; protects embeddings, norms, biases, and `lm_head` while targeting 50% whole-model sparsity for methods that can satisfy it; evaluates the dense baseline, one-shot pruned checkpoints, and masked-retuned checkpoints; and reports both `exact_match_accuracy` and `exact_match_at_top_k_accuracy` with `top_k_exact_match: 5`. The exact `2of4` row should be read as the fixed 50% prunable-Linear hardware-pattern condition, not as an exact 50% whole-model condition.
+That launches `configs/pruning_benchmark_regular_sft.yaml` and then `configs/pruning_benchmark_contrastive_sft.yaml`. Each config prunes the checkpoint with `magnitude`, `wanda`, `taylor`, and NVIDIA `2of4`; protects embeddings, norms, biases, and `lm_head` while targeting 50% sparsity over prunable Linear weights; evaluates the dense baseline, one-shot pruned checkpoints, and masked-retuned checkpoints; and reports both `exact_match_accuracy` and `exact_match_at_top_k_accuracy` with `top_k_exact_match: 5`.
 
 The regular SFT config evaluates both `sft_dataset` and `benchmark`. The contrastive SFT config evaluates both `anchor_dataset` and `benchmark`. The expensive prune/retune step runs once per method per model, and the saved checkpoint is then evaluated on both named eval files. The benchmark split has difficulty labels (`easy`, `medium`, `hard`; currently 70/65/65 examples), and the summaries include overall accuracy plus per-hardness columns such as `difficulty_easy_exact_match_accuracy`, `difficulty_medium_exact_match_accuracy`, `difficulty_hard_exact_match_accuracy`, and matching exact-match@5 columns.
 
-For the full start-to-finish decoder-only run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs from that fresh regular SFT checkpoint, evaluates the original decoder, dense regular SFT, and dense contrastive SFT on the original SFT dataset and benchmark, then runs one-shot `magnitude`, `wanda`, `gradient`, and NVIDIA `2of4` on both SFT checkpoints, use:
+For the full start-to-finish decoder-only run that trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs from that fresh regular SFT checkpoint, evaluates the original decoder, dense regular SFT, and dense contrastive SFT on the original SFT dataset and benchmark, then runs one-shot `magnitude`, `wanda`, `taylor`, and NVIDIA `2of4` on both SFT checkpoints, use:
 
 ```bash
 PYTHON=/path/to/training/env/bin/python \
 bash run_full_decoder_sft_contrastive_pruning.sh /path/to/original_decoder_checkpoint
+```
+
+For the EOS-guarded IoT run with 50% prunable Linear-weight masks and fixed-mask EOS retuning enabled by default, use:
+
+```bash
+PYTHON=/path/to/training/env/bin/python \
+bash run_linear50_iot_pruning.sh /path/to/original_decoder_checkpoint
 ```
 
 If you only want to generate the two 5-epoch checkpoints from a base model path, use the train-only wrapper:
@@ -948,7 +955,7 @@ bash run_5epoch_sft_contrastive_from_base.sh /path/to/base_model
 
 The SCENIC full-training and contrastive data are versioned under `data/scenic/`, so this command only needs the original decoder-only checkpoint path. The wrapper uses that one path for original decoder dense eval and regular SFT training, then starts contrastive SFT from the freshly written regular SFT final checkpoint. By default it evaluates both the SFT dataset (`data/scenic/SCENIC_full_training_dataset.json`) and benchmark (`data/benchmarks/iot_instruction_benchmark_200.json`), and writes to `runs/full-decoder-sft-contrastive-pruning/`.
 
-The main full-run artifacts are `runs/full-decoder-sft-contrastive-pruning/journal_results.json` and `runs/full-decoder-sft-contrastive-pruning/journal_results.csv`; they contain 22 expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `magnitude`, `wanda`, `gradient`, and `2of4` one-shot pruning rows for both SFT checkpoints on both eval splits. The pruning target is protected 50% whole-model sparsity with layerwise decoder Transformer Linear masks for magnitude, Wanda, and gradient. Exact `2of4` remains the fixed NVIDIA 50% prunable-Linear hardware-pattern condition and is documented as that exception. Generation is capped at `MAX_NEW_TOKENS=64`, and eval fails a row if more than `MAX_NEW_TOKEN_HIT_RATE_THRESHOLD=0.5` of examples hit the cap without EOS. Change `BASE_MODEL`, dataset paths, or `RESULTS_JSON` only when you intentionally want to override the default run shape.
+The main full-run artifacts are `runs/full-decoder-sft-contrastive-pruning/journal_results.json` and `runs/full-decoder-sft-contrastive-pruning/journal_results.csv`; they contain expected EM@1/EM@5 rows by default: original decoder dense accuracy on `training_dataset` and `benchmark`; dense regular SFT and dense contrastive SFT on both eval splits; and `magnitude`, `wanda`, `taylor`, and `2of4` pruning rows for both SFT checkpoints on both eval splits. The pruning target is protected 50% prunable Linear-weight sparsity with dense `lm_head`/embedding/norm tensors. Generation is capped at `MAX_NEW_TOKENS=64`, eval rows include `eos_hit_rate`, and eval fails a row if more than `MAX_NEW_TOKEN_HIT_RATE_THRESHOLD=0.5` of examples hit the cap without EOS. Change `BASE_MODEL`, dataset paths, or `RESULTS_JSON` only when you intentionally want to override the default run shape.
 
 To test whether the aggressive-pruning collapse is mainly an EOS/termination-control failure, run the EOS-reinforced variant. It keeps the same 50% pruning masks fixed, then adds masked SFT recovery rows with supervised EOS labels upweighted in the loss:
 
@@ -976,7 +983,7 @@ bash run_model_path_pruning_results.sh \
   /path/to/contrastive/final
 ```
 
-By default it evaluates all three dense checkpoints on `data/scenic/SCENIC_full_training_dataset.json` and `data/benchmarks/iot_instruction_benchmark_200.json`, then runs `wanda`, `magnitude`, `gradient`, and NVIDIA `2of4` one-shot 50% pruning for `base_model`, `sft`, and `contrastive`. It writes `runs/model-path-pruning-results/model_path_pruning_results.json`. Set `TRAINING_DATASET`, `BENCHMARK_DATASET`, `RESULTS_JSON`, `METHODS`, or `PRUNE_FAMILIES="sft contrastive"` to override the default shape.
+By default it evaluates all three dense checkpoints on `data/scenic/SCENIC_full_training_dataset.json` and `data/benchmarks/iot_instruction_benchmark_200.json`, then runs `wanda`, `magnitude`, `taylor`, and NVIDIA `2of4` one-shot 50% pruning for `base_model`, `sft`, and `contrastive`. It writes `runs/model-path-pruning-results/model_path_pruning_results.json`. Set `TRAINING_DATASET`, `BENCHMARK_DATASET`, `RESULTS_JSON`, `METHODS`, or `PRUNE_FAMILIES="sft contrastive"` to override the default shape.
 
 For already-trained checkpoints, set `EOS_RETUNE=1` on the path-driven wrapper to add the same fixed-mask EOS-reinforced recovery rows:
 
@@ -1087,7 +1094,7 @@ Preview the commands without running them:
 DRY_RUN=1 CONFIG_PATH=configs/pruning_benchmark.yaml ./scripts/run_pruning_benchmark_8way.sh
 ```
 
-It runs in this order: `magnitude` one-shot prune and eval, optional 3-epoch masked retune and eval; then `2of4`; then `wanda`; then `gradient`. By default `KEEP_GOING=1`, so a failed method is recorded in the summary and the next method still runs. Set `KEEP_GOING=0` if you want fail-fast behavior. The final CSV has the 8 accuracy rows from four methods times one-shot/retuned phases when all phases succeed.
+It runs in this order: `magnitude` one-shot prune and eval, optional masked retune and eval; then `2of4`; then `wanda`; then `taylor`. By default `KEEP_GOING=1`, so a failed method is recorded in the summary and the next method still runs. Set `KEEP_GOING=0` if you want fail-fast behavior. The final CSV has the 8 accuracy rows from four methods times one-shot/retuned phases when all phases succeed.
 
 Or point at another config file or a directory containing `pruning_benchmark.yaml`:
 
@@ -1107,11 +1114,11 @@ pruning_benchmark_summary.csv
 pruning_benchmark_summary.json
 ```
 
-That gives 8 model outputs total and 8 benchmark output folders total for a single eval file, plus the dense baseline eval folder. With `benchmark.eval_files`, the same 8 model outputs are reused across each named eval file and the CSV includes `eval_name` and `eval_file`. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; gradient, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json`, `exact_match_failure_cases.json`, and `top_k_exact_match_failure_cases.json`. When rows contain `difficulty` or `hardness`, the eval summary also writes `by_difficulty` and flat CSV-ready fields for easy/medium/hard top-1 and top-5 accuracy.
+That gives 8 model outputs total and 8 benchmark output folders total for a single eval file, plus the dense baseline eval folder. With `benchmark.eval_files`, the same 8 model outputs are reused across each named eval file and the CSV includes `eval_name` and `eval_file`. Each one-shot checkpoint writes `pruning_report.json`, `module_filter_report.json`, `mask_validation.json`, `checkpoint_reload_validation.json`, `eos_preservation_report.json`, `sparsity_by_module.csv`, `layerwise_zero_fraction.csv`, and `layerwise_weight_norms_before_after.csv`; Taylor, Wanda, and 2:4 runs also write their method-specific diagnostics. Each eval writes `generation_samples.json`, `exact_match_failure_cases.json`, and `top_k_exact_match_failure_cases.json`, and summaries include `hit_eos`/`eos_hit_rate`. When rows contain `difficulty` or `hardness`, the eval summary also writes `by_difficulty` and flat CSV-ready fields for easy/medium/hard top-1 and top-5 accuracy.
 
-Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default protected whole-model target, `achieved_whole_model_sparsity` should land at 50% for magnitude, Wanda, and gradient on dense checkpoints, while exact `2of4` remains the fixed 50% prunable-Linear condition.
+Use `benchmark_summary_one_shot.csv` for the one-shot pruning comparison. Retuned rows are written separately to `benchmark_summary_retuned.csv` and are post-pruning SFT results, not one-shot pruning results. The summary reports both `achieved_prunable_sparsity` and `achieved_whole_model_sparsity`; with the default protected Linear target, `achieved_prunable_sparsity` should land at 50% for magnitude, Wanda, Taylor, and exact `2of4`.
 
-The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance` (`0.001` by default for protected whole-model pruning), any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, gradient/Wanda calibration statistics are missing or degenerate, generated predictions are all empty/all identical/mostly prompt copies, or too many generations hit `max_new_tokens` without EOS when `benchmark.max_new_token_hit_rate_threshold` is at or below the observed rate. The full decoder SFT/contrastive launcher defaults this threshold to `0.5`, so a checkpoint that mostly refuses to stop is recorded as a generation failure instead of being treated as a trustworthy accuracy row. Failed rows include `error_type` so generation/eval issues can be separated from pruning failures. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
+The runner checks each report before evaluation and fails the phase if the configured sparsity denominator is not at 50% within `benchmark.sparsity_tolerance` (`0.001` by default), any masked weight is nonzero, the evaluated checkpoint is not the pruned checkpoint, 2:4 structure is invalid, Taylor/Wanda calibration statistics are missing or degenerate, generated predictions are all empty/all identical/mostly prompt copies, or too many generations hit `max_new_tokens` without EOS when `benchmark.max_new_token_hit_rate_threshold` is at or below the observed rate. The full decoder SFT/contrastive launcher defaults this threshold to `0.5`, so a checkpoint that mostly refuses to stop is recorded as a generation failure instead of being treated as a trustworthy accuracy row. Failed rows include `error_type` so generation/eval issues can be separated from pruning failures. By default, each eval runs one benchmark pass; set `benchmark.benchmark_runs` higher if you want repeated mean/std measurements.
 
 ### Final IoT Benchmark Eval
 

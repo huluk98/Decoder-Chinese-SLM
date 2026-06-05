@@ -17,7 +17,18 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-METHODS = ("magnitude", "2of4", "wanda", "gradient")
+METHODS = ("magnitude", "2of4", "wanda", "taylor")
+METHOD_ALIASES = {
+    "2:4": "2of4",
+    "2_4": "2of4",
+    "2-of-4": "2of4",
+    "2_of_4": "2of4",
+    "nvidia-2of4": "2of4",
+    "nvidia_2of4": "2of4",
+    "gradient": "taylor",
+    "gradient_taylor": "taylor",
+    "taylor_gradient": "taylor",
+}
 DIFFICULTY_LEVELS = ("easy", "medium", "hard")
 EVAL_SUMMARY_FILENAMES = (
     "prompt_response_eval_benchmark_summary.json",
@@ -84,6 +95,8 @@ PRUNING_SUMMARY_CSV_FIELDS = [
     "avg_generated_tokens",
     "reached_max_new_tokens",
     "reached_max_new_tokens_rate",
+    "hit_eos",
+    "eos_hit_rate",
     "pruning_report",
     "error_type",
     "error",
@@ -106,7 +119,7 @@ def classify_error(error: str, *, phase: str = "", command: str = "") -> str:
         return "generation"
     if "eval_prompt_response.py" in text or phase == "dense_baseline":
         return "evaluation"
-    if any(token in text for token in ("prune.py", "pruning_report", "mask", "sparsity", "2:4", "wanda", "gradient")):
+    if any(token in text for token in ("prune.py", "pruning_report", "mask", "sparsity", "2:4", "wanda", "gradient", "taylor")):
         return "pruning"
     return "runtime"
 
@@ -276,7 +289,13 @@ def parse_methods(value: Any) -> list[str]:
         parts = [part.strip() for part in value.replace(",", " ").split()]
     else:
         parts = [str(part).strip() for part in value]
-    return [part for part in parts if part]
+    methods: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        normalized = part.strip().lower().replace("-", "_")
+        methods.append(METHOD_ALIASES.get(normalized, normalized))
+    return methods
 
 
 def parse_cuda_visible_devices(value: Any) -> list[str]:
@@ -375,9 +394,9 @@ def validate_benchmark_paths(
     if not prune_config_path.exists():
         problems.append(f"benchmark.prune_config does not exist: {prune_config_path}")
     calibration_data_path = config.get("prune", {}).get("calibration_data_path")
-    if any(method in {"wanda", "gradient"} for method in methods):
+    if any(method in {"wanda", "taylor"} for method in methods):
         if not calibration_data_path:
-            problems.append("prune.calibration_data_path is required for wanda/gradient.")
+            problems.append("prune.calibration_data_path is required for wanda/taylor.")
         elif not as_path(calibration_data_path).exists():
             problems.append(f"prune.calibration_data_path does not exist: {calibration_data_path}")
     if bool(retune.get("enabled", True)):
@@ -634,6 +653,8 @@ def dense_baseline_row(
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
         "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
         "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
+        "hit_eos": metric_count(summary, "hit_eos"),
+        "eos_hit_rate": metric(summary, "eos_hit_rate"),
         "error_type": classify_error(error, phase="dense_baseline") if error else "",
         "error": error,
     }
@@ -942,6 +963,8 @@ def summary_row(
         "avg_generated_tokens_std": metric_std(summary, "avg_generated_tokens"),
         "reached_max_new_tokens": metric_count(summary, "reached_max_new_tokens"),
         "reached_max_new_tokens_rate": metric(summary, "reached_max_new_tokens_rate"),
+        "hit_eos": metric_count(summary, "hit_eos"),
+        "eos_hit_rate": metric(summary, "eos_hit_rate"),
         "error_type": classify_error(error, phase=phase) if error else "",
         "error": error,
     }
@@ -1045,6 +1068,8 @@ def write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
         "avg_generated_tokens_std",
         "reached_max_new_tokens",
         "reached_max_new_tokens_rate",
+        "hit_eos",
+        "eos_hit_rate",
         "error",
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as handle:

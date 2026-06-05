@@ -104,6 +104,10 @@ def test_metric_falls_back_to_per_run_summaries() -> None:
     assert benchmark.metric(summary, "exact_match_accuracy") == pytest.approx(0.019698)
 
 
+def test_parse_methods_accepts_legacy_gradient_alias() -> None:
+    assert benchmark.parse_methods("magnitude gradient 2:4") == ["magnitude", "taylor", "2of4"]
+
+
 def test_summary_row_uses_real_pruning_stats(tmp_path: Path) -> None:
     checkpoint = tmp_path / "one_shot" / "magnitude"
     eval_parent = tmp_path / "benchmarks" / "one_shot" / "magnitude"

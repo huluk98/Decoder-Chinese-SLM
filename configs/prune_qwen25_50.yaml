@@ -10,8 +10,8 @@ prune:
   method: magnitude
   sparsity: 0.5
   scope: transformer_linears
-  sparsity_denominator: whole_model
-  granularity: layer
+  sparsity_denominator: prunable
+  granularity: global
   include_lm_head: false
   calibration_data_path: /path/to/calibration_or_sft.json
   calibration_batches: 128
