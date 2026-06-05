@@ -26,7 +26,7 @@ Optional overrides:
   --train_jsonl PATH       default: data/scenic/SCENIC_full_training_dataset.json
   --iot200_jsonl PATH      default: data/benchmarks/iot_instruction_benchmark_200.json
   --output_dir PATH        default: runs/h20_decoder_only_onnx_int8_latency
-  --gpus IDS              default: 0,1,2,3,4,5,6,7
+  --gpus IDS              default: keep CUDA_VISIBLE_DEVICES, else auto-detect
   --epochs N              default: 5
   --seq_len N             default: 64
   --batch_size N          default: 16 per GPU for SFT
@@ -110,13 +110,28 @@ BASE_MODEL="${BASE_MODEL:-}"
 TRAIN_JSONL="${TRAIN_JSONL:-data/scenic/SCENIC_full_training_dataset.json}"
 IOT200_JSONL="${IOT200_JSONL:-data/benchmarks/iot_instruction_benchmark_200.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-runs/h20_decoder_only_onnx_int8_latency}"
-GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
+ORIGINAL_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+GPUS="${GPUS:-${ORIGINAL_CUDA_VISIBLE_DEVICES}}"
 EPOCHS="${EPOCHS:-5}"
 SEQ_LEN="${SEQ_LEN:-64}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-16}"
 MEASURE_ITERS="${MEASURE_ITERS:-1000}"
 WARMUP_ITERS="${WARMUP_ITERS:-100}"
+
+detect_gpu_mask() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local count
+    if ! count="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"; then
+      count="0"
+    fi
+    if [[ "${count}" =~ ^[0-9]+$ && "${count}" -gt 0 ]]; then
+      seq -s, 0 $((count - 1))
+      return
+    fi
+  fi
+  echo "0"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -208,8 +223,17 @@ if [[ ! -f "${IOT200_JSONL}" ]]; then
   exit 1
 fi
 
-IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
+if [[ -z "${GPUS}" ]]; then
+  GPUS="$(detect_gpu_mask)"
+fi
+if [[ -n "${GPUS}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${GPUS}"
+  IFS=',' read -r -a GPU_ARRAY <<< "${GPUS}"
+else
+  GPU_ARRAY=(0)
+fi
 NPROC_PER_NODE="${NPROC_PER_NODE:-${#GPU_ARRAY[@]}}"
+export NPROC_PER_NODE
 LATENCY_GPU="${LATENCY_GPU:-${GPU_ARRAY[0]}}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
@@ -220,7 +244,6 @@ CALIB_SAMPLES="${CALIB_SAMPLES:-128}"
 PROMPT_FORMAT="${PROMPT_FORMAT:-raw}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
 
-export CUDA_VISIBLE_DEVICES="${GPUS}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
@@ -260,6 +283,13 @@ write_env_report() {
     echo "=== python ==="
     "${PYTHON_BIN}" --version
     echo
+    echo "=== CUDA visibility ==="
+    echo "original CUDA_VISIBLE_DEVICES: ${ORIGINAL_CUDA_VISIBLE_DEVICES:-<unset>}"
+    echo "effective CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
+    echo "requested GPUS mask: ${GPUS:-<unset>}"
+    echo "NPROC_PER_NODE: ${NPROC_PER_NODE}"
+    echo "LATENCY_GPU: ${LATENCY_GPU}"
+    echo
     echo "=== torch / ONNX / ONNX Runtime ==="
     "${PYTHON_BIN}" - <<'PY'
 import sys
@@ -291,11 +321,17 @@ PY
 
   "${PYTHON_BIN}" - "${json}" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
 output = Path(sys.argv[1])
-report = {"python_version": sys.version}
+report = {
+    "python_version": sys.version,
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES"),
+    "nproc_per_node": os.environ.get("NPROC_PER_NODE"),
+}
 try:
     import torch
     report["torch_version"] = torch.__version__
@@ -451,7 +487,7 @@ train_sft() {
     echo "[skip] train; expecting existing checkpoint at ${DENSE_CKPT}"
     return
   fi
-  CUDA_VISIBLE_DEVICES="${GPUS}" torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" scripts/train.py \
+  torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" scripts/train.py \
     --config "${config_path}"
   if [[ ! -d "${DENSE_TRAIN_DIR}/final" || ! -f "${DENSE_TRAIN_DIR}/final/config.json" ]]; then
     echo "SFT final checkpoint not found: ${DENSE_TRAIN_DIR}/final" >&2
