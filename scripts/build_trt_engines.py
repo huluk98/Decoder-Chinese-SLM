@@ -157,6 +157,15 @@ def set_precision_flags(trt: Any, builder: Any, config: Any, precision: str) -> 
         logging.info("Enabled TensorRT INT8 flag.")
 
 
+def set_sparse_weights_flag(trt: Any, config: Any, enabled: bool) -> None:
+    if not enabled:
+        return
+    if not hasattr(trt.BuilderFlag, "SPARSE_WEIGHTS"):
+        raise RuntimeError("This TensorRT Python package does not expose BuilderFlag.SPARSE_WEIGHTS.")
+    config.set_flag(trt.BuilderFlag.SPARSE_WEIGHTS)
+    logging.info("Enabled TensorRT sparse weights flag for NVIDIA 2:4 weights.")
+
+
 class JsonPromptCalibrator:
     def __init__(
         self,
@@ -332,6 +341,7 @@ def build_engine(args: argparse.Namespace) -> Path:
     profile = create_profile(builder, network, args)
     config.add_optimization_profile(profile)
     set_precision_flags(trt, builder, config, args.precision)
+    set_sparse_weights_flag(trt, config, bool(args.sparse_weights))
 
     calibrator = None
     if args.precision == "int8":
@@ -508,6 +518,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_seq_len", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--workspace-gb", type=float, default=4.0)
+    parser.add_argument(
+        "--sparse-weights",
+        action="store_true",
+        help="Enable TensorRT SPARSE_WEIGHTS. Use with validated NVIDIA 2:4 pruned checkpoints.",
+    )
     parser.add_argument("--prompt-format", choices=("raw", "legacy", "chat-template"), default="raw")
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--max-new-tokens", type=int, default=64, help="INT4 TensorRT-LLM max generation budget.")
