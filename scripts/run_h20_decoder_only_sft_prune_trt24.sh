@@ -27,6 +27,7 @@ Optional overrides:
   --eval_batch_size N     default: 16 per GPU for PyTorch EM eval
   --warmup_iters N        default: 100
   --measure_iters N       default: 1000
+  --env_help              print H20/TensorRT environment setup help and exit
 
 Useful environment toggles:
   PYTHON=/path/to/python
@@ -35,6 +36,49 @@ Useful environment toggles:
   COMPARISON_MODE=whitespace|normalized|command
   SKIP_TRAIN=1 SKIP_PRUNE=1 SKIP_EXPORT=1 SKIP_BUILD=1 SKIP_EVAL=1 SKIP_LATENCY=1
   RUN_INT8=1 INT8_CALIB_CACHE=/path/to/real.cache
+EOF
+}
+
+print_env_setup_help() {
+  cat <<'EOF'
+H20 benchmark environment setup checklist:
+
+1. Run this on the H20/NVIDIA GPU machine, not on a CPU-only laptop/login shell.
+   First verify the driver can see GPUs:
+
+     nvidia-smi
+
+2. Activate the Python env you will use for training:
+
+     conda activate chatlm-decoder
+
+3. Install/update the Python runtime packages:
+
+     python -m pip install --upgrade -r requirements.txt --extra-index-url https://pypi.nvidia.com
+
+   Or install only the TensorRT/ONNX additions:
+
+     python -m pip install --upgrade "onnx>=1.16" "onnxruntime-gpu>=1.18" "cuda-python>=12.2" "tensorrt>=10.0" --extra-index-url https://pypi.nvidia.com
+
+4. Make sure native TensorRT tools are on PATH. `trtexec` is not a normal pip
+   script; it comes from the NVIDIA TensorRT SDK/container. Verify:
+
+     trtexec --version
+
+5. Verify the final env:
+
+     python - <<'PY'
+     import torch, onnx, onnxruntime as ort, tensorrt as trt
+     import cuda.cudart
+     print("torch cuda:", torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())
+     print("onnx:", onnx.__version__)
+     print("ort:", ort.__version__, ort.get_available_providers())
+     print("trt:", trt.__version__)
+     PY
+
+If torch.cuda.is_available() is false after this, fix the machine/container GPU
+visibility first: driver, CUDA container flags, scheduler GPU allocation, or
+CUDA_VISIBLE_DEVICES.
 EOF
 }
 
@@ -119,6 +163,10 @@ while [[ $# -gt 0 ]]; do
     --warmup_iters|--warmup-iters)
       WARMUP_ITERS="$2"
       shift 2
+      ;;
+    --env_help|--env-help)
+      print_env_setup_help
+      exit 0
       ;;
     -h|--help)
       usage
@@ -332,11 +380,35 @@ if report["trtexec_path"]:
 else:
     report["trtexec_version"] = None
 
+missing = []
+if report.get("tensorrt_version") is None:
+    missing.append("tensorrt python module")
+if report.get("onnxruntime_version") is None:
+    missing.append("onnxruntime-gpu python module")
+if not report.get("trtexec_path"):
+    missing.append("trtexec binary")
+report["missing_runtime_requirements"] = missing
+
 output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 if not report.get("torch_cuda_available"):
-    raise SystemExit("CUDA GPU is not available. Refusing to run H20 GPU benchmark.")
+    raise SystemExit(
+        "CUDA GPU is not available. Refusing to run H20 GPU benchmark.\n"
+        "Run on the H20 GPU machine/container and check `nvidia-smi`, scheduler GPU allocation, "
+        "and CUDA_VISIBLE_DEVICES. For install help: "
+        "bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --env-help"
+    )
 if int(report.get("torch_cuda_device_count") or 0) < 1:
-    raise SystemExit("No visible CUDA devices. Check CUDA_VISIBLE_DEVICES/--gpus.")
+    raise SystemExit(
+        "No visible CUDA devices. Check CUDA_VISIBLE_DEVICES/--gpus and scheduler/container GPU visibility. "
+        "For install help: bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --env-help"
+    )
+if missing:
+    raise SystemExit(
+        "Missing runtime requirements: "
+        + ", ".join(missing)
+        + ". Install Python deps with `python -m pip install --upgrade -r requirements.txt "
+        "--extra-index-url https://pypi.nvidia.com`; install TensorRT SDK/container for trtexec."
+    )
 PY
 }
 
