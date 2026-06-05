@@ -8,13 +8,13 @@ cd "${SCRIPT_DIR}"
 usage() {
   cat <<'EOF'
 Run the NVIDIA-only ONNX/TensorRT edge correctness pass:
-  1. make a NVIDIA 2:4 pruned checkpoint from the dense checkpoint;
-  2. export separate no-cache ONNX graphs for dense and 2:4 pruned models;
-  3. build FP16 dense, FP16 2:4, INT8 dense, and INT8 2:4 TensorRT engines;
+  1. make a NVIDIA 2:4 pruned checkpoint from the trained SFT checkpoint;
+  2. export separate no-cache ONNX graphs for dense SFT and 2:4 pruned SFT models;
+  3. build FP16 dense SFT, FP16 2:4, INT8 dense SFT, and INT8 2:4 TensorRT engines;
   4. evaluate EM@1 and EM@5 on training data and benchmark data.
 
 Usage:
-  bash run_nvidia_onnx_edge_eval.sh /path/to/dense_model
+  bash run_nvidia_onnx_edge_eval.sh /path/to/sft_checkpoint
 
 Common overrides:
   PYTHON=/path/to/python
@@ -59,7 +59,7 @@ resolve_input_path() {
   fi
 }
 
-DENSE_MODEL="$(resolve_input_path "$1")"
+SFT_CHECKPOINT="$(resolve_input_path "$1")"
 shift 1
 
 PYTHON_BIN="${PYTHON:-python3}"
@@ -119,7 +119,7 @@ model:
 train:
   batch_size: 2
 prune:
-  base_model: ${DENSE_MODEL}
+  base_model: ${SFT_CHECKPOINT}
   output_dir: ${PRUNED_MODEL_DIR}
   method: 2of4
   sparsity: ${SPARSITY}
@@ -239,7 +239,7 @@ eval_engine() {
 }
 
 echo "NVIDIA ONNX edge eval"
-echo "  dense model:      ${DENSE_MODEL}"
+echo "  dense SFT model:  ${SFT_CHECKPOINT}"
 echo "  2:4 model:        ${PRUNED_MODEL_DIR}"
 echo "  training data:    ${TRAINING_DATASET}"
 echo "  benchmark data:   ${BENCHMARK_DATASET}"
@@ -253,24 +253,24 @@ if [[ "${SKIP_PRUNE:-0}" != "1" ]]; then
   "${PYTHON_BIN}" scripts/prune.py \
     --config "${PRUNE_CONFIG_PATH}" \
     --method 2of4 \
-    --checkpoint "${DENSE_MODEL}" \
+    --checkpoint "${SFT_CHECKPOINT}" \
     --output-dir "${PRUNED_MODEL_DIR}"
 else
   echo "[skip] prune"
 fi
 
 if [[ "${SKIP_EXPORT:-0}" != "1" ]]; then
-  export_model "dense" "${DENSE_MODEL}"
+  export_model "dense" "${SFT_CHECKPOINT}"
   export_model "nvidia-2of4" "${PRUNED_MODEL_DIR}"
 else
   echo "[skip] export"
 fi
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  build_engine "dense" "${DENSE_MODEL}" "fp16" "0"
+  build_engine "dense" "${SFT_CHECKPOINT}" "fp16" "0"
   build_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "1"
   if [[ "${RUN_INT8}" == "1" ]]; then
-    build_engine "dense" "${DENSE_MODEL}" "int8" "0"
+    build_engine "dense" "${SFT_CHECKPOINT}" "int8" "0"
     build_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "1"
   fi
 else
@@ -278,14 +278,14 @@ else
 fi
 
 if [[ "${SKIP_EVAL:-0}" != "1" ]]; then
-  eval_engine "dense" "${DENSE_MODEL}" "fp16" "training_data" "${TRAINING_DATASET}" "$@"
+  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "training_data" "${TRAINING_DATASET}" "$@"
   eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "training_data" "${TRAINING_DATASET}" "$@"
-  eval_engine "dense" "${DENSE_MODEL}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "$@"
+  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "$@"
   eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "$@"
   if [[ "${RUN_INT8}" == "1" ]]; then
-    eval_engine "dense" "${DENSE_MODEL}" "int8" "training_data" "${TRAINING_DATASET}" "$@"
+    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "training_data" "${TRAINING_DATASET}" "$@"
     eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "training_data" "${TRAINING_DATASET}" "$@"
-    eval_engine "dense" "${DENSE_MODEL}" "int8" "benchmark" "${BENCHMARK_DATASET}" "$@"
+    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "benchmark" "${BENCHMARK_DATASET}" "$@"
     eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "benchmark" "${BENCHMARK_DATASET}" "$@"
   fi
 else
