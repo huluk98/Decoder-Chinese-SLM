@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import inspect
 import json
 import math
 import os
@@ -73,6 +74,35 @@ def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     while hasattr(model, "module") or hasattr(model, "_orig_mod"):
         model = getattr(model, "module", getattr(model, "_orig_mod", model))
     return model
+
+
+def accepts_cache_position(model: torch.nn.Module) -> bool:
+    target = unwrap_model(model)
+    cached = getattr(target, "_scenic_accepts_cache_position", None)
+    if cached is not None:
+        return bool(cached)
+    try:
+        accepted = "cache_position" in inspect.signature(target.forward).parameters
+    except (TypeError, ValueError):
+        accepted = False
+    setattr(target, "_scenic_accepts_cache_position", accepted)
+    return accepted
+
+
+def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    input_ids = kwargs.get("input_ids")
+    if (
+        input_ids is not None
+        and "cache_position" not in kwargs
+        and accepts_cache_position(model)
+        and getattr(input_ids, "ndim", 0) >= 1
+    ):
+        kwargs["cache_position"] = torch.arange(
+            input_ids.shape[-1],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+    return model(**kwargs)
 
 
 def maybe_print(rank: int, message: str) -> None:
@@ -163,7 +193,8 @@ def causal_lm_loss(
 ) -> tuple[torch.Tensor, Any]:
     """Return causal LM loss, optionally upweighting supervised EOS labels."""
     if float(eos_loss_weight) <= 1.0 or eos_token_id is None:
-        outputs = model(
+        outputs = forward_causal_lm(
+            model,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
@@ -171,7 +202,8 @@ def causal_lm_loss(
         )
         return outputs.loss, outputs
 
-    outputs = model(
+    outputs = forward_causal_lm(
+        model,
         input_ids=input_ids,
         attention_mask=attention_mask,
         use_cache=False,
@@ -325,7 +357,8 @@ def save_checkpoint(
 
 
 def mean_pool_last_hidden(model: torch.nn.Module, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    outputs = model(
+    outputs = forward_causal_lm(
+        model,
         input_ids=input_ids,
         attention_mask=attention_mask,
         output_hidden_states=True,

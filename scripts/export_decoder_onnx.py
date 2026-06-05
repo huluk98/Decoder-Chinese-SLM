@@ -27,14 +27,25 @@ class NoCacheDecoderWrapper:
             def __init__(self, inner: Any) -> None:
                 super().__init__()
                 self.inner = inner
+                try:
+                    self.accepts_cache_position = "cache_position" in inspect.signature(inner.forward).parameters
+                except (TypeError, ValueError):
+                    self.accepts_cache_position = False
 
             def forward(self, input_ids: Any, attention_mask: Any) -> Any:
-                outputs = self.inner(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    use_cache=False,
-                    return_dict=True,
-                )
+                model_kwargs = {
+                    "input_ids": input_ids.long(),
+                    "attention_mask": attention_mask.long(),
+                    "use_cache": False,
+                    "return_dict": True,
+                }
+                if self.accepts_cache_position:
+                    model_kwargs["cache_position"] = torch.arange(
+                        input_ids.shape[-1],
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
+                outputs = self.inner(**model_kwargs)
                 return outputs.logits
 
         return _Wrapper(model)
@@ -52,6 +63,10 @@ class CacheDecoderWrapper:
                 super().__init__()
                 self.inner = inner
                 self.counts = counts
+                try:
+                    self.accepts_cache_position = "cache_position" in inspect.signature(inner.forward).parameters
+                except (TypeError, ValueError):
+                    self.accepts_cache_position = False
 
             def forward(self, input_ids: Any, attention_mask: Any, *flat_past: Any) -> tuple[Any, ...]:
                 offset = 0
@@ -59,13 +74,22 @@ class CacheDecoderWrapper:
                 for count in self.counts:
                     past_key_values.append(tuple(flat_past[offset : offset + count]))
                     offset += count
-                outputs = self.inner(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    past_key_values=tuple(past_key_values),
-                    use_cache=True,
-                    return_dict=True,
-                )
+                model_kwargs = {
+                    "input_ids": input_ids.long(),
+                    "attention_mask": attention_mask.long(),
+                    "past_key_values": tuple(past_key_values),
+                    "use_cache": True,
+                    "return_dict": True,
+                }
+                if self.accepts_cache_position:
+                    past_seq_len = max(0, int(attention_mask.shape[-1]) - int(input_ids.shape[-1]))
+                    model_kwargs["cache_position"] = torch.arange(
+                        past_seq_len,
+                        past_seq_len + int(input_ids.shape[-1]),
+                        dtype=torch.long,
+                        device=input_ids.device,
+                    )
+                outputs = self.inner(**model_kwargs)
                 flat_present = []
                 for layer in outputs.past_key_values:
                     flat_present.extend(list(layer))
@@ -104,6 +128,13 @@ def dummy_token_ids(torch: Any, tokenizer: Any, batch_size: int, seq_len: int, d
     token_id = int(getattr(tokenizer, "bos_token_id", None) or getattr(tokenizer, "eos_token_id", None) or 1)
     token_id = max(0, min(token_id, max(vocab_size - 1, 0)))
     return torch.full((int(batch_size), int(seq_len)), token_id, dtype=torch.int32, device=device)
+
+
+def model_accepts_cache_position(model: Any) -> bool:
+    try:
+        return "cache_position" in inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def export_with_compatible_kwargs(torch: Any, wrapper: Any, args: tuple[Any, ...], output_path: Path, kwargs: dict[str, Any]) -> None:
@@ -240,13 +271,20 @@ def export_cache(args: argparse.Namespace, torch: Any, model: Any, tokenizer: An
     prefill_ids = dummy_token_ids(torch, tokenizer, args.batch_size, past_seq_len, device)
     prefill_mask = torch.ones((args.batch_size, past_seq_len), dtype=torch.int32, device=device)
     logging.info("Attempting cached export by first inferring past_key_values from a %d-token prefill.", past_seq_len)
-    with torch.no_grad():
-        prefill_outputs = model(
-            input_ids=prefill_ids,
-            attention_mask=prefill_mask,
-            use_cache=True,
-            return_dict=True,
+    prefill_kwargs = {
+        "input_ids": prefill_ids.long(),
+        "attention_mask": prefill_mask.long(),
+        "use_cache": True,
+        "return_dict": True,
+    }
+    if model_accepts_cache_position(model):
+        prefill_kwargs["cache_position"] = torch.arange(
+            past_seq_len,
+            dtype=torch.long,
+            device=device,
         )
+    with torch.no_grad():
+        prefill_outputs = model(**prefill_kwargs)
     if not getattr(prefill_outputs, "past_key_values", None):
         raise RuntimeError("Model did not return past_key_values; cached export is not available for this architecture.")
 
