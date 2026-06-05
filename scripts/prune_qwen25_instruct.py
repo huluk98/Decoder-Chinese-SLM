@@ -51,6 +51,26 @@ from chatlm_decoder.qwen25_instruct_data import (
     build_qwen25_instruct_dataloader,
 )
 
+METHOD_CHOICES = ("2of4", "2:4", "nvidia_2of4", "magnitude", "wanda", "gradient", "taylor", "taylor_gradient")
+
+
+def normalize_pruning_method(method: str) -> str:
+    normalized = str(method).strip().lower().replace("-", "_")
+    aliases = {
+        "2:4": "2of4",
+        "2_4": "2of4",
+        "2_of_4": "2of4",
+        "nvidia_2_4": "2of4",
+        "nvidia_2of4": "2of4",
+        "gradient": "taylor",
+        "gradient_taylor": "taylor",
+        "taylor_gradient": "taylor",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"2of4", "magnitude", "wanda", "taylor"}:
+        raise ValueError(f"Unknown Qwen pruning method: {method}")
+    return normalized
+
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
     config_path = Path(path).expanduser()
@@ -224,7 +244,7 @@ def make_masks(
             "target_resolution": target_resolution,
             "wanda_activation_report": report,
         }
-    if method == "gradient":
+    if method in {"gradient", "taylor"}:
         scores = collect_gradient_scores(
             model,
             calibration_loader,
@@ -255,8 +275,8 @@ def make_masks(
         )
         return masks, {
             "pruning_granularity": "global_prunable_parameter" if granularity == "global" else "per_parameter_tensor",
-            "score_definition": "abs(parameter * gradient)",
-            "method_variant": f"{scope}_global_gradient_saliency" if granularity == "global" else f"{scope}_layerwise_gradient_saliency",
+            "score_definition": "first-order Taylor saliency abs(parameter * gradient)",
+            "method_variant": f"{scope}_global_taylor_saliency" if granularity == "global" else f"{scope}_layerwise_taylor_saliency",
             "target_resolution": target_resolution,
             "gradient_saliency_report": report,
         }
@@ -340,6 +360,13 @@ def save_pruned_model(
         "checkpoint_reloaded": str(output_dir),
         **sparsity_accounting(reload_model, masks, target=target_prunable_sparsity),
     }
+    eos_report = eos_preservation_report(
+        model=model,
+        tokenizer=tokenizer,
+        masks=masks,
+        scope=scope,
+        include_lm_head=bool(prune_config.get("include_lm_head", scope == "full_model")),
+    )
     if int(reload_validation.get("masked_weight_violation_count", 0) or 0):
         raise ValueError(f"Pruned weights became nonzero after checkpoint reload: {output_dir}")
     metadata = {
@@ -364,6 +391,7 @@ def save_pruned_model(
         "uses_qwen_apply_chat_template": True,
         "checkpoint_evaluated": str(output_dir),
         "checkpoint_reload_validation": reload_validation,
+        "eos_preservation": eos_report,
         "per_layer_sparsity": per_layer_sparsity,
         **accounting,
         "note": (
@@ -382,6 +410,7 @@ def save_pruned_model(
         ),
     )
     write_json(output_dir / "pruning_report.json", metadata)
+    write_json(output_dir / "eos_preservation_report.json", eos_report)
     write_json(output_dir / "mask_validation.json", {"method": method, "phase": "one_shot_prune", **accounting})
     write_json(output_dir / "checkpoint_reload_validation.json", reload_validation)
     write_csv(output_dir / "sparsity_by_module.csv", per_layer_sparsity)
@@ -399,12 +428,65 @@ def save_pruned_model(
     print(f"Saved Qwen2.5-Instruct pruned checkpoint: {output_dir}")
 
 
+def eos_preservation_report(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    masks: dict[str, torch.Tensor],
+    scope: str,
+    include_lm_head: bool,
+) -> dict[str, Any]:
+    masked_names = set(masks)
+    lm_head_masked = sorted(name for name in masked_names if "lm_head" in name.lower() or "output_head" in name.lower())
+    embedding_masked = sorted(name for name in masked_names if "embed" in name.lower() or "wte" in name.lower())
+    norm_masked = sorted(name for name in masked_names if "norm" in name.lower() or "ln_" in name.lower())
+    lm_head_parameters = [
+        name
+        for name, _parameter in model.named_parameters()
+        if "lm_head" in name.lower() or "output_head" in name.lower()
+    ]
+    embedding_parameters = [
+        name
+        for name, _parameter in model.named_parameters()
+        if "embed" in name.lower() or "wte" in name.lower()
+    ]
+    warnings: list[str] = []
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is None:
+        warnings.append("tokenizer.eos_token_id is None; generation stop behavior cannot be protected or evaluated reliably.")
+    if lm_head_masked:
+        warnings.append("lm_head/output_head is included in pruning masks; EOS logits may be damaged.")
+    if embedding_masked:
+        warnings.append("token embedding parameters are included in pruning masks; EOS token representation may be damaged.")
+    if norm_masked:
+        warnings.append("normalization parameters are included in pruning masks; generation stability may degrade.")
+    if include_lm_head:
+        warnings.append("include_lm_head=true; this is not recommended for EOS-preserving pruning.")
+    if scope == "full_model":
+        warnings.append("scope=full_model can prune EOS-critical tensors; use transformer_linears for EOS-preserving linear pruning.")
+    return {
+        "eos_token": getattr(tokenizer, "eos_token", None),
+        "eos_token_id": eos_token_id,
+        "pad_token": getattr(tokenizer, "pad_token", None),
+        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+        "pruning_scope": scope,
+        "include_lm_head": bool(include_lm_head),
+        "lm_head_masked": lm_head_masked,
+        "embedding_masked": embedding_masked,
+        "norm_masked": norm_masked,
+        "lm_head_parameters": lm_head_parameters,
+        "embedding_parameters": embedding_parameters,
+        "protected_eos_critical_parameters": not lm_head_masked and not embedding_masked and not norm_masked,
+        "warnings": warnings,
+        "valid": not warnings or all("tokenizer.eos_token_id is None" in warning for warning in warnings),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Prune a Qwen2.5-Instruct checkpoint with Qwen chat-template calibration data."
     )
     parser.add_argument("--config", default="configs/prune_qwen25_50.yaml")
-    parser.add_argument("--method", choices=("2of4", "magnitude", "wanda", "gradient"), default=None)
+    parser.add_argument("--method", choices=METHOD_CHOICES, default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--dtype", choices=("auto", "bf16", "fp16", "fp32"), default=None)
@@ -415,7 +497,7 @@ def main() -> None:
     args = parse_args()
     config = load_yaml(args.config)
     prune_config = dict(config.get("prune", {}) or {})
-    method = args.method or str(prune_config.get("method", "magnitude"))
+    method = normalize_pruning_method(args.method or str(prune_config.get("method", "magnitude")))
     checkpoint = str(args.checkpoint or prune_config.get("base_model") or config.get("model_name_or_path") or "")
     if not checkpoint:
         raise ValueError("Set prune.base_model, model_name_or_path, or pass --checkpoint.")

@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - the pruning runner itself still needs 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_TRAINING_DATASET = "data/scenic/SCENIC_full_training_dataset.json"
 DEFAULT_BENCHMARK_DATASET = "data/benchmarks/iot_instruction_benchmark_200.json"
-DEFAULT_METHODS = ("wanda", "magnitude", "gradient", "nvidia")
+DEFAULT_METHODS = ("wanda", "magnitude", "taylor", "nvidia")
 DEFAULT_PRUNE_FAMILIES = ("base_model", "sft", "contrastive")
 EVAL_NAMES = ("training_dataset", "benchmark")
 METHOD_ALIASES = {
@@ -34,7 +34,9 @@ METHOD_ALIASES = {
     "nvidia_2of4": "2of4",
     "magnitude": "magnitude",
     "wanda": "wanda",
-    "gradient": "gradient",
+    "gradient": "taylor",
+    "taylor": "taylor",
+    "taylor_gradient": "taylor",
 }
 FAMILY_ALIASES = {
     "base": "base_model",
@@ -149,7 +151,7 @@ def normalize_methods(values: Any) -> tuple[str, ...]:
     for value in parse_words(values):
         key = value.lower()
         if key not in METHOD_ALIASES:
-            raise ValueError(f"Unknown pruning method {value!r}. Use wanda, magnitude, gradient, or nvidia.")
+            raise ValueError(f"Unknown pruning method {value!r}. Use wanda, magnitude, taylor, or nvidia.")
         method = METHOD_ALIASES[key]
         if method not in methods:
             methods.append(method)
@@ -395,6 +397,8 @@ def rows_for_family(family: ModelFamily) -> list[dict[str, Any]]:
                 "response_perplexity": safe_float(metric(row, "response_perplexity", "response_perplexity_mean")),
                 "avg_generated_tokens": safe_float(metric(row, "avg_generated_tokens", "avg_generated_tokens_mean")),
                 "max_token_hit_rate": safe_float(metric(row, "reached_max_new_tokens_rate")),
+                "hit_eos": metric(row, "hit_eos"),
+                "eos_hit_rate": safe_float(metric(row, "eos_hit_rate")),
                 "target_sparsity": 0.0 if phase == "dense_baseline" else safe_float(metric(row, "target_whole_model_sparsity", "target_prunable_sparsity")),
                 "achieved_whole_model_sparsity": safe_float(metric(row, "achieved_whole_model_sparsity", "real_sparsity")),
                 "achieved_prunable_sparsity": safe_float(metric(row, "achieved_prunable_sparsity")),
@@ -677,8 +681,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-batch-size", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", "16")))
     parser.add_argument("--sparsity", type=float, default=float(os.environ.get("SPARSITY", "0.5")))
     parser.add_argument("--pruning-scope", default=os.environ.get("PRUNING_SCOPE", "transformer_linears"))
-    parser.add_argument("--sparsity-denominator", default=os.environ.get("SPARSITY_DENOMINATOR", "whole_model"))
-    parser.add_argument("--granularity", choices=("layer", "global"), default=os.environ.get("GRANULARITY", "layer"))
+    parser.add_argument("--sparsity-denominator", default=os.environ.get("SPARSITY_DENOMINATOR", "prunable"))
+    parser.add_argument("--granularity", choices=("layer", "global"), default=os.environ.get("GRANULARITY", "global"))
     parser.add_argument("--include-lm-head", default=os.environ.get("INCLUDE_LM_HEAD", "false"))
     parser.add_argument("--calibration-batches", type=int, default=int(os.environ.get("CALIBRATION_BATCHES", "128")))
     parser.add_argument("--prune-batch-size", type=int, default=int(os.environ.get("PRUNE_BATCH_SIZE", "2")))

@@ -18,7 +18,7 @@ Environment overrides:
   EOS_RETUNE_EPOCHS     default: 1.0 when EOS_RETUNE=1.
   RUN_ROOT              default: runs/model-path-pruning-results
   RESULTS_JSON          default: ${RUN_ROOT}/model_path_pruning_results.json
-  METHODS               default: "wanda magnitude gradient nvidia"
+  METHODS               default: "wanda magnitude taylor nvidia"
   PRUNE_FAMILIES        default: "base_model sft contrastive"
   PYTHON                default: python3, then python
   CUDA_VISIBLE_DEVICES  default: 0,1,2,3,4,5,6,7
@@ -63,7 +63,7 @@ run_model_path_pruning_results() {
     "--benchmark-dataset" "${BENCHMARK_DATASET:-data/benchmarks/iot_instruction_benchmark_200.json}"
     "--run-root" "${RUN_ROOT:-runs/model-path-pruning-results}"
     "--prune-config" "${PRUNE_CONFIG:-configs/prune_50.yaml}"
-    "--methods" "${METHODS:-wanda magnitude gradient nvidia}"
+    "--methods" "${METHODS:-wanda magnitude taylor nvidia}"
     "--prune-families" "${PRUNE_FAMILIES:-base_model sft contrastive}"
     "--cuda-visible-devices" "${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
     "--nproc-per-node" "${NPROC_PER_NODE:-8}"
@@ -78,8 +78,8 @@ run_model_path_pruning_results() {
     "--eval-batch-size" "${EVAL_BATCH_SIZE:-16}"
     "--sparsity" "${SPARSITY:-0.5}"
     "--pruning-scope" "${PRUNING_SCOPE:-transformer_linears}"
-    "--sparsity-denominator" "${SPARSITY_DENOMINATOR:-whole_model}"
-    "--granularity" "${GRANULARITY:-layer}"
+    "--sparsity-denominator" "${SPARSITY_DENOMINATOR:-prunable}"
+    "--granularity" "${GRANULARITY:-global}"
     "--include-lm-head" "${INCLUDE_LM_HEAD:-false}"
     "--calibration-batches" "${CALIBRATION_BATCHES:-128}"
     "--prune-batch-size" "${PRUNE_BATCH_SIZE:-2}"

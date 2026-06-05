@@ -16,7 +16,18 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-METHODS = ("magnitude", "2of4", "wanda", "gradient")
+METHODS = ("magnitude", "2of4", "wanda", "taylor")
+METHOD_ALIASES = {
+    "2:4": "2of4",
+    "2_4": "2of4",
+    "2-of-4": "2of4",
+    "2_of_4": "2of4",
+    "nvidia-2of4": "2of4",
+    "nvidia_2of4": "2of4",
+    "gradient": "taylor",
+    "gradient_taylor": "taylor",
+    "taylor_gradient": "taylor",
+}
 
 
 def resolve_config_path(path: str | Path) -> Path:
@@ -96,6 +107,20 @@ def should_continue_on_error(args: argparse.Namespace, benchmark: dict[str, Any]
     if args.stop_on_error:
         return False
     return bool(benchmark.get("continue_on_error", False))
+
+
+def parse_methods(value: Any) -> list[str]:
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(",", " ").split()]
+    else:
+        parts = [str(part).strip() for part in value]
+    methods: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        normalized = part.lower().replace("-", "_")
+        methods.append(METHOD_ALIASES.get(normalized, normalized))
+    return methods
 
 
 def parse_cuda_visible_devices(value: Any) -> list[str]:
@@ -195,9 +220,9 @@ def validate_benchmark_paths(
     if not prune_config_path.exists():
         problems.append(f"benchmark.prune_config does not exist: {prune_config_path}")
     calibration_data_path = config.get("prune", {}).get("calibration_data_path")
-    if any(method in {"wanda", "gradient"} for method in methods):
+    if any(method in {"wanda", "taylor"} for method in methods):
         if not calibration_data_path:
-            problems.append("prune.calibration_data_path is required for wanda/gradient.")
+            problems.append("prune.calibration_data_path is required for wanda/taylor.")
         elif not as_path(calibration_data_path).exists():
             problems.append(f"prune.calibration_data_path does not exist: {calibration_data_path}")
     if bool(retune.get("enabled", True)):
@@ -686,8 +711,8 @@ def cmc_comparability_report(
         non_blocking.append("benchmark repeats are enabled; CMC one-shot comparison should use one run per checkpoint")
     if not benchmark.get("eval_file"):
         blocking.append("benchmark eval_file is missing")
-    if not config.get("prune", {}).get("calibration_data_path") and any(method in {"wanda", "gradient"} for method in methods):
-        blocking.append("calibration_data_path is missing for Wanda/gradient")
+    if not config.get("prune", {}).get("calibration_data_path") and any(method in {"wanda", "taylor"} for method in methods):
+        blocking.append("calibration_data_path is missing for Wanda/Taylor")
     if bool(config.get("retune", {}).get("enabled", False)):
         non_blocking.append("retuned phase is enabled; keep it separate from primary CMC one-shot comparison")
     return {
@@ -734,7 +759,7 @@ def main() -> None:
     benchmark = dict(config.get("benchmark", {}) or {})
     one_shot = dict(config.get("one_shot", {}) or {})
     retune = dict(config.get("retune", {}) or {})
-    methods = [str(method) for method in benchmark.get("methods", METHODS)]
+    methods = parse_methods(benchmark.get("methods", METHODS))
     unknown_methods = [method for method in methods if method not in METHODS]
     if unknown_methods:
         raise ValueError(f"Unknown pruning methods: {unknown_methods}. Expected any of {METHODS}.")
