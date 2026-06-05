@@ -26,7 +26,9 @@ Common overrides:
   MAX_NEW_TOKENS=64
   EXACT_MATCH_TOP_K=5
   RUN_INT8=1
-  MAX_SAMPLES=0              # 0 means full dataset
+  TRAINING_MAX_SAMPLES=200   # 0 means full training dataset; full can be very slow
+  BENCHMARK_MAX_SAMPLES=0    # 0 means full benchmark dataset, normally 200 rows
+  MAX_SAMPLES=20             # optional quick smoke override for both eval datasets
   CALIB_SAMPLES=128
   PROMPT_FORMAT=raw          # raw, legacy, or chat-template
   COMPARISON_MODE=whitespace # whitespace, normalized, or command
@@ -81,7 +83,9 @@ WORKSPACE_GB="${WORKSPACE_GB:-4}"
 PROMPT_FORMAT="${PROMPT_FORMAT:-raw}"
 SYSTEM_PROMPT="${SYSTEM_PROMPT:-}"
 COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
-MAX_SAMPLES="${MAX_SAMPLES:-0}"
+MAX_SAMPLES="${MAX_SAMPLES:-}"
+TRAINING_MAX_SAMPLES="${TRAINING_MAX_SAMPLES:-200}"
+BENCHMARK_MAX_SAMPLES="${BENCHMARK_MAX_SAMPLES:-0}"
 EXPORT_DTYPE="${EXPORT_DTYPE:-fp16}"
 OPSET="${OPSET:-18}"
 SPARSITY="${SPARSITY:-0.5}"
@@ -103,9 +107,9 @@ if [[ -n "${SYSTEM_PROMPT}" ]]; then
   SYSTEM_PROMPT_ARGS=(--system-prompt "${SYSTEM_PROMPT}")
 fi
 
-LIMIT_ARGS=()
-if [[ "${MAX_SAMPLES}" != "0" ]]; then
-  LIMIT_ARGS=(--limit "${MAX_SAMPLES}")
+if [[ -n "${MAX_SAMPLES}" && "${MAX_SAMPLES}" != "0" ]]; then
+  TRAINING_MAX_SAMPLES="${MAX_SAMPLES}"
+  BENCHMARK_MAX_SAMPLES="${MAX_SAMPLES}"
 fi
 
 mkdir -p "${RUN_ROOT}/generated_configs"
@@ -209,12 +213,19 @@ eval_engine() {
   local precision="$3"
   local dataset_name="$4"
   local dataset_path="$5"
-  shift 5
+  local eval_limit="$6"
+  shift 6
   local engine_path="${RUN_ROOT}/trt/${label}/model_${precision}.engine"
   local onnx_path="${RUN_ROOT}/onnx/${label}/model_decoder_nocache.onnx"
   local output_dir="${RUN_ROOT}/eval/${label}/${precision}/${dataset_name}"
+  local limit_args=()
+  local limit_label="full"
+  if [[ -n "${eval_limit}" && "${eval_limit}" != "0" ]]; then
+    limit_args=(--limit "${eval_limit}")
+    limit_label="${eval_limit}"
+  fi
   echo
-  echo "[eval] ${precision} ${label} on ${dataset_name}"
+  echo "[eval] ${precision} ${label} on ${dataset_name} (limit=${limit_label})"
   "${PYTHON_BIN}" scripts/eval_trt_prompt_response.py \
     --engine "${engine_path}" \
     --model-path "${model_path}" \
@@ -232,7 +243,7 @@ eval_engine() {
     --prompt-format "${PROMPT_FORMAT}" \
     "${SYSTEM_PROMPT_ARGS[@]}" \
     --comparison-mode "${COMPARISON_MODE}" \
-    "${LIMIT_ARGS[@]}" \
+    "${limit_args[@]}" \
     "${TRUST_ARGS[@]}" \
     "${OVERWRITE_ARGS[@]}" \
     "$@"
@@ -246,6 +257,8 @@ echo "  benchmark data:   ${BENCHMARK_DATASET}"
 echo "  run root:         ${RUN_ROOT}"
 echo "  sparse TRT flag:  ${SPARSE_WEIGHTS_FOR_2OF4}"
 echo "  run INT8:         ${RUN_INT8}"
+echo "  training limit:   ${TRAINING_MAX_SAMPLES} (0 means full; full can be slow with no-cache EM@K)"
+echo "  benchmark limit:  ${BENCHMARK_MAX_SAMPLES} (0 means full)"
 echo
 
 if [[ "${SKIP_PRUNE:-0}" != "1" ]]; then
@@ -278,15 +291,15 @@ else
 fi
 
 if [[ "${SKIP_EVAL:-0}" != "1" ]]; then
-  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "training_data" "${TRAINING_DATASET}" "$@"
-  eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "training_data" "${TRAINING_DATASET}" "$@"
-  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "$@"
-  eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "$@"
+  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "training_data" "${TRAINING_DATASET}" "${TRAINING_MAX_SAMPLES}" "$@"
+  eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "training_data" "${TRAINING_DATASET}" "${TRAINING_MAX_SAMPLES}" "$@"
+  eval_engine "dense" "${SFT_CHECKPOINT}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "${BENCHMARK_MAX_SAMPLES}" "$@"
+  eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "fp16" "benchmark" "${BENCHMARK_DATASET}" "${BENCHMARK_MAX_SAMPLES}" "$@"
   if [[ "${RUN_INT8}" == "1" ]]; then
-    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "training_data" "${TRAINING_DATASET}" "$@"
-    eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "training_data" "${TRAINING_DATASET}" "$@"
-    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "benchmark" "${BENCHMARK_DATASET}" "$@"
-    eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "benchmark" "${BENCHMARK_DATASET}" "$@"
+    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "training_data" "${TRAINING_DATASET}" "${TRAINING_MAX_SAMPLES}" "$@"
+    eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "training_data" "${TRAINING_DATASET}" "${TRAINING_MAX_SAMPLES}" "$@"
+    eval_engine "dense" "${SFT_CHECKPOINT}" "int8" "benchmark" "${BENCHMARK_DATASET}" "${BENCHMARK_MAX_SAMPLES}" "$@"
+    eval_engine "nvidia-2of4" "${PRUNED_MODEL_DIR}" "int8" "benchmark" "${BENCHMARK_DATASET}" "${BENCHMARK_MAX_SAMPLES}" "$@"
   fi
 else
   echo "[skip] eval"
