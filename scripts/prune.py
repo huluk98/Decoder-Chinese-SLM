@@ -57,6 +57,22 @@ def select_device() -> torch.device:
     return torch.device("cpu")
 
 
+def load_causal_lm(checkpoint: str, attn_implementation: str | None = None) -> torch.nn.Module:
+    requested_attn = str(attn_implementation or "").strip()
+    if requested_attn:
+        try:
+            return AutoModelForCausalLM.from_pretrained(
+                str(checkpoint),
+                attn_implementation=requested_attn,
+            )
+        except Exception as exc:
+            print(
+                f"[warning] requested attention implementation {requested_attn!r} unavailable ({exc}); "
+                "loading checkpoint defaults."
+            )
+    return AutoModelForCausalLM.from_pretrained(str(checkpoint))
+
+
 def build_calibration_loader(config: dict[str, Any], tokenizer: Any, prune_config: dict[str, Any]):
     path = prune_config.get("calibration_data_path") or config.get("sft", {}).get("data_path")
     if not path:
@@ -298,7 +314,10 @@ def save_pruned_model(
     accounting = sparsity_accounting(model, masks, target=target_prunable_sparsity)
     after_norms = collect_weight_norms(model, masks)
     per_layer_sparsity = layerwise_zero_fraction(model, masks)
-    reload_model = AutoModelForCausalLM.from_pretrained(str(output_dir)).to(device)
+    reload_model = load_causal_lm(
+        str(output_dir),
+        attn_implementation=prune_config.get("attn_implementation"),
+    ).to(device)
     reload_validation = {
         "checkpoint_reloaded": str(output_dir),
         **sparsity_accounting(reload_model, masks, target=target_prunable_sparsity),
@@ -378,7 +397,7 @@ def main() -> None:
     output_dir = Path(args.output_dir or prune_config.get("output_dir") or f"runs/pruned-{method}").expanduser()
     device = select_device()
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint))
-    model = AutoModelForCausalLM.from_pretrained(str(checkpoint)).to(device)
+    model = load_causal_lm(str(checkpoint), attn_implementation=prune_config.get("attn_implementation")).to(device)
     model.config.use_cache = False
 
     calibration_loader = build_calibration_loader(config, tokenizer, prune_config)

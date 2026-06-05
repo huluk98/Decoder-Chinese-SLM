@@ -520,6 +520,10 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         "remove_unused_columns": "remove_unused_columns",
         "group_by_length": "group_by_length",
         "load_in_training_dtype": "load_in_training_dtype",
+        "attn_implementation": "attn_implementation",
+        "sdp_flash": "sdp_flash",
+        "sdp_mem_efficient": "sdp_mem_efficient",
+        "sdp_math": "sdp_math",
     }
     for flat_key, train_key in mapping.items():
         if flat_key in config:
@@ -564,6 +568,17 @@ def model_load_kwargs(device: torch.device, train_config: dict[str, Any]) -> dic
 
 def load_model(checkpoint: str, device: torch.device, train_config: dict[str, Any], rank: int) -> torch.nn.Module:
     kwargs = model_load_kwargs(device, train_config)
+    requested_attn = str(train_config.get("attn_implementation") or "").strip()
+    if requested_attn:
+        try:
+            maybe_print(rank, f"Attention implementation: {requested_attn}")
+            return AutoModelForCausalLM.from_pretrained(
+                checkpoint,
+                attn_implementation=requested_attn,
+                **kwargs,
+            )
+        except Exception as exc:
+            maybe_print(rank, f"[warning] requested attention implementation {requested_attn!r} unavailable ({exc}); trying fallback.")
     if bool(train_config.get("flash_attention", False)):
         try:
             maybe_print(rank, "Attention implementation: trying flash_attention_2")
