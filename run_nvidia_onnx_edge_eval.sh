@@ -8,17 +8,21 @@ cd "${SCRIPT_DIR}"
 usage() {
   cat <<'EOF'
 Run the NVIDIA-only ONNX/TensorRT edge correctness pass:
-  1. make a NVIDIA 2:4 pruned checkpoint from the trained SFT checkpoint;
-  2. export separate no-cache ONNX graphs for dense SFT and 2:4 pruned SFT models;
-  3. build FP16 dense SFT, FP16 2:4, INT8 dense SFT, and INT8 2:4 TensorRT engines;
-  4. evaluate EM@1 and EM@5 on training data and benchmark data.
+  1. train regular SFT for 5 epochs from the base decoder checkpoint;
+  2. make a NVIDIA 2:4 pruned checkpoint from the trained SFT checkpoint;
+  3. export separate no-cache ONNX graphs for dense SFT and 2:4 pruned SFT models;
+  4. build FP16 dense SFT, FP16 2:4, INT8 dense SFT, and INT8 2:4 TensorRT engines;
+  5. evaluate EM@1 and EM@5 on training data and benchmark data.
 
 Usage:
-  bash run_nvidia_onnx_edge_eval.sh /path/to/sft_checkpoint
+  bash run_nvidia_onnx_edge_eval.sh /path/to/base_decoder_model
 
 Common overrides:
   PYTHON=/path/to/python
   RUN_ROOT=runs/nvidia-onnx-edge-eval
+  SFT_EPOCHS=5
+  SFT_OUTPUT_DIR=runs/nvidia-onnx-edge-eval/training/sft_5epoch
+  TRAIN_NPROC_PER_NODE=8
   TRAINING_DATASET=data/scenic/SCENIC_full_training_dataset.json
   BENCHMARK_DATASET=data/benchmarks/iot_instruction_benchmark_200.json
   OVERWRITE=1
@@ -33,6 +37,7 @@ Common overrides:
   PROMPT_FORMAT=raw          # raw, legacy, or chat-template
   COMPARISON_MODE=whitespace # whitespace, normalized, or command
   TRUST_REMOTE_CODE=1
+  SKIP_TRAIN=1             # reuse SFT_OUTPUT_DIR/final instead of training again
   SKIP_PRUNE=1
   SKIP_EXPORT=1
   SKIP_BUILD=1
@@ -61,11 +66,14 @@ resolve_input_path() {
   fi
 }
 
-SFT_CHECKPOINT="$(resolve_input_path "$1")"
+BASE_DECODER_MODEL="$(resolve_input_path "$1")"
 shift 1
 
 PYTHON_BIN="${PYTHON:-python3}"
 RUN_ROOT="${RUN_ROOT:-runs/nvidia-onnx-edge-eval}"
+SFT_EPOCHS="${SFT_EPOCHS:-5}"
+SFT_OUTPUT_DIR="${SFT_OUTPUT_DIR:-${RUN_ROOT}/training/sft_5epoch}"
+SFT_CHECKPOINT="${SFT_CHECKPOINT:-${SFT_OUTPUT_DIR}/final}"
 PRUNED_MODEL_DIR="${PRUNED_MODEL_DIR:-${RUN_ROOT}/models/nvidia-2of4-pruned}"
 TRAINING_DATASET="${TRAINING_DATASET:-data/scenic/SCENIC_full_training_dataset.json}"
 BENCHMARK_DATASET="${BENCHMARK_DATASET:-data/benchmarks/iot_instruction_benchmark_200.json}"
@@ -91,6 +99,15 @@ OPSET="${OPSET:-18}"
 SPARSITY="${SPARSITY:-0.5}"
 SPARSE_WEIGHTS_FOR_2OF4="${SPARSE_WEIGHTS_FOR_2OF4:-1}"
 RUN_INT8="${RUN_INT8:-1}"
+TRAIN_NPROC_PER_NODE="${TRAIN_NPROC_PER_NODE:-8}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+
+export CUDA_VISIBLE_DEVICES
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export OMP_NUM_THREADS
 
 OVERWRITE_ARGS=()
 if [[ "${OVERWRITE:-1}" == "1" ]]; then
@@ -113,6 +130,56 @@ if [[ -n "${MAX_SAMPLES}" && "${MAX_SAMPLES}" != "0" ]]; then
 fi
 
 mkdir -p "${RUN_ROOT}/generated_configs"
+
+SFT_CONFIG_PATH="${RUN_ROOT}/generated_configs/sft_5epoch.yaml"
+cat > "${SFT_CONFIG_PATH}" <<EOF
+model_name_or_path: ${BASE_DECODER_MODEL}
+train_file: ${TRAINING_DATASET}
+eval_file: ${TRAINING_DATASET}
+benchmark_file: ${BENCHMARK_DATASET}
+output_dir: ${SFT_OUTPUT_DIR}
+
+max_seq_length: ${MAX_SEQ_LEN}
+max_new_tokens: ${MAX_NEW_TOKENS}
+benchmark_runs: 1
+top_k_exact_match: ${EXACT_MATCH_TOP_K}
+
+num_train_epochs: ${SFT_EPOCHS}
+learning_rate: 2.0e-5
+warmup_ratio: 0.03
+weight_decay: 0.01
+lr_scheduler_type: cosine
+max_grad_norm: 1.0
+
+bf16: true
+fp16: false
+tf32: true
+
+per_device_train_batch_size: 16
+per_device_eval_batch_size: 16
+gradient_accumulation_steps: 1
+
+gradient_checkpointing: false
+flash_attention: true
+torch_compile: false
+
+logging_steps: 10
+save_strategy: epoch
+eval_strategy: none
+save_final_only: true
+save_total_limit: 1
+
+dataloader_num_workers: 8
+dataloader_pin_memory: true
+persistent_workers: true
+group_by_length: true
+remove_unused_columns: false
+
+generation:
+  max_new_tokens: ${MAX_NEW_TOKENS}
+  do_sample: false
+  num_beams: 1
+EOF
 
 PRUNE_CONFIG_PATH="${RUN_ROOT}/generated_configs/prune_nvidia_2of4.yaml"
 cat > "${PRUNE_CONFIG_PATH}" <<EOF
@@ -139,6 +206,26 @@ prune:
   recovery_steps: 0
   overwrite: true
 EOF
+
+train_sft() {
+  echo
+  echo "[train] 5-epoch SFT from base decoder"
+  echo "  base:      ${BASE_DECODER_MODEL}"
+  echo "  config:    ${SFT_CONFIG_PATH}"
+  echo "  output:    ${SFT_OUTPUT_DIR}"
+  echo "  epochs:    ${SFT_EPOCHS}"
+  if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
+    echo "[skip] train; expecting existing checkpoint at ${SFT_CHECKPOINT}"
+  else
+    torchrun --standalone --nproc_per_node="${TRAIN_NPROC_PER_NODE}" scripts/train.py \
+      --config "${SFT_CONFIG_PATH}"
+  fi
+  if [[ ! -d "${SFT_CHECKPOINT}" || ! -f "${SFT_CHECKPOINT}/config.json" ]]; then
+    echo "SFT checkpoint not found after training: ${SFT_CHECKPOINT}"
+    echo "Expected ${SFT_OUTPUT_DIR}/final. Check training logs and SFT_OUTPUT_DIR."
+    exit 1
+  fi
+}
 
 export_model() {
   local label="$1"
@@ -250,6 +337,7 @@ eval_engine() {
 }
 
 echo "NVIDIA ONNX edge eval"
+echo "  base decoder:     ${BASE_DECODER_MODEL}"
 echo "  dense SFT model:  ${SFT_CHECKPOINT}"
 echo "  2:4 model:        ${PRUNED_MODEL_DIR}"
 echo "  training data:    ${TRAINING_DATASET}"
@@ -257,9 +345,13 @@ echo "  benchmark data:   ${BENCHMARK_DATASET}"
 echo "  run root:         ${RUN_ROOT}"
 echo "  sparse TRT flag:  ${SPARSE_WEIGHTS_FOR_2OF4}"
 echo "  run INT8:         ${RUN_INT8}"
+echo "  SFT epochs:       ${SFT_EPOCHS}"
+echo "  train GPUs:       ${TRAIN_NPROC_PER_NODE}"
 echo "  training limit:   ${TRAINING_MAX_SAMPLES} (0 means full; full can be slow with no-cache EM@K)"
 echo "  benchmark limit:  ${BENCHMARK_MAX_SAMPLES} (0 means full)"
 echo
+
+train_sft
 
 if [[ "${SKIP_PRUNE:-0}" != "1" ]]; then
   echo "[prune] NVIDIA 2:4 checkpoint"
