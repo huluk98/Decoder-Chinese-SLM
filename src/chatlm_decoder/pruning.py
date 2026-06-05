@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import csv
+import inspect
 import json
 from typing import Any, Iterable
 
@@ -51,6 +52,34 @@ MLP_LINEAR_NAMES = (
 
 FULL_MODEL_SCOPE = "full_model"
 TRANSFORMER_LINEAR_SCOPE = "transformer_linears"
+
+
+def accepts_cache_position(model: torch.nn.Module) -> bool:
+    cached = getattr(model, "_scenic_accepts_cache_position", None)
+    if cached is not None:
+        return bool(cached)
+    try:
+        accepted = "cache_position" in inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):
+        accepted = False
+    setattr(model, "_scenic_accepts_cache_position", accepted)
+    return accepted
+
+
+def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    input_ids = kwargs.get("input_ids")
+    if (
+        input_ids is not None
+        and "cache_position" not in kwargs
+        and accepts_cache_position(model)
+        and getattr(input_ids, "ndim", 0) >= 1
+    ):
+        kwargs["cache_position"] = torch.arange(
+            input_ids.shape[-1],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+    return model(**kwargs)
 
 
 def _lower_name(name: str) -> str:
@@ -1198,7 +1227,12 @@ def collect_activation_scalers(
             if batch_index >= int(max_batches):
                 break
             batch = {key: value.to(device) for key, value in batch.items() if key in {"input_ids", "attention_mask", "labels"}}
-            model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False)
+            forward_causal_lm(
+                model,
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                use_cache=False,
+            )
 
     for hook in hooks:
         hook.remove()
@@ -1236,7 +1270,7 @@ def collect_gradient_scores(
         if batch_index >= int(max_batches):
             break
         batch = {key: value.to(device) for key, value in batch.items() if key in {"input_ids", "attention_mask", "labels"}}
-        outputs = model(**batch, use_cache=False)
+        outputs = forward_causal_lm(model, **batch, use_cache=False)
         outputs.loss.backward()
         for name, score in scores.items():
             if normalized_scope == FULL_MODEL_SCOPE:

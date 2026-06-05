@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import shutil
 import sys
@@ -55,6 +56,34 @@ def select_device() -> torch.device:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def accepts_cache_position(model: torch.nn.Module) -> bool:
+    cached = getattr(model, "_scenic_accepts_cache_position", None)
+    if cached is not None:
+        return bool(cached)
+    try:
+        accepted = "cache_position" in inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):
+        accepted = False
+    setattr(model, "_scenic_accepts_cache_position", accepted)
+    return accepted
+
+
+def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    input_ids = kwargs.get("input_ids")
+    if (
+        input_ids is not None
+        and "cache_position" not in kwargs
+        and accepts_cache_position(model)
+        and getattr(input_ids, "ndim", 0) >= 1
+    ):
+        kwargs["cache_position"] = torch.arange(
+            input_ids.shape[-1],
+            dtype=torch.long,
+            device=input_ids.device,
+        )
+    return model(**kwargs)
 
 
 def load_causal_lm(checkpoint: str, attn_implementation: str | None = None) -> torch.nn.Module:
@@ -273,7 +302,7 @@ def recovery_tune(
             for key, value in batch.items()
             if key in {"input_ids", "attention_mask", "labels"}
         }
-        outputs = model(**batch, use_cache=False)
+        outputs = forward_causal_lm(model, **batch, use_cache=False)
         outputs.loss.backward()
         if float(prune_config.get("max_grad_norm", 1.0)) > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(prune_config.get("max_grad_norm", 1.0)))

@@ -40,6 +40,35 @@ class TinyCausalLM(torch.nn.Module):
         return SimpleNamespace(logits=logits, loss=loss)
 
 
+class TinyCachePositionCausalLM(TinyCausalLM):
+    def __init__(self, logits: torch.Tensor) -> None:
+        super().__init__(logits)
+        self.cache_position_shape = None
+
+    def forward(self, input_ids, attention_mask=None, labels=None, use_cache=False, cache_position=None):  # noqa: ANN001
+        self.cache_position_shape = None if cache_position is None else tuple(cache_position.shape)
+        return super().forward(input_ids, attention_mask=attention_mask, labels=labels, use_cache=use_cache)
+
+
+def test_causal_lm_loss_passes_1d_cache_position_when_supported() -> None:
+    logits = torch.zeros((1, 4, 4), dtype=torch.float32)
+    labels = torch.tensor([[-100, 1, 2, 3]], dtype=torch.long)
+    input_ids = torch.tensor([[0, 1, 2, 3]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    model = TinyCachePositionCausalLM(logits)
+
+    sft.causal_lm_loss(
+        model,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels,
+        eos_token_id=3,
+        eos_loss_weight=1.0,
+    )
+
+    assert model.cache_position_shape == (input_ids.shape[-1],)
+
+
 def test_eos_loss_weight_upweights_only_supervised_eos_positions() -> None:
     logits = torch.tensor(
         [
