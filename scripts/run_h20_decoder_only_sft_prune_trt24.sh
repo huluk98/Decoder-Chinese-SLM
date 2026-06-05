@@ -36,7 +36,7 @@ Optional overrides:
   --env_help              print GPU/ONNX Runtime setup help and exit
 
 Useful environment toggles:
-  PYTHON=/path/to/python
+  PYTHON=/path/to/python     default: python
   TRUST_REMOTE_CODE=1
   SKIP_TRAIN=1 SKIP_EXPORT=1 SKIP_QUANTIZE=1 SKIP_LATENCY=1
   CALIB_SAMPLES=128
@@ -67,7 +67,8 @@ H20 ONNX GPU benchmark environment checklist:
 4. Verify CUDA and ONNX Runtime CUDA provider:
 
      python - <<'PY'
-     import torch, onnx, onnxruntime as ort
+     import sys, torch, onnx, onnxruntime as ort
+     print("python exe:", sys.executable)
      print("torch cuda:", torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())
      print("onnx:", onnx.__version__)
      print("ort:", ort.__version__, ort.get_available_providers())
@@ -209,7 +210,7 @@ if [[ -z "${BASE_MODEL}" ]]; then
   exit 2
 fi
 
-PYTHON_BIN="${PYTHON:-python3}"
+PYTHON_BIN="${PYTHON:-python}"
 TRAIN_JSONL="$(resolve_repo_path "${TRAIN_JSONL}")"
 IOT200_JSONL="$(resolve_repo_path "${IOT200_JSONL}")"
 OUTPUT_DIR="$(resolve_repo_path "${OUTPUT_DIR}")"
@@ -281,6 +282,11 @@ write_env_report() {
     if command -v nvcc >/dev/null 2>&1; then nvcc --version; else echo "nvcc not found"; fi
     echo
     echo "=== python ==="
+    if command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+      command -v "${PYTHON_BIN}"
+    else
+      echo "${PYTHON_BIN} not found on PATH"
+    fi
     "${PYTHON_BIN}" --version
     echo
     echo "=== CUDA visibility ==="
@@ -293,6 +299,7 @@ write_env_report() {
     echo "=== torch / ONNX / ONNX Runtime ==="
     "${PYTHON_BIN}" - <<'PY'
 import sys
+print("python executable:", sys.executable)
 print("python:", sys.version.replace("\n", " "))
 try:
     import torch
@@ -327,6 +334,7 @@ from pathlib import Path
 
 output = Path(sys.argv[1])
 report = {
+    "python_executable": sys.executable,
     "python_version": sys.version,
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES"),
@@ -376,6 +384,10 @@ output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encod
 if not report.get("torch_cuda_available"):
     raise SystemExit(
         "CUDA GPU is not available. Refusing to run H20 GPU latency benchmark.\n"
+        f"Python executable: {report.get('python_executable')}\n"
+        f"Torch version: {report.get('torch_version')}; torch CUDA: {report.get('torch_cuda_version')}\n"
+        "If scenic-ED works, run this script with the same interpreter, for example "
+        "`PYTHON=python bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --base_model ...`.\n"
         "Run on the H20 GPU machine/container and check `nvidia-smi`, scheduler GPU allocation, "
         "Docker --gpus all, and CUDA_VISIBLE_DEVICES."
     )
