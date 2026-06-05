@@ -8,10 +8,16 @@ cd "${PROJECT_ROOT}"
 
 usage() {
   cat <<'EOF'
-Run the H20 decoder-only SFT -> NVIDIA 2:4 -> ONNX -> TensorRT FP16 baseline.
+Run the H20 decoder-only SFT -> ONNX FP16/INT8 GPU latency comparison.
 
-Only --base_model is required. Dataset and output paths are baked in below and
+Only --base_model is required. Dataset and output paths are included below and
 can be overridden by CLI flags or environment variables when needed.
+
+This script intentionally does not use TensorRT, trtexec, or NVIDIA 2:4 sparse
+tactics. It compares:
+  - PyTorch FP16 CUDA forward latency
+  - ONNX Runtime CUDA FP16 forward latency
+  - ONNX Runtime CUDA INT8 forward latency, using QDQ quantization
 
 Usage:
   bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --base_model /PATH/TO/BASE_MODEL
@@ -19,66 +25,60 @@ Usage:
 Optional overrides:
   --train_jsonl PATH       default: data/scenic/SCENIC_full_training_dataset.json
   --iot200_jsonl PATH      default: data/benchmarks/iot_instruction_benchmark_200.json
-  --output_dir PATH        default: runs/h20_decoder_only_trt24
+  --output_dir PATH        default: runs/h20_decoder_only_onnx_int8_latency
   --gpus IDS              default: 0,1,2,3,4,5,6,7
   --epochs N              default: 5
   --seq_len N             default: 64
   --batch_size N          default: 16 per GPU for SFT
-  --eval_batch_size N     default: 16 per GPU for PyTorch EM eval
+  --eval_batch_size N     accepted for compatibility; latency uses batch size 1
   --warmup_iters N        default: 100
   --measure_iters N       default: 1000
-  --env_help              print H20/TensorRT environment setup help and exit
+  --env_help              print GPU/ONNX Runtime setup help and exit
 
 Useful environment toggles:
   PYTHON=/path/to/python
   TRUST_REMOTE_CODE=1
+  SKIP_TRAIN=1 SKIP_EXPORT=1 SKIP_QUANTIZE=1 SKIP_LATENCY=1
+  CALIB_SAMPLES=128
   PROMPT_FORMAT=raw|legacy|chat-template
-  COMPARISON_MODE=whitespace|normalized|command
-  SKIP_TRAIN=1 SKIP_PRUNE=1 SKIP_EXPORT=1 SKIP_BUILD=1 SKIP_EVAL=1 SKIP_LATENCY=1
-  RUN_INT8=1 INT8_CALIB_CACHE=/path/to/real.cache
 EOF
 }
 
 print_env_setup_help() {
   cat <<'EOF'
-H20 benchmark environment setup checklist:
+H20 ONNX GPU benchmark environment checklist:
 
-1. Run this on the H20/NVIDIA GPU machine, not on a CPU-only laptop/login shell.
-   First verify the driver can see GPUs:
+1. Run this on the H20/NVIDIA GPU machine or a GPU-enabled container:
 
      nvidia-smi
 
-2. Activate the Python env you will use for training:
+2. Activate the Python env you will use:
 
      conda activate chatlm-decoder
 
-3. Install/update the Python runtime packages:
+3. Install/update the required Python runtime packages:
 
-     python -m pip install --upgrade -r requirements.txt --extra-index-url https://pypi.nvidia.com
+     python -m pip install --upgrade -r requirements.txt
 
-   Or install only the TensorRT/ONNX additions:
+   Or install only the ONNX additions:
 
-     python -m pip install --upgrade "onnx>=1.16" "onnxruntime-gpu>=1.18" "cuda-python>=12.2" "tensorrt>=10.0" --extra-index-url https://pypi.nvidia.com
+     python -m pip install --upgrade "onnx>=1.16" "onnxruntime-gpu>=1.18"
 
-4. Make sure native TensorRT tools are on PATH. `trtexec` is not a normal pip
-   script; it comes from the NVIDIA TensorRT SDK/container. Verify:
-
-     trtexec --version
-
-5. Verify the final env:
+4. Verify CUDA and ONNX Runtime CUDA provider:
 
      python - <<'PY'
-     import torch, onnx, onnxruntime as ort, tensorrt as trt
-     import cuda.cudart
+     import torch, onnx, onnxruntime as ort
      print("torch cuda:", torch.version.cuda, torch.cuda.is_available(), torch.cuda.device_count())
      print("onnx:", onnx.__version__)
      print("ort:", ort.__version__, ort.get_available_providers())
-     print("trt:", trt.__version__)
      PY
 
-If torch.cuda.is_available() is false after this, fix the machine/container GPU
-visibility first: driver, CUDA container flags, scheduler GPU allocation, or
-CUDA_VISIBLE_DEVICES.
+If torch.cuda.is_available() is false, package installs will not fix it. Fix the
+GPU allocation/container first: driver visibility, Docker --gpus all, scheduler
+GPU request, or CUDA_VISIBLE_DEVICES.
+
+If CUDAExecutionProvider is missing from ONNX Runtime, install onnxruntime-gpu
+in the active env and make sure its CUDA/cuDNN requirements match the machine.
 EOF
 }
 
@@ -109,7 +109,7 @@ resolve_repo_path() {
 BASE_MODEL="${BASE_MODEL:-}"
 TRAIN_JSONL="${TRAIN_JSONL:-data/scenic/SCENIC_full_training_dataset.json}"
 IOT200_JSONL="${IOT200_JSONL:-data/benchmarks/iot_instruction_benchmark_200.json}"
-OUTPUT_DIR="${OUTPUT_DIR:-runs/h20_decoder_only_trt24}"
+OUTPUT_DIR="${OUTPUT_DIR:-runs/h20_decoder_only_onnx_int8_latency}"
 GPUS="${GPUS:-0,1,2,3,4,5,6,7}"
 EPOCHS="${EPOCHS:-5}"
 SEQ_LEN="${SEQ_LEN:-64}"
@@ -216,13 +216,9 @@ GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
 LEARNING_RATE="${LEARNING_RATE:-2.0e-5}"
 WARMUP_RATIO="${WARMUP_RATIO:-0.03}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
-WORKSPACE_MIB="${WORKSPACE_MIB:-4096}"
+CALIB_SAMPLES="${CALIB_SAMPLES:-128}"
 PROMPT_FORMAT="${PROMPT_FORMAT:-raw}"
-COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
-MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-0.5}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
-RUN_INT8="${RUN_INT8:-0}"
-INT8_CALIB_CACHE="${INT8_CALIB_CACHE:-}"
 
 export CUDA_VISIBLE_DEVICES="${GPUS}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
@@ -232,39 +228,24 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 
 DENSE_CKPT="${OUTPUT_DIR}/checkpoints/dense_sft_fp16"
 DENSE_TRAIN_DIR="${OUTPUT_DIR}/checkpoints/_dense_sft_training"
-PRUNED_CKPT="${OUTPUT_DIR}/checkpoints/nvidia_2_4_sft_fp16"
-DENSE_ONNX_DIR="${OUTPUT_DIR}/onnx/dense_sft_fp16"
-PRUNED_ONNX_DIR="${OUTPUT_DIR}/onnx/nvidia_2_4_sft_fp16"
-DENSE_ONNX="${DENSE_ONNX_DIR}/model.onnx"
-PRUNED_ONNX="${PRUNED_ONNX_DIR}/model.onnx"
-DENSE_ENGINE="${OUTPUT_DIR}/engines/dense_sft_fp16_seq64.plan"
-PRUNED_ENGINE="${OUTPUT_DIR}/engines/nvidia_2_4_sft_fp16_seq64.plan"
+ONNX_FP16_DIR="${OUTPUT_DIR}/onnx/dense_sft_fp16"
+ONNX_INT8_DIR="${OUTPUT_DIR}/onnx/dense_sft_int8"
+ONNX_FP16="${ONNX_FP16_DIR}/model_decoder_nocache.onnx"
+ONNX_INT8="${ONNX_INT8_DIR}/model.int8.onnx"
 
 mkdir -p \
+  "${OUTPUT_DIR}/checkpoints" \
   "${OUTPUT_DIR}/env" \
   "${OUTPUT_DIR}/logs" \
+  "${OUTPUT_DIR}/onnx" \
   "${OUTPUT_DIR}/reports" \
   "${OUTPUT_DIR}/results" \
-  "${OUTPUT_DIR}/generated_configs" \
-  "${OUTPUT_DIR}/engines"
+  "${OUTPUT_DIR}/generated_configs"
 
 TRUST_ARGS=()
 if [[ "${TRUST_REMOTE_CODE}" == "1" ]]; then
   TRUST_ARGS=(--trust-remote-code)
 fi
-
-SYSTEM_PROMPT_ARGS=()
-if [[ -n "${SYSTEM_PROMPT:-}" ]]; then
-  SYSTEM_PROMPT_ARGS=(--system-prompt "${SYSTEM_PROMPT}")
-fi
-
-run_logged() {
-  local log_path="$1"
-  shift
-  echo
-  echo "[$(date -Is)] $*" | tee -a "${log_path}"
-  "$@" 2>&1 | tee -a "${log_path}"
-}
 
 write_env_report() {
   local txt="${OUTPUT_DIR}/env/env_report.txt"
@@ -279,20 +260,9 @@ write_env_report() {
     echo "=== python ==="
     "${PYTHON_BIN}" --version
     echo
-    echo "=== torch / TensorRT / ONNX Runtime ==="
+    echo "=== torch / ONNX / ONNX Runtime ==="
     "${PYTHON_BIN}" - <<'PY'
-import json
-import shutil
-import subprocess
 import sys
-
-def module_version(name):
-    try:
-        module = __import__(name)
-        return getattr(module, "__version__", "unknown")
-    except Exception as exc:
-        return f"unavailable ({exc})"
-
 print("python:", sys.version.replace("\n", " "))
 try:
     import torch
@@ -305,38 +275,27 @@ try:
             print(f"torch.cuda.get_device_name({index}):", torch.cuda.get_device_name(index))
 except Exception as exc:
     print("torch import failed:", repr(exc))
-print("tensorrt:", module_version("tensorrt"))
+try:
+    import onnx
+    print("onnx:", onnx.__version__)
+except Exception as exc:
+    print("onnx import failed:", repr(exc))
 try:
     import onnxruntime as ort
     print("onnxruntime:", ort.__version__)
     print("onnxruntime providers:", ort.get_available_providers())
 except Exception as exc:
     print("onnxruntime import failed:", repr(exc))
-if shutil.which("trtexec"):
-    try:
-        print("trtexec:", subprocess.check_output(["trtexec", "--version"], text=True, stderr=subprocess.STDOUT).strip())
-    except Exception as exc:
-        print("trtexec --version failed:", repr(exc))
-else:
-    print("trtexec: not found")
 PY
-    echo
-    echo "=== trtexec --version ==="
-    if command -v trtexec >/dev/null 2>&1; then trtexec --version; else echo "trtexec not found"; fi
   } | tee "${txt}"
 
   "${PYTHON_BIN}" - "${json}" <<'PY'
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 output = Path(sys.argv[1])
-report = {
-    "python_version": sys.version,
-    "trtexec_path": shutil.which("trtexec"),
-}
+report = {"python_version": sys.version}
 try:
     import torch
     report["torch_version"] = torch.__version__
@@ -353,11 +312,11 @@ except Exception as exc:
     report["torch_cuda_device_names"] = []
 
 try:
-    import tensorrt as trt
-    report["tensorrt_version"] = getattr(trt, "__version__", "unknown")
+    import onnx
+    report["onnx_version"] = onnx.__version__
 except Exception as exc:
-    report["tensorrt_error"] = repr(exc)
-    report["tensorrt_version"] = None
+    report["onnx_error"] = repr(exc)
+    report["onnx_version"] = None
 
 try:
     import onnxruntime as ort
@@ -368,46 +327,29 @@ except Exception as exc:
     report["onnxruntime_version"] = None
     report["onnxruntime_available_providers"] = []
 
-if report["trtexec_path"]:
-    try:
-        report["trtexec_version"] = subprocess.check_output(
-            ["trtexec", "--version"],
-            text=True,
-            stderr=subprocess.STDOUT,
-        ).strip()
-    except Exception as exc:
-        report["trtexec_version_error"] = repr(exc)
-else:
-    report["trtexec_version"] = None
-
 missing = []
-if report.get("tensorrt_version") is None:
-    missing.append("tensorrt python module")
+if report.get("onnx_version") is None:
+    missing.append("onnx python module")
 if report.get("onnxruntime_version") is None:
     missing.append("onnxruntime-gpu python module")
-if not report.get("trtexec_path"):
-    missing.append("trtexec binary")
+elif "CUDAExecutionProvider" not in report.get("onnxruntime_available_providers", []):
+    missing.append("onnxruntime CUDAExecutionProvider")
 report["missing_runtime_requirements"] = missing
 
 output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 if not report.get("torch_cuda_available"):
     raise SystemExit(
-        "CUDA GPU is not available. Refusing to run H20 GPU benchmark.\n"
+        "CUDA GPU is not available. Refusing to run H20 GPU latency benchmark.\n"
         "Run on the H20 GPU machine/container and check `nvidia-smi`, scheduler GPU allocation, "
-        "and CUDA_VISIBLE_DEVICES. For install help: "
-        "bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --env-help"
+        "Docker --gpus all, and CUDA_VISIBLE_DEVICES."
     )
 if int(report.get("torch_cuda_device_count") or 0) < 1:
-    raise SystemExit(
-        "No visible CUDA devices. Check CUDA_VISIBLE_DEVICES/--gpus and scheduler/container GPU visibility. "
-        "For install help: bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --env-help"
-    )
+    raise SystemExit("No visible CUDA devices. Check CUDA_VISIBLE_DEVICES/--gpus.")
 if missing:
     raise SystemExit(
         "Missing runtime requirements: "
         + ", ".join(missing)
-        + ". Install Python deps with `python -m pip install --upgrade -r requirements.txt "
-        "--extra-index-url https://pypi.nvidia.com`; install TensorRT SDK/container for trtexec."
+        + ". Install with `python -m pip install --upgrade onnx onnxruntime-gpu` in the active env."
     )
 PY
 }
@@ -521,220 +463,24 @@ train_sft() {
   ensure_fp16_checkpoint "${DENSE_CKPT}"
 }
 
-write_prune_config() {
-  local path="${OUTPUT_DIR}/generated_configs/prune_nvidia_2_4_seq64.yaml"
-  cat > "${path}" <<EOF
-run:
-  seed: 42
-model:
-  block_size: ${SEQ_LEN}
-train:
-  batch_size: 2
-prune:
-  base_model: "${DENSE_CKPT}"
-  output_dir: "${PRUNED_CKPT}"
-  method: 2of4
-  sparsity: 0.5
-  scope: transformer_linears
-  sparsity_denominator: prunable
-  granularity: global
-  include_lm_head: false
-  attn_implementation: eager
-  calibration_data_path: "${TRAIN_JSONL}"
-  calibration_batches: 128
-  max_length: ${SEQ_LEN}
-  batch_size: 2
-  num_workers: 0
-  recovery_steps: 0
-  overwrite: true
-EOF
-  printf '%s\n' "${path}"
-}
-
-prune_nvidia_2_4() {
-  local config_path
-  config_path="$(write_prune_config)"
+export_onnx_fp16() {
   echo
-  echo "[prune] NVIDIA 2:4 structured pruning"
-  echo "  dense:  ${DENSE_CKPT}"
-  echo "  pruned: ${PRUNED_CKPT}"
-  if [[ "${SKIP_PRUNE:-0}" == "1" ]]; then
-    echo "[skip] prune; expecting existing checkpoint at ${PRUNED_CKPT}"
+  echo "[onnx] export dense SFT FP16"
+  if [[ "${SKIP_EXPORT:-0}" == "1" ]]; then
+    echo "[skip] export; expecting ${ONNX_FP16}"
     return
   fi
-  "${PYTHON_BIN}" scripts/prune.py \
-    --config "${config_path}" \
-    --method 2of4 \
-    --checkpoint "${DENSE_CKPT}" \
-    --output-dir "${PRUNED_CKPT}"
-  ensure_fp16_checkpoint "${PRUNED_CKPT}"
-}
-
-verify_2_4_sparsity() {
-  echo
-  echo "[verify] exact NVIDIA 2:4 sparsity report"
-  "${PYTHON_BIN}" - "${PRUNED_CKPT}" "${OUTPUT_DIR}/reports/sparsity_2_4_report.json" "${TRUST_REMOTE_CODE}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-import torch
-from transformers import AutoModelForCausalLM
-
-model_path = Path(sys.argv[1]).expanduser()
-output_path = Path(sys.argv[2]).expanduser()
-trust = sys.argv[3] == "1"
-model = AutoModelForCausalLM.from_pretrained(
-    str(model_path),
-    torch_dtype=torch.float16,
-    low_cpu_mem_usage=True,
-    trust_remote_code=trust,
-)
-
-per_layer = []
-total_checked_weights = 0
-total_blocks = 0
-exact_blocks = 0
-eligible_blocks = 0
-total_zero_count = 0
-non_compliant_layers = []
-
-for name, module in model.named_modules():
-    if not isinstance(module, torch.nn.Linear):
-        continue
-    weight = module.weight.detach().cpu()
-    if weight.ndim != 2:
-        continue
-    out_features, in_features = weight.shape
-    trim = (in_features // 4) * 4
-    trailing = int(out_features * (in_features - trim))
-    if trim == 0:
-        layer = {
-            "layer": name,
-            "shape": [int(out_features), int(in_features)],
-            "total_blocks": 0,
-            "exact_2_zero_blocks": 0,
-            "at_least_2_zero_blocks": 0,
-            "exact_2_zero_block_pct": 0.0,
-            "tensorrt_eligible_block_pct": 0.0,
-            "total_zero_count": int((weight == 0).sum().item()),
-            "total_sparsity_pct": float((weight == 0).float().mean().item() * 100.0) if weight.numel() else 0.0,
-            "trailing_weights_not_checked": trailing,
-            "compliant": False,
-        }
-        per_layer.append(layer)
-        non_compliant_layers.append(name)
-        continue
-    grouped = weight[:, :trim].reshape(out_features, trim // 4, 4)
-    zero_counts = (grouped == 0).sum(dim=2)
-    blocks = int(zero_counts.numel())
-    exact = int((zero_counts == 2).sum().item())
-    eligible = int((zero_counts >= 2).sum().item())
-    zeros = int((weight == 0).sum().item())
-    checked = int(out_features * trim)
-    compliant = exact == blocks and trailing == 0
-    layer = {
-        "layer": name,
-        "shape": [int(out_features), int(in_features)],
-        "checked_weights": checked,
-        "total_blocks": blocks,
-        "exact_2_zero_blocks": exact,
-        "at_least_2_zero_blocks": eligible,
-        "exact_2_zero_block_pct": 100.0 * exact / float(blocks or 1),
-        "tensorrt_eligible_block_pct": 100.0 * eligible / float(blocks or 1),
-        "total_zero_count": zeros,
-        "total_sparsity_pct": 100.0 * zeros / float(weight.numel() or 1),
-        "trailing_weights_not_checked": trailing,
-        "compliant": compliant,
-    }
-    per_layer.append(layer)
-    total_checked_weights += checked
-    total_blocks += blocks
-    exact_blocks += exact
-    eligible_blocks += eligible
-    total_zero_count += zeros
-    if not compliant:
-        non_compliant_layers.append(name)
-
-report = {
-    "checkpoint": str(model_path),
-    "check": "contiguous groups of 4 along Linear dim=1 / input-reduction K dimension",
-    "total_checked_weights": total_checked_weights,
-    "total_blocks": total_blocks,
-    "exact_2_zero_blocks": exact_blocks,
-    "at_least_2_zero_blocks": eligible_blocks,
-    "exact_2_zero_block_pct": 100.0 * exact_blocks / float(total_blocks or 1),
-    "tensorrt_eligible_block_pct": 100.0 * eligible_blocks / float(total_blocks or 1),
-    "total_zero_count": total_zero_count,
-    "total_sparsity_pct": 100.0 * total_zero_count / float(total_checked_weights or 1),
-    "per_layer": per_layer,
-    "non_compliant_layers": non_compliant_layers,
-}
-output_path.parent.mkdir(parents=True, exist_ok=True)
-output_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-if non_compliant_layers:
-    raise SystemExit(f"Found non-compliant Linear layers: {non_compliant_layers[:10]}")
-PY
-}
-
-run_pytorch_eval() {
-  local variant="$1"
-  local model_path="$2"
-  local dataset_name="$3"
-  local dataset_path="$4"
-  local out_root="${OUTPUT_DIR}/eval/${variant}"
-  local run_dir="${out_root}/${dataset_name}_run"
-  local pred_out="${out_root}/${dataset_name}_predictions.jsonl"
-  local metrics_out="${out_root}/${dataset_name}_metrics.json"
-  mkdir -p "${out_root}"
-  rm -rf "${run_dir}"
-  echo
-  echo "[eval:pytorch] ${variant} on ${dataset_name} with ${NPROC_PER_NODE} GPU shard(s)"
-  CUDA_VISIBLE_DEVICES="${GPUS}" torchrun --standalone --nproc_per_node="${NPROC_PER_NODE}" scripts/eval_prompt_response.py \
-    --model-path "${model_path}" \
-    --dataset-file "${dataset_path}" \
-    --output-dir "${run_dir}" \
-    --no-unique-output-dir \
-    --device auto \
+  "${PYTHON_BIN}" scripts/export_decoder_onnx.py \
+    --model-path "${DENSE_CKPT}" \
+    --onnx-dir "${ONNX_FP16_DIR}" \
     --dtype fp16 \
-    --batch-size "${EVAL_BATCH_SIZE}" \
-    --max-length "${SEQ_LEN}" \
-    --max-new-tokens "${MAX_NEW_TOKENS}" \
-    --exact-match-top-k 5 \
-    --comparison-mode "${COMPARISON_MODE}" \
-    --max-new-token-hit-rate-threshold "${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD}" \
-    --no-fail-on-leakage
-  cp "${run_dir}/prompt_response_eval_predictions.jsonl" "${pred_out}"
-  if [[ -f "${run_dir}/prompt_response_eval_summary.json" ]]; then
-    cp "${run_dir}/prompt_response_eval_summary.json" "${metrics_out}"
-  else
-    cp "${run_dir}/metrics.json" "${metrics_out}"
-  fi
-}
-
-export_onnx_model() {
-  local label="$1"
-  local model_path="$2"
-  local onnx_dir="$3"
-  local model_onnx="$4"
-  echo
-  echo "[onnx] export ${label}"
-  if [[ "${SKIP_EXPORT:-0}" != "1" ]]; then
-    "${PYTHON_BIN}" scripts/export_decoder_onnx.py \
-      --model-path "${model_path}" \
-      --onnx-dir "${onnx_dir}" \
-      --dtype fp16 \
-      --opset 18 \
-      --seq-len "${SEQ_LEN}" \
-      --batch-size 1 \
-      --attn-implementation eager \
-      --no-export-cache \
-      "${TRUST_ARGS[@]}" \
-      --overwrite
-    cp "${onnx_dir}/model_decoder_nocache.onnx" "${model_onnx}"
-  else
-    echo "[skip] export; expecting ${model_onnx}"
-  fi
+    --opset 18 \
+    --seq-len "${SEQ_LEN}" \
+    --batch-size 1 \
+    --attn-implementation eager \
+    --no-export-cache \
+    "${TRUST_ARGS[@]}" \
+    --overwrite
 }
 
 inspect_onnx() {
@@ -757,8 +503,7 @@ dtype_name = onnx.TensorProto.DataType.Name
 
 def shape_of(value):
     dims = []
-    shape = value.type.tensor_type.shape
-    for dim in shape.dim:
+    for dim in value.type.tensor_type.shape.dim:
         if dim.dim_param:
             dims.append(dim.dim_param)
         elif dim.HasField("dim_value"):
@@ -767,167 +512,231 @@ def shape_of(value):
             dims.append("?")
     return dims
 
-input_shapes = {value.name: shape_of(value) for value in model.graph.input}
-output_shapes = {value.name: shape_of(value) for value in model.graph.output}
-input_dtypes = {value.name: dtype_name(value.type.tensor_type.elem_type) for value in model.graph.input}
-output_dtypes = {value.name: dtype_name(value.type.tensor_type.elem_type) for value in model.graph.output}
 initializer_dtypes = Counter(dtype_name(tensor.data_type) for tensor in model.graph.initializer)
-floating_initializer_total = sum(count for dtype, count in initializer_dtypes.items() if dtype in {"FLOAT", "FLOAT16", "BFLOAT16", "DOUBLE"})
-floating_initializer_fp16 = initializer_dtypes.get("FLOAT16", 0)
-dynamic_axes = {
-    name: [index for index, dim in enumerate(shape) if isinstance(dim, str) or dim == "?"]
-    for name, shape in {**input_shapes, **output_shapes}.items()
-}
-dynamic_axes = {name: axes for name, axes in dynamic_axes.items() if axes}
+floating_initializer_total = sum(
+    count for dtype, count in initializer_dtypes.items()
+    if dtype in {"FLOAT", "FLOAT16", "BFLOAT16", "DOUBLE"}
+)
 report = {
     "onnx_path": str(onnx_path),
     "exists": onnx_path.exists(),
     "input_names": [value.name for value in model.graph.input],
     "output_names": [value.name for value in model.graph.output],
-    "input_shapes": input_shapes,
-    "output_shapes": output_shapes,
-    "input_dtypes": input_dtypes,
-    "output_dtypes": output_dtypes,
-    "dynamic_axes": dynamic_axes,
+    "input_shapes": {value.name: shape_of(value) for value in model.graph.input},
+    "output_shapes": {value.name: shape_of(value) for value in model.graph.output},
+    "input_dtypes": {value.name: dtype_name(value.type.tensor_type.elem_type) for value in model.graph.input},
+    "output_dtypes": {value.name: dtype_name(value.type.tensor_type.elem_type) for value in model.graph.output},
     "initializer_dtypes": dict(initializer_dtypes),
     "floating_initializer_total": int(floating_initializer_total),
-    "floating_initializer_fp16": int(floating_initializer_fp16),
-    "weights_are_fp16": bool(floating_initializer_total and floating_initializer_fp16 == floating_initializer_total),
+    "floating_initializer_fp16": int(initializer_dtypes.get("FLOAT16", 0)),
+    "weights_are_fp16": bool(
+        floating_initializer_total and initializer_dtypes.get("FLOAT16", 0) == floating_initializer_total
+    ),
     "onnx_model_size_mb": onnx_path.stat().st_size / 1024**2,
 }
 report_path.parent.mkdir(parents=True, exist_ok=True)
 report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-if not report["weights_are_fp16"]:
-    print("[warning] Not all floating ONNX initializers are FLOAT16. See", report_path)
 PY
 }
 
-shape_arg_for_trtexec() {
-  local onnx_path="$1"
-  "${PYTHON_BIN}" - "${onnx_path}" "${SEQ_LEN}" <<'PY'
-import sys
-from pathlib import Path
-import onnx
-
-onnx_path = Path(sys.argv[1]).expanduser()
-seq_len = int(sys.argv[2])
-model = onnx.load(str(onnx_path), load_external_data=False)
-specs = []
-for value in model.graph.input:
-    name = value.name
-    dims = value.type.tensor_type.shape.dim
-    rank = len(dims)
-    if rank == 2:
-        specs.append(f"{name}:1x{seq_len}")
-    else:
-        shape = []
-        for index, dim in enumerate(dims):
-            if index == 0:
-                shape.append("1")
-            elif dim.HasField("dim_value") and int(dim.dim_value) > 0:
-                shape.append(str(int(dim.dim_value)))
-            else:
-                shape.append(str(seq_len if index == 1 else 1))
-        specs.append(f"{name}:{'x'.join(shape)}")
-print("--shapes=" + ",".join(specs))
-PY
-}
-
-build_trt_engine() {
-  local label="$1"
-  local onnx_path="$2"
-  local engine_path="$3"
-  local sparsity_mode="$4"
-  local log_path="$5"
-  mkdir -p "$(dirname "${engine_path}")"
-  rm -f "${engine_path}"
+quantize_onnx_int8() {
   echo
-  echo "[trt] build ${label} (${sparsity_mode})"
-  if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
-    echo "[skip] build; expecting ${engine_path}"
+  echo "[onnx] quantize dense SFT ONNX to INT8 QDQ"
+  if [[ "${SKIP_QUANTIZE:-0}" == "1" ]]; then
+    echo "[skip] quantize; expecting ${ONNX_INT8}"
     return
   fi
-  if command -v trtexec >/dev/null 2>&1; then
-    local shape_arg
-    shape_arg="$(shape_arg_for_trtexec "${onnx_path}")"
-    trtexec \
-      --onnx="${onnx_path}" \
-      --saveEngine="${engine_path}" \
-      --fp16 \
-      --sparsity="${sparsity_mode}" \
-      "${shape_arg}" \
-      --memPoolSize="workspace:${WORKSPACE_MIB}" \
-      --verbose \
-      --profilingVerbosity=detailed \
-      2>&1 | tee "${log_path}"
-  else
-    echo "[warning] trtexec not found; falling back to scripts/build_trt_engines.py" | tee "${log_path}"
-    local tmp_dir="${OUTPUT_DIR}/engines/_${label}_python_build"
-    local sparse_args=()
-    if [[ "${sparsity_mode}" == "enable" ]]; then
-      sparse_args=(--sparse-weights)
-    fi
-    "${PYTHON_BIN}" scripts/build_trt_engines.py \
-      --onnx "${onnx_path}" \
-      --output-dir "${tmp_dir}" \
-      --precision fp16 \
-      --model-path "${DENSE_CKPT}" \
-      --min_seq_len "${SEQ_LEN}" \
-      --opt_seq_len "${SEQ_LEN}" \
-      --max_seq_len "${SEQ_LEN}" \
-      --batch_size 1 \
-      --workspace-gb "$(( WORKSPACE_MIB / 1024 ))" \
-      "${sparse_args[@]}" \
-      "${TRUST_ARGS[@]}" \
-      --overwrite \
-      2>&1 | tee -a "${log_path}"
-    cp "${tmp_dir}/model_fp16.engine" "${engine_path}"
-  fi
-  if [[ ! -f "${engine_path}" ]]; then
-    echo "TensorRT engine was not created: ${engine_path}" >&2
-    exit 1
-  fi
-}
-
-parse_sparse_tactics_log() {
-  "${PYTHON_BIN}" - "${OUTPUT_DIR}/logs/build_nvidia_2_4_sparse_fp16.log" "${OUTPUT_DIR}/reports/trt_sparse_tactics_report.json" <<'PY'
+  mkdir -p "${ONNX_INT8_DIR}"
+  "${PYTHON_BIN}" - \
+    "${ONNX_FP16}" \
+    "${ONNX_INT8}" \
+    "${DENSE_CKPT}" \
+    "${TRAIN_JSONL}" \
+    "${SEQ_LEN}" \
+    "${CALIB_SAMPLES}" \
+    "${PROMPT_FORMAT}" \
+    "${TRUST_REMOTE_CODE}" \
+    "${OUTPUT_DIR}/reports/onnx_int8_quantization_report.json" <<'PY'
+import csv
 import json
-import re
 import sys
 from pathlib import Path
 
-log_path = Path(sys.argv[1]).expanduser()
-report_path = Path(sys.argv[2]).expanduser()
-text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-lines = [line for line in text.splitlines() if re.search(r"spars|sparse tactic|eligible|chose", line, re.I)]
-eligible = any(re.search(r"eligible.*sparse|sparse.*eligible", line, re.I) for line in lines)
-selected = any(re.search(r"(chose|selected|using).{0,80}sparse", line, re.I) for line in lines)
-if any(re.search(r"0\s+sparse\s+tactics|sparse tactics:\s*0", line, re.I) for line in lines):
-    selected = False
+import numpy as np
+import onnx
+from onnxruntime.quantization import CalibrationDataReader, QuantFormat, QuantType, quantize_dynamic, quantize_static
+from transformers import AutoTokenizer
+
+input_path = Path(sys.argv[1]).expanduser()
+output_path = Path(sys.argv[2]).expanduser()
+model_path = Path(sys.argv[3]).expanduser()
+calib_path = Path(sys.argv[4]).expanduser()
+seq_len = int(sys.argv[5])
+calib_samples = int(sys.argv[6])
+prompt_format = sys.argv[7]
+trust = sys.argv[8] == "1"
+report_path = Path(sys.argv[9]).expanduser()
+
+model = onnx.load(str(input_path), load_external_data=False)
+input_infos = []
+dtype_name = onnx.TensorProto.DataType.Name
+for value in model.graph.input:
+    dtype = dtype_name(value.type.tensor_type.elem_type)
+    input_infos.append({"name": value.name, "dtype": dtype})
+
+def read_records(path):
+    suffix = path.suffix.lower()
+    if suffix == ".jsonl":
+        rows = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    rows.append(json.loads(line))
+        return rows
+    if suffix == ".json":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("data", "records", "items", "examples", "train", "validation", "test"):
+                if isinstance(payload.get(key), list):
+                    return payload[key]
+            return [payload]
+    if suffix == ".csv":
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+    if suffix == ".txt":
+        return [{"prompt": line.strip()} for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    raise ValueError(f"Unsupported calibration data extension: {path.suffix}")
+
+def clean(value):
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value).strip()
+
+def prompt_from_record(record):
+    for key in ("prompt", "instruction", "input", "question", "query", "text", "command"):
+        text = clean(record.get(key))
+        if text:
+            return text
+    messages = record.get("messages") or record.get("conversations")
+    if isinstance(messages, list):
+        parts = []
+        for turn in messages:
+            if not isinstance(turn, dict):
+                continue
+            role = clean(turn.get("role") or turn.get("from") or turn.get("speaker")).lower()
+            content = clean(turn.get("content") or turn.get("value") or turn.get("text"))
+            if role in {"user", "human", "instruction", "prompt"} and content:
+                parts.append(content)
+        if parts:
+            return "\n".join(parts)
+    return ""
+
+def apply_format(tokenizer, prompt):
+    if prompt_format == "legacy":
+        return f"<|user|>\n{prompt}\n<|assistant|>\n"
+    if prompt_format == "chat-template":
+        return str(tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False,
+            add_generation_prompt=True,
+        ))
+    return prompt
+
+tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=trust)
+if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+records = read_records(calib_path)
+prompts = [prompt_from_record(record) for record in records]
+prompts = [prompt for prompt in prompts if prompt][:calib_samples]
+if not prompts:
+    fallback = getattr(tokenizer, "bos_token", None) or getattr(tokenizer, "eos_token", None) or "hello"
+    prompts = [fallback]
+
+class Reader(CalibrationDataReader):
+    def __init__(self):
+        self.items = []
+        for prompt in prompts:
+            formatted = apply_format(tokenizer, prompt)
+            encoded = tokenizer(
+                formatted,
+                return_tensors="np",
+                truncation=True,
+                padding="max_length",
+                max_length=seq_len,
+            )
+            feed = {}
+            for info in input_infos:
+                name = info["name"]
+                dtype = np.int64 if info["dtype"] == "INT64" else np.int32
+                if name in encoded:
+                    feed[name] = np.ascontiguousarray(encoded[name].astype(dtype))
+                elif name == "attention_mask":
+                    feed[name] = np.ascontiguousarray(encoded["attention_mask"].astype(dtype))
+                else:
+                    feed[name] = np.ones((1, seq_len), dtype=dtype)
+            self.items.append(feed)
+        self.index = 0
+
+    def get_next(self):
+        if self.index >= len(self.items):
+            return None
+        item = self.items[self.index]
+        self.index += 1
+        return item
+
+output_path.parent.mkdir(parents=True, exist_ok=True)
 report = {
-    "log_path": str(log_path),
-    "sparse_tactics_eligible": bool(eligible),
-    "sparse_tactics_selected": bool(selected),
-    "evidence_lines": lines[:200],
+    "input_onnx": str(input_path),
+    "output_onnx": str(output_path),
+    "calibration_file": str(calib_path),
+    "calibration_samples": len(prompts),
+    "quantization": "static_qdq_int8",
 }
+
+try:
+    quantize_static(
+        str(input_path),
+        str(output_path),
+        Reader(),
+        quant_format=QuantFormat.QDQ,
+        activation_type=QuantType.QUInt8,
+        weight_type=QuantType.QInt8,
+        per_channel=True,
+        op_types_to_quantize=["MatMul", "Gemm"],
+        use_external_data_format=True,
+    )
+except TypeError:
+    quantize_static(
+        str(input_path),
+        str(output_path),
+        Reader(),
+        quant_format=QuantFormat.QDQ,
+        activation_type=QuantType.QUInt8,
+        weight_type=QuantType.QInt8,
+        per_channel=True,
+        op_types_to_quantize=["MatMul", "Gemm"],
+    )
+except Exception as exc:
+    report["static_qdq_error"] = repr(exc)
+    report["quantization"] = "dynamic_weight_int8_fallback"
+    quantize_dynamic(
+        str(input_path),
+        str(output_path),
+        weight_type=QuantType.QInt8,
+        op_types_to_quantize=["MatMul", "Gemm"],
+        use_external_data_format=True,
+    )
+
+report["output_exists"] = output_path.exists()
+report["output_size_mb"] = output_path.stat().st_size / 1024**2 if output_path.exists() else None
 report_path.parent.mkdir(parents=True, exist_ok=True)
 report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-PY
-}
-
-write_unavailable_latency() {
-  local path="$1"
-  local runtime="$2"
-  local reason="$3"
-  "${PYTHON_BIN}" - "${path}" "${runtime}" "${reason}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1]).expanduser()
-payload = {"available": False, "runtime": sys.argv[2], "error": sys.argv[3]}
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 }
 
@@ -936,14 +745,9 @@ benchmark_runtime() {
 import argparse
 import json
 import math
-import os
 import statistics
-import sys
 import time
 from pathlib import Path
-
-PROJECT_ROOT = Path.cwd()
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 def percentile(values, q):
     if not values:
@@ -958,7 +762,7 @@ def percentile(values, q):
         return ordered[int(pos)]
     return ordered[lower] * (upper - pos) + ordered[upper] * (pos - lower)
 
-def common_stats(latencies):
+def stats(latencies):
     total = sum(latencies) / 1000.0
     return {
         "mean_latency_ms": statistics.mean(latencies) if latencies else None,
@@ -975,16 +779,12 @@ def file_mb(path):
     return p.stat().st_size / 1024**2 if p.exists() else None
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--runtime", required=True, choices=["pytorch", "onnx", "trt"])
+parser.add_argument("--runtime", required=True, choices=["pytorch", "onnx"])
 parser.add_argument("--model-path", default=None)
 parser.add_argument("--onnx-path", default=None)
-parser.add_argument("--engine-path", default=None)
-parser.add_argument("--providers", default="")
 parser.add_argument("--output-json", required=True)
 parser.add_argument("--label", required=True)
-parser.add_argument("--architecture", default="Decoder-only")
-parser.add_argument("--precision", default="FP16")
-parser.add_argument("--sparsity", default="Dense")
+parser.add_argument("--precision", required=True)
 parser.add_argument("--seq-len", type=int, default=64)
 parser.add_argument("--batch-size", type=int, default=1)
 parser.add_argument("--warmup-iters", type=int, default=100)
@@ -995,17 +795,13 @@ args = parser.parse_args()
 result = {
     "available": False,
     "label": args.label,
-    "architecture": args.architecture,
     "runtime": args.runtime,
     "precision": args.precision,
-    "sparsity": args.sparsity,
     "seq_len": int(args.seq_len),
     "batch_size": int(args.batch_size),
     "model_path": args.model_path,
     "onnx_path": args.onnx_path,
-    "engine_path": args.engine_path,
     "onnx_size_mb": file_mb(args.onnx_path),
-    "engine_size_mb": file_mb(args.engine_path),
 }
 
 try:
@@ -1039,7 +835,7 @@ try:
                 model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
                 torch.cuda.synchronize()
                 latencies.append((time.perf_counter() - start) * 1000.0)
-        result.update(common_stats(latencies))
+        result.update(stats(latencies))
         result.update({
             "available": True,
             "provider": "torch.cuda",
@@ -1053,12 +849,15 @@ try:
         import numpy as np
         import onnxruntime as ort
 
-        providers = [part for part in args.providers.split(",") if part]
         available = ort.get_available_providers()
-        missing = [provider for provider in providers if provider not in available]
-        if missing:
-            raise RuntimeError(f"Requested ORT providers unavailable: {missing}; available={available}")
-        session = ort.InferenceSession(args.onnx_path, providers=providers)
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError(f"CUDAExecutionProvider unavailable; providers={available}")
+        so = ort.SessionOptions()
+        try:
+            so.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
+        except Exception:
+            pass
+        session = ort.InferenceSession(str(args.onnx_path), sess_options=so, providers=["CUDAExecutionProvider"])
         feed = {}
         for item in session.get_inputs():
             dtype = np.int64 if "int64" in item.type else np.int32
@@ -1080,44 +879,13 @@ try:
             start = time.perf_counter()
             session.run(None, feed)
             latencies.append((time.perf_counter() - start) * 1000.0)
-        result.update(common_stats(latencies))
+        result.update(stats(latencies))
         result.update({
             "available": True,
             "provider": ",".join(session.get_providers()),
             "onnxruntime_available_providers": available,
             "peak_gpu_memory_mb": None,
         })
-
-    elif args.runtime == "trt":
-        import numpy as np
-        import tensorrt as trt
-        from trt_edge_common import TensorRTEngineRunner
-
-        runner = TensorRTEngineRunner(args.engine_path)
-        try:
-            feed = {}
-            for name in runner.input_names:
-                feed[name] = np.ones((args.batch_size, args.seq_len), dtype=np.int32)
-            for _ in range(args.warmup_iters):
-                runner.infer(feed)
-            free_start, total_memory = runner.cuda.mem_info()
-            min_free = free_start
-            latencies = []
-            for _ in range(args.measure_iters):
-                start = time.perf_counter()
-                runner.infer(feed)
-                latencies.append((time.perf_counter() - start) * 1000.0)
-                free_now, _ = runner.cuda.mem_info()
-                min_free = min(min_free, free_now)
-            result.update(common_stats(latencies))
-            result.update({
-                "available": True,
-                "provider": "native TensorRT",
-                "tensorrt_version": getattr(trt, "__version__", "unknown"),
-                "peak_gpu_memory_mb": (total_memory - min_free) / 1024**2 if total_memory else None,
-            })
-        finally:
-            runner.close()
 
 except Exception as exc:
     result["error"] = repr(exc)
@@ -1131,7 +899,7 @@ PY
 
 run_latency_benchmarks() {
   echo
-  echo "[latency] batch-1 seq-${SEQ_LEN} single-GPU runtime benchmarks on CUDA_VISIBLE_DEVICES=${LATENCY_GPU}"
+  echo "[latency] batch-1 seq-${SEQ_LEN} single-GPU benchmarks on CUDA_VISIBLE_DEVICES=${LATENCY_GPU}"
   if [[ "${SKIP_LATENCY:-0}" == "1" ]]; then
     echo "[skip] latency"
     return
@@ -1140,10 +908,9 @@ run_latency_benchmarks() {
   benchmark_runtime \
     --runtime pytorch \
     --model-path "${DENSE_CKPT}" \
-    --output-json "${OUTPUT_DIR}/results/latency_dense_pytorch_fp16.json" \
-    --label "dense_sft_fp16_pytorch" \
+    --output-json "${OUTPUT_DIR}/results/latency_pytorch_fp16.json" \
+    --label "pytorch_fp16_cuda" \
     --precision FP16 \
-    --sparsity Dense \
     --seq-len "${SEQ_LEN}" \
     --batch-size 1 \
     --warmup-iters "${WARMUP_ITERS}" \
@@ -1151,156 +918,26 @@ run_latency_benchmarks() {
     "${TRUST_ARGS[@]}"
 
   benchmark_runtime \
-    --runtime pytorch \
-    --model-path "${PRUNED_CKPT}" \
-    --output-json "${OUTPUT_DIR}/results/latency_nvidia_2_4_pytorch_fp16.json" \
-    --label "nvidia_2_4_sft_fp16_pytorch" \
+    --runtime onnx \
+    --onnx-path "${ONNX_FP16}" \
+    --output-json "${OUTPUT_DIR}/results/latency_onnxruntime_cuda_fp16.json" \
+    --label "onnxruntime_cuda_fp16" \
     --precision FP16 \
-    --sparsity "NVIDIA 2:4" \
-    --seq-len "${SEQ_LEN}" \
-    --batch-size 1 \
-    --warmup-iters "${WARMUP_ITERS}" \
-    --measure-iters "${MEASURE_ITERS}" \
-    "${TRUST_ARGS[@]}"
-
-  if "${PYTHON_BIN}" - <<'PY'
-import onnxruntime as ort
-raise SystemExit(0 if "CUDAExecutionProvider" in ort.get_available_providers() else 1)
-PY
-  then
-    benchmark_runtime \
-      --runtime onnx \
-      --onnx-path "${DENSE_ONNX}" \
-      --providers CUDAExecutionProvider \
-      --output-json "${OUTPUT_DIR}/results/latency_dense_ort_cuda_fp16.json" \
-      --label "dense_sft_fp16_onnxruntime_cuda" \
-      --precision FP16 \
-      --sparsity Dense \
-      --seq-len "${SEQ_LEN}" \
-      --batch-size 1 \
-      --warmup-iters "${WARMUP_ITERS}" \
-      --measure-iters "${MEASURE_ITERS}"
-  else
-    write_unavailable_latency "${OUTPUT_DIR}/results/latency_dense_ort_cuda_fp16.json" "ONNX Runtime CUDA" "CUDAExecutionProvider is unavailable; CPU ONNX is not used for GPU speedup claims."
-  fi
-
-  if "${PYTHON_BIN}" - <<'PY'
-import onnxruntime as ort
-raise SystemExit(0 if "TensorrtExecutionProvider" in ort.get_available_providers() else 1)
-PY
-  then
-    benchmark_runtime \
-      --runtime onnx \
-      --onnx-path "${DENSE_ONNX}" \
-      --providers TensorrtExecutionProvider,CUDAExecutionProvider \
-      --output-json "${OUTPUT_DIR}/results/latency_dense_ort_trt_fp16.json" \
-      --label "dense_sft_fp16_onnxruntime_tensorrt" \
-      --precision FP16 \
-      --sparsity Dense \
-      --seq-len "${SEQ_LEN}" \
-      --batch-size 1 \
-      --warmup-iters "${WARMUP_ITERS}" \
-      --measure-iters "${MEASURE_ITERS}"
-  else
-    write_unavailable_latency "${OUTPUT_DIR}/results/latency_dense_ort_trt_fp16.json" "ONNX Runtime TensorRT EP" "TensorrtExecutionProvider is unavailable; native TensorRT path is used."
-  fi
-
-  benchmark_runtime \
-    --runtime trt \
-    --engine-path "${DENSE_ENGINE}" \
-    --onnx-path "${DENSE_ONNX}" \
-    --output-json "${OUTPUT_DIR}/results/latency_dense_native_trt_fp16.json" \
-    --label "dense_sft_fp16_native_tensorrt" \
-    --precision FP16 \
-    --sparsity Dense \
     --seq-len "${SEQ_LEN}" \
     --batch-size 1 \
     --warmup-iters "${WARMUP_ITERS}" \
     --measure-iters "${MEASURE_ITERS}"
 
   benchmark_runtime \
-    --runtime trt \
-    --engine-path "${PRUNED_ENGINE}" \
-    --onnx-path "${PRUNED_ONNX}" \
-    --output-json "${OUTPUT_DIR}/results/latency_nvidia_2_4_native_trt_fp16.json" \
-    --label "nvidia_2_4_sft_fp16_native_tensorrt" \
-    --precision FP16 \
-    --sparsity "NVIDIA 2:4" \
+    --runtime onnx \
+    --onnx-path "${ONNX_INT8}" \
+    --output-json "${OUTPUT_DIR}/results/latency_onnxruntime_cuda_int8.json" \
+    --label "onnxruntime_cuda_int8" \
+    --precision INT8 \
     --seq-len "${SEQ_LEN}" \
     --batch-size 1 \
     --warmup-iters "${WARMUP_ITERS}" \
     --measure-iters "${MEASURE_ITERS}"
-}
-
-run_trt_eval() {
-  local variant="$1"
-  local model_path="$2"
-  local engine_path="$3"
-  local onnx_path="$4"
-  local dataset_name="$5"
-  local dataset_path="$6"
-  local out_dir="${OUTPUT_DIR}/eval_trt/${variant}/${dataset_name}"
-  echo
-  echo "[eval:trt] ${variant} on ${dataset_name}"
-  CUDA_VISIBLE_DEVICES="${LATENCY_GPU}" "${PYTHON_BIN}" scripts/eval_trt_prompt_response.py \
-    --engine "${engine_path}" \
-    --model-path "${model_path}" \
-    --dataset "${dataset_path}" \
-    --output-dir "${out_dir}" \
-    --precision fp16 \
-    --variant "${variant}" \
-    --runtime "native TensorRT" \
-    --onnx-path "${onnx_path}" \
-    --batch-size 1 \
-    --max-new-tokens "${MAX_NEW_TOKENS}" \
-    --max-seq-len "${SEQ_LEN}" \
-    --exact-match-top-k 5 \
-    --comparison-mode "${COMPARISON_MODE}" \
-    --prompt-format "${PROMPT_FORMAT}" \
-    "${SYSTEM_PROMPT_ARGS[@]}" \
-    "${TRUST_ARGS[@]}" \
-    --overwrite
-}
-
-write_int8_status() {
-  if [[ "${RUN_INT8}" != "1" ]]; then
-    "${PYTHON_BIN}" - "${OUTPUT_DIR}/reports/int8_status.json" <<'PY'
-import json, sys
-from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
-  "int8_enabled": False,
-  "status": "skipped",
-  "reason": "RUN_INT8 is not set. No INT8 rows are included."
-}, indent=2) + "\n")
-PY
-    return
-  fi
-
-  if [[ -z "${INT8_CALIB_CACHE}" || ! -f "${INT8_CALIB_CACHE}" ]]; then
-    "${PYTHON_BIN}" - "${OUTPUT_DIR}/reports/int8_status.json" <<'PY'
-import json, os, sys
-from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
-  "int8_enabled": True,
-  "status": "skipped",
-  "reason": "RUN_INT8=1 but INT8_CALIB_CACHE does not point to a real calibration cache. Random INT8 ranges are intentionally not used."
-}, indent=2) + "\n")
-PY
-    return
-  fi
-
-  echo "[int8] Real INT8 calibration cache detected: ${INT8_CALIB_CACHE}"
-  echo "[int8] This script records INT8 readiness but leaves paper EM rows disabled unless you add calibrated/QDQ eval support."
-  "${PYTHON_BIN}" - "${OUTPUT_DIR}/reports/int8_status.json" "${INT8_CALIB_CACHE}" <<'PY'
-import json, sys
-from pathlib import Path
-Path(sys.argv[1]).write_text(json.dumps({
-  "int8_enabled": True,
-  "status": "calibration_cache_available",
-  "calibration_cache": sys.argv[2],
-  "note": "Build calibrated INT8 engines only when the cache/dataloader matches the exported ONNX input distribution."
-}, indent=2) + "\n")
-PY
 }
 
 write_final_results() {
@@ -1322,29 +959,6 @@ def read_json(path):
         payload = json.load(handle)
     return payload if isinstance(payload, dict) else {}
 
-env = read_json(out / "env/env_report.json")
-sparse = read_json(out / "reports/trt_sparse_tactics_report.json")
-int8 = read_json(out / "reports/int8_status.json")
-sparsity = read_json(out / "reports/sparsity_2_4_report.json")
-
-def metric_pair(path):
-    data = read_json(path)
-    em1 = data.get("exact_match_accuracy")
-    em5 = data.get("exact_match_at_5_accuracy", data.get("exact_match_at_top_k_accuracy"))
-    return em1, em5
-
-dense_iot = metric_pair(out / "eval/dense_sft_fp16/iot200_metrics.json")
-dense_train = metric_pair(out / "eval/dense_sft_fp16/train_metrics.json")
-pruned_iot = metric_pair(out / "eval/nvidia_2_4_sft_fp16/iot200_metrics.json")
-pruned_train = metric_pair(out / "eval/nvidia_2_4_sft_fp16/train_metrics.json")
-trt_dense_iot = metric_pair(out / "eval_trt/dense_sft_fp16/iot200/prompt_response_eval_summary.json")
-trt_dense_train = metric_pair(out / "eval_trt/dense_sft_fp16/train/prompt_response_eval_summary.json")
-trt_pruned_iot = metric_pair(out / "eval_trt/nvidia_2_4_sft_fp16/iot200/prompt_response_eval_summary.json")
-trt_pruned_train = metric_pair(out / "eval_trt/nvidia_2_4_sft_fp16/train/prompt_response_eval_summary.json")
-
-def latency(path):
-    return read_json(out / "results" / path)
-
 def fmt(value):
     if value is None or value == "" or (isinstance(value, float) and math.isnan(value)):
         return ""
@@ -1352,115 +966,98 @@ def fmt(value):
         return f"{value:.6f}"
     return value
 
-def row(model, runtime, precision, sparsity_label, latency_data, em_iot=("", ""), em_train=("", ""), sparse_selected=""):
-    return {
-        "Model": model,
-        "Architecture": latency_data.get("architecture") or "Decoder-only",
+env = read_json(out / "env/env_report.json")
+quant = read_json(out / "reports/onnx_int8_quantization_report.json")
+
+latency_files = [
+    ("PyTorch", "FP16", "latency_pytorch_fp16.json"),
+    ("ONNX Runtime CUDA", "FP16", "latency_onnxruntime_cuda_fp16.json"),
+    ("ONNX Runtime CUDA", "INT8", "latency_onnxruntime_cuda_int8.json"),
+]
+
+latencies = {name: read_json(out / "results" / filename) for _runtime, _precision, filename in latency_files for name in [filename]}
+pytorch = latencies.get("latency_pytorch_fp16.json", {})
+onnx_fp16 = latencies.get("latency_onnxruntime_cuda_fp16.json", {})
+
+def speedup(numerator_ms, denominator_ms):
+    try:
+        if numerator_ms is None or denominator_ms is None or float(denominator_ms) <= 0:
+            return None
+        return float(numerator_ms) / float(denominator_ms)
+    except Exception:
+        return None
+
+rows = []
+for runtime, precision, filename in latency_files:
+    data = latencies.get(filename, {})
+    mean_ms = data.get("mean_latency_ms")
+    row = {
         "Runtime": runtime,
         "Precision": precision,
-        "Sparsity": sparsity_label,
         "Seq. Len.": seq_len,
-        "Batch Size": latency_data.get("batch_size", 1),
-        "Latency": fmt(latency_data.get("mean_latency_ms")),
-        "Median Lat.": fmt(latency_data.get("median_latency_ms")),
-        "P95 Lat.": fmt(latency_data.get("p95_latency_ms")),
-        "P99 Lat.": fmt(latency_data.get("p99_latency_ms")),
-        "Throughput QPS": fmt(latency_data.get("throughput_qps")),
-        "Memory": fmt(latency_data.get("peak_gpu_memory_mb")),
-        "ONNX MB": fmt(latency_data.get("onnx_size_mb")),
-        "Engine MB": fmt(latency_data.get("engine_size_mb")),
-        "EM@1 IoT200": fmt(em_iot[0]),
-        "EM@5 IoT200": fmt(em_iot[1]),
-        "EM@1 Train": fmt(em_train[0]),
-        "EM@5 Train": fmt(em_train[1]),
-        "GPU": latency_data.get("gpu") or ", ".join(env.get("torch_cuda_device_names", [])),
-        "Provider": latency_data.get("provider", ""),
-        "Sparse Tactics Selected": sparse_selected,
-        "Speedup vs Dense TRT FP16": "",
+        "Batch Size": data.get("batch_size", 1),
+        "Mean Latency ms": fmt(mean_ms),
+        "Median Latency ms": fmt(data.get("median_latency_ms")),
+        "P95 Latency ms": fmt(data.get("p95_latency_ms")),
+        "P99 Latency ms": fmt(data.get("p99_latency_ms")),
+        "Throughput QPS": fmt(data.get("throughput_qps")),
+        "Peak GPU Memory MB": fmt(data.get("peak_gpu_memory_mb")),
+        "ONNX MB": fmt(data.get("onnx_size_mb")),
+        "Provider": data.get("provider", ""),
+        "GPU": data.get("gpu") or ", ".join(env.get("torch_cuda_device_names", [])),
+        "Available": str(bool(data.get("available"))).lower(),
+        "Error": data.get("error", ""),
+        "Speedup vs PyTorch FP16": fmt(speedup(pytorch.get("mean_latency_ms"), mean_ms)),
+        "Speedup vs ONNX FP16": fmt(speedup(onnx_fp16.get("mean_latency_ms"), mean_ms)),
     }
-
-rows = [
-    row("dense_sft_fp16", "PyTorch", "FP16", "Dense", latency("latency_dense_pytorch_fp16.json"), dense_iot, dense_train, "false"),
-    row("dense_sft_fp16", "ONNX Runtime CUDA", "FP16", "Dense", latency("latency_dense_ort_cuda_fp16.json"), ("", ""), ("", ""), "false"),
-    row("dense_sft_fp16", "ONNX Runtime TensorRT EP", "FP16", "Dense", latency("latency_dense_ort_trt_fp16.json"), ("", ""), ("", ""), "false"),
-    row("dense_sft_fp16", "native TensorRT", "FP16", "Dense", latency("latency_dense_native_trt_fp16.json"), trt_dense_iot, trt_dense_train, "false"),
-    row("nvidia_2_4_sft_fp16", "PyTorch", "FP16", "NVIDIA 2:4", latency("latency_nvidia_2_4_pytorch_fp16.json"), pruned_iot, pruned_train, "false"),
-    row("nvidia_2_4_sft_fp16", "native TensorRT", "FP16", "NVIDIA 2:4", latency("latency_nvidia_2_4_native_trt_fp16.json"), trt_pruned_iot, trt_pruned_train, str(bool(sparse.get("sparse_tactics_selected"))).lower()),
-]
-
-dense_trt = latency("latency_dense_native_trt_fp16.json")
-pruned_trt = latency("latency_nvidia_2_4_native_trt_fp16.json")
-dense_ms = dense_trt.get("mean_latency_ms")
-pruned_ms = pruned_trt.get("mean_latency_ms")
-speedup = None
-throughput_gain = None
-if dense_ms and pruned_ms and float(pruned_ms) > 0:
-    speedup = float(dense_ms) / float(pruned_ms)
-    rows[-1]["Speedup vs Dense TRT FP16"] = fmt(speedup)
-    dense_qps = dense_trt.get("throughput_qps")
-    pruned_qps = pruned_trt.get("throughput_qps")
-    if dense_qps and float(dense_qps) > 0 and pruned_qps:
-        throughput_gain = float(pruned_qps) / float(dense_qps)
+    rows.append(row)
 
 fields = [
-    "Model", "Architecture", "Runtime", "Precision", "Sparsity", "Seq. Len.",
-    "Batch Size", "Latency", "Median Lat.", "P95 Lat.", "P99 Lat.",
-    "Throughput QPS", "Memory", "ONNX MB", "Engine MB", "EM@1 IoT200",
-    "EM@5 IoT200", "EM@1 Train", "EM@5 Train", "GPU", "Provider",
-    "Sparse Tactics Selected", "Speedup vs Dense TRT FP16",
+    "Runtime", "Precision", "Seq. Len.", "Batch Size", "Mean Latency ms",
+    "Median Latency ms", "P95 Latency ms", "P99 Latency ms", "Throughput QPS",
+    "Peak GPU Memory MB", "ONNX MB", "Provider", "GPU", "Available", "Error",
+    "Speedup vs PyTorch FP16", "Speedup vs ONNX FP16",
 ]
-csv_path = out / "results/final_metrics.csv"
-json_path = out / "results/final_metrics.json"
+csv_path = out / "results/final_latency_comparison.csv"
+json_path = out / "results/final_latency_comparison.json"
 with csv_path.open("w", encoding="utf-8", newline="") as handle:
     writer = csv.DictWriter(handle, fieldnames=fields)
     writer.writeheader()
-    for item in rows:
-        writer.writerow({field: item.get(field, "") for field in fields})
+    for row in rows:
+        writer.writerow({field: row.get(field, "") for field in fields})
 
 payload = {
     "rows": rows,
-    "main_speedup_dense_trt_fp16_over_nvidia_2_4_trt_fp16": speedup,
-    "throughput_gain_nvidia_2_4_trt_fp16_over_dense_trt_fp16": throughput_gain,
-    "sparse_tactics_selected": bool(sparse.get("sparse_tactics_selected")),
-    "sparse_tactics_report": str(out / "reports/trt_sparse_tactics_report.json"),
-    "int8_status": int8,
-    "sparsity_report_summary": {
-        "exact_2_zero_block_pct": sparsity.get("exact_2_zero_block_pct"),
-        "tensorrt_eligible_block_pct": sparsity.get("tensorrt_eligible_block_pct"),
-        "non_compliant_layers": sparsity.get("non_compliant_layers", []),
-    },
+    "quantization_report": quant,
+    "environment": env,
+    "notes": [
+        "Latency is one forward pass at batch size 1 and the configured sequence length.",
+        "ONNX Runtime sessions request CUDAExecutionProvider and disable CPU EP fallback when supported.",
+        "INT8 is ONNX Runtime QDQ quantization, not TensorRT INT8.",
+    ],
 }
 json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-ort_providers = env.get("onnxruntime_available_providers", [])
-cpu_only_onnx = ort_providers == ["CPUExecutionProvider"] or ("CUDAExecutionProvider" not in ort_providers and "TensorrtExecutionProvider" not in ort_providers)
-speedup_claim = bool(sparse.get("sparse_tactics_selected")) and speedup is not None and speedup > 1.0
-acc_delta_iot = None
-if pruned_iot[0] is not None and dense_iot[0] is not None:
-    acc_delta_iot = float(pruned_iot[0]) - float(dense_iot[0])
-
-summary = f"""# H20 Decoder-only SFT + NVIDIA 2:4 TensorRT Summary
+int8_data = latencies.get("latency_onnxruntime_cuda_int8.json", {})
+int8_speedup_pytorch = speedup(pytorch.get("mean_latency_ms"), int8_data.get("mean_latency_ms"))
+int8_speedup_onnx = speedup(onnx_fp16.get("mean_latency_ms"), int8_data.get("mean_latency_ms"))
+summary = f"""# H20 ONNX FP16 vs INT8 Latency Summary
 
 - GPU benchmark ran on CUDA: {bool(env.get("torch_cuda_available"))}; visible GPUs: {env.get("torch_cuda_device_names", [])}
-- ONNX Runtime providers: {ort_providers}
-- CPU ONNX fallback happened: {cpu_only_onnx}. CPU ONNX is excluded from the main speedup claim.
-- TensorRT sparse tactics selected: {bool(sparse.get("sparse_tactics_selected"))}
-- NVIDIA 2:4 exact block compliance: {sparsity.get("exact_2_zero_block_pct")}%; TensorRT-eligible blocks: {sparsity.get("tensorrt_eligible_block_pct")}%
-- Real NVIDIA 2:4 speedup claim allowed: {speedup_claim}
-- Dense TRT FP16 mean latency / NVIDIA 2:4 TRT FP16 mean latency: {speedup}
-- NVIDIA 2:4 TRT FP16 QPS / dense TRT FP16 QPS: {throughput_gain}
-- Dense PyTorch EM@1/EM@5 IoT200: {dense_iot[0]} / {dense_iot[1]}
-- NVIDIA 2:4 PyTorch EM@1/EM@5 IoT200: {pruned_iot[0]} / {pruned_iot[1]}
-- Dense PyTorch EM@1/EM@5 train: {dense_train[0]} / {dense_train[1]}
-- NVIDIA 2:4 PyTorch EM@1/EM@5 train: {pruned_train[0]} / {pruned_train[1]}
-- IoT200 EM@1 delta after pruning: {acc_delta_iot}
-- INT8 status: {int8.get("status")}; {int8.get("reason", int8.get("note", ""))}
+- ONNX Runtime providers: {env.get("onnxruntime_available_providers", [])}
+- Sequence length: {seq_len}; batch size: 1
+- INT8 quantization mode: {quant.get("quantization")}
+- PyTorch FP16 mean latency: {pytorch.get("mean_latency_ms")} ms
+- ONNX Runtime CUDA FP16 mean latency: {onnx_fp16.get("mean_latency_ms")} ms
+- ONNX Runtime CUDA INT8 mean latency: {int8_data.get("mean_latency_ms")} ms
+- ONNX INT8 speedup vs PyTorch FP16: {int8_speedup_pytorch}
+- ONNX INT8 speedup vs ONNX FP16: {int8_speedup_onnx}
 
 ## Limitations
 
-- Native TensorRT accuracy uses the repository no-cache autoregressive evaluator. If TensorRT generation fails in this environment, rely on the saved error reports and compare PyTorch/ONNX logits before making accuracy claims.
-- ONNX Runtime CPUExecutionProvider rows are portability evidence only and are not part of GPU speedup claims.
-- Sparse hardware speedup should be claimed only when sparse tactics were selected and the measured TensorRT latency improves.
+- This is forward-pass latency, not autoregressive end-to-end generation latency.
+- INT8 uses ONNX Runtime quantization and CUDAExecutionProvider, not TensorRT.
+- If ONNX INT8 is unavailable or slower, inspect `reports/onnx_int8_quantization_report.json` and the INT8 latency JSON for unsupported/fallback ops.
 """
 (out / "SUMMARY.md").write_text(summary, encoding="utf-8")
 print(f"Wrote final CSV: {csv_path}")
@@ -1469,51 +1066,24 @@ print(f"Wrote summary: {out / 'SUMMARY.md'}")
 PY
 }
 
-echo "H20 decoder-only SFT + NVIDIA 2:4 + TensorRT FP16 baseline"
+echo "H20 decoder-only ONNX FP16/INT8 latency comparison"
 echo "  base model:       ${BASE_MODEL}"
 echo "  train data:       ${TRAIN_JSONL}"
+echo "  calibration data: ${TRAIN_JSONL}"
 echo "  IoT200 data:      ${IOT200_JSONL}"
 echo "  output dir:       ${OUTPUT_DIR}"
 echo "  GPUs:             ${GPUS}"
 echo "  epochs:           ${EPOCHS}"
 echo "  seq_len:          ${SEQ_LEN}"
 echo "  SFT batch/GPU:    ${BATCH_SIZE}"
-echo "  eval batch/GPU:   ${EVAL_BATCH_SIZE}"
 echo "  latency iters:    warmup=${WARMUP_ITERS} measure=${MEASURE_ITERS}"
 
 write_env_report
 train_sft
-prune_nvidia_2_4
-verify_2_4_sparsity
-
-if [[ "${SKIP_EVAL:-0}" != "1" ]]; then
-  run_pytorch_eval "dense_sft_fp16" "${DENSE_CKPT}" "iot200" "${IOT200_JSONL}"
-  run_pytorch_eval "dense_sft_fp16" "${DENSE_CKPT}" "train" "${TRAIN_JSONL}"
-  run_pytorch_eval "nvidia_2_4_sft_fp16" "${PRUNED_CKPT}" "iot200" "${IOT200_JSONL}"
-  run_pytorch_eval "nvidia_2_4_sft_fp16" "${PRUNED_CKPT}" "train" "${TRAIN_JSONL}"
-else
-  echo "[skip] PyTorch EM eval"
-fi
-
-export_onnx_model "dense_sft_fp16" "${DENSE_CKPT}" "${DENSE_ONNX_DIR}" "${DENSE_ONNX}"
-export_onnx_model "nvidia_2_4_sft_fp16" "${PRUNED_CKPT}" "${PRUNED_ONNX_DIR}" "${PRUNED_ONNX}"
-inspect_onnx "${DENSE_ONNX}" "${OUTPUT_DIR}/reports/onnx_inspection_dense_sft_fp16.json"
-inspect_onnx "${PRUNED_ONNX}" "${OUTPUT_DIR}/reports/onnx_inspection_nvidia_2_4_sft_fp16.json"
-
-build_trt_engine "dense_sft_fp16" "${DENSE_ONNX}" "${DENSE_ENGINE}" "disable" "${OUTPUT_DIR}/logs/build_dense_fp16.log"
-build_trt_engine "nvidia_2_4_sft_fp16" "${PRUNED_ONNX}" "${PRUNED_ENGINE}" "enable" "${OUTPUT_DIR}/logs/build_nvidia_2_4_sparse_fp16.log"
-parse_sparse_tactics_log
-write_int8_status
-
-if [[ "${SKIP_EVAL:-0}" != "1" ]]; then
-  run_trt_eval "dense_sft_fp16" "${DENSE_CKPT}" "${DENSE_ENGINE}" "${DENSE_ONNX}" "iot200" "${IOT200_JSONL}"
-  run_trt_eval "nvidia_2_4_sft_fp16" "${PRUNED_CKPT}" "${PRUNED_ENGINE}" "${PRUNED_ONNX}" "iot200" "${IOT200_JSONL}"
-  run_trt_eval "dense_sft_fp16" "${DENSE_CKPT}" "${DENSE_ENGINE}" "${DENSE_ONNX}" "train" "${TRAIN_JSONL}"
-  run_trt_eval "nvidia_2_4_sft_fp16" "${PRUNED_CKPT}" "${PRUNED_ENGINE}" "${PRUNED_ONNX}" "train" "${TRAIN_JSONL}"
-else
-  echo "[skip] TensorRT EM eval"
-fi
-
+export_onnx_fp16
+inspect_onnx "${ONNX_FP16}" "${OUTPUT_DIR}/reports/onnx_inspection_fp16.json"
+quantize_onnx_int8
+inspect_onnx "${ONNX_INT8}" "${OUTPUT_DIR}/reports/onnx_inspection_int8.json"
 run_latency_benchmarks
 write_final_results
 
@@ -1524,6 +1094,6 @@ echo "  ${PROJECT_ROOT}/scripts/run_h20_decoder_only_sft_prune_trt24.sh"
 echo "Example command:"
 echo "  bash scripts/run_h20_decoder_only_sft_prune_trt24.sh --base_model /PATH/TO/BASE_MODEL"
 echo "Final outputs:"
-echo "  ${OUTPUT_DIR}/results/final_metrics.json"
-echo "  ${OUTPUT_DIR}/results/final_metrics.csv"
+echo "  ${OUTPUT_DIR}/results/final_latency_comparison.json"
+echo "  ${OUTPUT_DIR}/results/final_latency_comparison.csv"
 echo "  ${OUTPUT_DIR}/SUMMARY.md"
