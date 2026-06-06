@@ -186,6 +186,13 @@ def sparsity_label(level: float) -> str:
     return f"{float(level):.0%}"
 
 
+def methods_for_sparsity_level(methods: list[str], level: float) -> list[str]:
+    """Native 2:4 is only meaningful at its fixed 50% structured target."""
+    if abs(float(level) - 0.5) <= 1e-12:
+        return list(methods)
+    return [method for method in methods if method != "2of4"]
+
+
 def apply_env_overrides(config: dict[str, Any]) -> None:
     for env_name, key in ENV_OVERRIDES.items():
         if env_name not in os.environ:
@@ -640,6 +647,7 @@ def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, l
     regular_paths: list[Path] = []
     contrastive_paths: list[Path] = []
     for level in settings["sparsity_levels"]:
+        level_methods = methods_for_sparsity_level(list(settings["methods"]), level)
         regular_path = generated_dir / generated_config_name("base_sft_one_shot_pruning", level, settings)
         contrastive_path = generated_dir / generated_config_name("contrastive_sft_one_shot_pruning", level, settings)
         write_yaml(
@@ -652,6 +660,7 @@ def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, l
                 base_checkpoint=settings["regular_final"],
                 output_dir=pruning_output_dir_for_level(settings["regular_pruning_output_dir"], level, settings),
                 inputs=sft_eval_inputs(sft_config, settings["sft_config"]),
+                methods=level_methods,
                 sparsity=level,
             ),
         )
@@ -665,6 +674,7 @@ def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, l
                 base_checkpoint=settings["contrastive_final"],
                 output_dir=pruning_output_dir_for_level(settings["contrastive_pruning_output_dir"], level, settings),
                 inputs=contrastive_eval_inputs(contrastive_config, settings["contrastive_config"]),
+                methods=level_methods,
                 sparsity=level,
             ),
         )
@@ -700,6 +710,22 @@ def metric(row: dict[str, Any], *names: str) -> Any:
         if value not in (None, ""):
             return value
     return ""
+
+
+def difficulty_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for level in ("easy", "medium", "hard"):
+        metrics[f"count_{level}"] = metric(row, f"difficulty_{level}_total_examples")
+        metrics[f"em1_{level}"] = safe_float(metric(row, f"difficulty_{level}_exact_match_accuracy"))
+        metrics[f"em5_{level}"] = safe_float(
+            metric(
+                row,
+                f"difficulty_{level}_exact_match_at_5_accuracy",
+                f"difficulty_{level}_top5_exact_match_accuracy",
+                f"difficulty_{level}_exact_match_at_top_k_accuracy",
+            )
+        )
+    return metrics
 
 
 def safe_float(value: Any) -> Any:
@@ -759,6 +785,7 @@ def rows_for_family(
                 "em1_correct": metric(row, "correct_examples", "exact_match_correct"),
                 "em5_correct": metric(row, "exact_match_at_top_k_correct", "exact_match_at_5_correct"),
                 "total_examples": metric(row, "total_examples"),
+                **difficulty_metrics(row),
                 "mean_response_loss": safe_float(metric(row, "mean_response_loss", "mean_response_loss_mean")),
                 "response_perplexity": safe_float(metric(row, "response_perplexity", "response_perplexity_mean")),
                 "avg_generated_tokens": safe_float(metric(row, "avg_generated_tokens", "avg_generated_tokens_mean")),
@@ -808,6 +835,7 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
             for eval_name in expected_eval_names
         )
         for level in settings.get("sparsity_levels", [settings["sparsity"]]):
+            level_methods = methods_for_sparsity_level(list(settings["methods"]), float(level))
             expected_rows.extend(
                 {
                     "model_family": family,
@@ -816,7 +844,7 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
                     "target_sparsity": sparsity_key(level),
                 }
                 for eval_name in expected_eval_names
-                for method in settings["methods"]
+                for method in level_methods
             )
             if settings.get("eos_retune", False):
                 expected_rows.extend(
@@ -828,7 +856,7 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
                         "target_sparsity": sparsity_key(level),
                     }
                     for eval_name in expected_eval_names
-                    for method in settings["methods"]
+                    for method in level_methods
                 )
     present = {
         (
@@ -969,6 +997,15 @@ def write_results_json(
         "em1_correct",
         "em5_correct",
         "total_examples",
+        "count_easy",
+        "em1_easy",
+        "em5_easy",
+        "count_medium",
+        "em1_medium",
+        "em5_medium",
+        "count_hard",
+        "em1_hard",
+        "em5_hard",
         "mean_response_loss",
         "response_perplexity",
         "avg_generated_tokens",
@@ -1075,10 +1112,10 @@ def main() -> None:
     if settings["run_original_decoder_eval"]:
         run_pruning_benchmark(original_config, settings, env, methods=[])
     if settings["run_pruning_benchmarks"]:
-        for config_path in regular_configs:
-            run_pruning_benchmark(config_path, settings, env)
-        for config_path in contrastive_configs:
-            run_pruning_benchmark(config_path, settings, env)
+        for level, config_path in zip(settings["sparsity_levels"], regular_configs):
+            run_pruning_benchmark(config_path, settings, env, methods=methods_for_sparsity_level(list(settings["methods"]), level))
+        for level, config_path in zip(settings["sparsity_levels"], contrastive_configs):
+            run_pruning_benchmark(config_path, settings, env, methods=methods_for_sparsity_level(list(settings["methods"]), level))
 
     if settings["dry_run"]:
         print("\nDry run complete.")
