@@ -15,6 +15,11 @@ NATIVE_FAMILY_LABELS = {
     "contrastive_sft": "contrastive_sft",
 }
 
+NATIVE_METHOD_LABELS = {
+    "taylor": "gradient",
+    "2of4": "nvidia24",
+}
+
 
 def read_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -62,6 +67,11 @@ def progressive_rows(path: Path, label: str) -> list[dict[str, Any]]:
 def family_label(value: Any) -> str:
     text = str(value or "")
     return NATIVE_FAMILY_LABELS.get(text, text)
+
+
+def native_method_label(value: Any) -> str:
+    text = str(value or "")
+    return NATIVE_METHOD_LABELS.get(text, text)
 
 
 def sparsity_key(value: Any) -> str:
@@ -181,7 +191,7 @@ def final_matrix_rows(native_payload: dict[str, Any], progressive: list[dict[str
         phase = str(row.get("phase", ""))
         if phase not in {"dense_baseline", "one_shot"}:
             continue
-        method = "base_model" if phase == "dense_baseline" else str(row.get("method", ""))
+        method = "base_model" if phase == "dense_baseline" else native_method_label(row.get("method", ""))
         target_sparsity = 0.0 if phase == "dense_baseline" else row.get("target_sparsity", "")
         source = "dense_baseline" if phase == "dense_baseline" else "native_one_shot"
         row_type = "dense_baseline" if phase == "dense_baseline" else "pruning"
@@ -203,12 +213,12 @@ def final_matrix_rows(native_payload: dict[str, Any], progressive: list[dict[str
             continue
         method = str(row.get("pruning_method", "gradient") or "gradient")
         target_sparsity = row.get("target_sparsity", "")
-        key = (family, "progressive_gradient", "progressive", method, sparsity_key(target_sparsity))
+        key = (family, "progressive_magnitude", "progressive", method, sparsity_key(target_sparsity))
         if key not in grouped:
             grouped[key] = empty_matrix_row(
                 row_type="pruning",
                 family=family,
-                source="progressive_gradient",
+                source="progressive_magnitude",
                 phase="progressive",
                 method=method,
                 target_sparsity=target_sparsity,
@@ -220,7 +230,7 @@ def final_matrix_rows(native_payload: dict[str, Any], progressive: list[dict[str
         key=lambda row: (
             row["trained_checkpoint_family"],
             0 if row["row_type"] == "dense_baseline" else 1,
-            {"native_one_shot": 0, "progressive_gradient": 1, "dense_baseline": -1}.get(str(row["source"]), 9),
+            {"native_one_shot": 0, "progressive_magnitude": 1, "dense_baseline": -1}.get(str(row["source"]), 9),
             float(row["target_sparsity"]) if isinstance(row["target_sparsity"], (int, float)) else 0.0,
             str(row["method"]),
         ),
@@ -241,8 +251,8 @@ def final_matrix_counts(rows: list[dict[str, Any]]) -> dict[str, Any]:
     expected = {
         "regular_sft:native_one_shot": 7,
         "contrastive_sft:native_one_shot": 7,
-        "regular_sft:progressive_gradient": 2,
-        "contrastive_sft:progressive_gradient": 2,
+        "regular_sft:progressive_magnitude": 2,
+        "contrastive_sft:progressive_magnitude": 2,
         "regular_sft:dense_baseline": 1,
         "contrastive_sft:dense_baseline": 1,
     }
@@ -329,20 +339,22 @@ def execution_plan() -> dict[str, Any]:
             "notes": "Native dense and one-shot evals are launched through scripts/run_pruning_benchmark.py with torchrun.",
         },
         "native_pruning_transform": {
-            "launcher": "python scripts/prune.py",
-            "distributed": False,
-            "uses_nproc_per_node": False,
-            "notes": "Mask generation/model rewrite for magnitude, WANDA, Taylor, and 2:4 is single-process per outcome.",
+            "launcher": "torchrun for eval; python scripts/prune.py for mask generation/model rewrite",
+            "distributed": True,
+            "uses_nproc_per_node": True,
+            "notes": "Legacy one-shot evaluations use torchrun/NPROC_PER_NODE. The pruning transform itself is single-process per outcome.",
         },
-        "progressive_gradient": {
+        "progressive_magnitude": {
             "launcher": "python scripts/run_sparsity_experiments.py",
             "distributed": False,
             "uses_nproc_per_node": False,
-            "notes": "Gradual gradient pruning, recovery epochs, and final progressive evals are single-process unless that runner is later made DDP-aware.",
+            "gpu_ids": os.environ.get("SPARSITY_GPU_IDS", ""),
+            "parallel_jobs": True,
+            "notes": "Added progressive magnitude jobs are split across SPARSITY_GPU_IDS by the shell wrapper; each job is single-process on its assigned GPU.",
         },
         "timing_interpretation": (
             "Training and native eval timings are 8-GPU timings when CUDA_VISIBLE_DEVICES exposes 8 GPUs and NPROC_PER_NODE=8. "
-            "Native pruning transforms and progressive gradient rows are not full 8-GPU distributed timings."
+            "Added progressive magnitude rows run as independent jobs split across SPARSITY_GPU_IDS, not as one DDP job."
         ),
     }
 
@@ -350,8 +362,8 @@ def execution_plan() -> dict[str, Any]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Combine native and progressive SCENIC sparsity revision summaries.")
     parser.add_argument("--native-results-json", required=True)
-    parser.add_argument("--regular-progressive-summary", required=True)
-    parser.add_argument("--contrastive-progressive-summary", required=True)
+    parser.add_argument("--regular-progressive-summary", action="append", required=True)
+    parser.add_argument("--contrastive-progressive-summary", action="append", required=True)
     parser.add_argument("--output-json", required=True)
     return parser.parse_args()
 
@@ -359,13 +371,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     native_path = Path(args.native_results_json).expanduser()
-    regular_path = Path(args.regular_progressive_summary).expanduser()
-    contrastive_path = Path(args.contrastive_progressive_summary).expanduser()
+    regular_paths = [Path(path).expanduser() for path in args.regular_progressive_summary]
+    contrastive_paths = [Path(path).expanduser() for path in args.contrastive_progressive_summary]
     output_path = Path(args.output_json).expanduser()
 
     native_payload = read_json(native_path)
-    regular_progressive = progressive_rows(regular_path, "regular_sft")
-    contrastive_progressive = progressive_rows(contrastive_path, "contrastive_sft")
+    regular_progressive = [row for path in regular_paths for row in progressive_rows(path, "regular_sft")]
+    contrastive_progressive = [row for path in contrastive_paths for row in progressive_rows(path, "contrastive_sft")]
     progressive = regular_progressive + contrastive_progressive
     final_rows = final_matrix_rows(native_payload, progressive)
 
@@ -373,8 +385,8 @@ def main() -> None:
         "schema_version": 1,
         "native_results_json": str(native_path),
         "progressive_summary_csvs": {
-            "regular_sft": str(regular_path),
-            "contrastive_sft": str(contrastive_path),
+            "regular_sft": [str(path) for path in regular_paths],
+            "contrastive_sft": [str(path) for path in contrastive_paths],
         },
         "execution_plan": execution_plan(),
         "matrix_counts": {
@@ -387,7 +399,7 @@ def main() -> None:
         "progressive_results": progressive,
         "notes": [
             "Native one-shot rows evaluate trained regular SFT and contrastive SFT checkpoints on training_dataset and benchmark eval files.",
-            "Progressive rows evaluate benchmark plus training_dataset when launched through run_linear_sparsity_revision_from_base.sh.",
+            "Progressive magnitude rows evaluate benchmark plus training_dataset when launched through run_linear_sparsity_revision_from_base.sh.",
             "final_matrix_rows fuses eval splits so the expected design is 18 pruning rows plus 2 dense baselines.",
         ],
     }

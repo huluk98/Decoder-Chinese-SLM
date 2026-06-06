@@ -59,8 +59,17 @@ def test_full_decoder_launcher_expands_native_sparsity_levels(tmp_path: Path) ->
     settings = launcher.resolved_settings(config)
 
     assert settings["sparsity_levels"] == [0.3, 0.5]
-    assert launcher.methods_for_sparsity_level(config["methods"], 0.3) == ["magnitude", "wanda", "taylor"]
-    assert launcher.methods_for_sparsity_level(config["methods"], 0.5) == ["magnitude", "wanda", "taylor", "2of4"]
+    assert launcher.methods_for_sparsity_level(["magnitude", "wanda", "gradient", "nvidia24"], 0.3) == [
+        "magnitude",
+        "wanda",
+        "gradient",
+    ]
+    assert launcher.methods_for_sparsity_level(["magnitude", "wanda", "gradient", "nvidia24"], 0.5) == [
+        "magnitude",
+        "wanda",
+        "gradient",
+        "nvidia24",
+    ]
     assert launcher.pruning_output_dir_for_level(settings["regular_pruning_output_dir"], 0.3, settings).name == "sparsity_0p3"
     assert launcher.generated_config_name("base_sft_one_shot_pruning", 0.5, settings).endswith("sparsity_0p5.yaml")
 
