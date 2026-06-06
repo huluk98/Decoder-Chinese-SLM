@@ -18,8 +18,12 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.pruning import (  # noqa: E402
     apply_masks,
+    collect_gradient_scores,
     global_magnitude_masks,
+    gradient_saliency_report,
+    gradient_score_masks,
     layerwise_magnitude_masks,
+    layerwise_gradient_score_masks,
     mask_sparsity,
     model_parameter_stats,
     named_prunable_linears,
@@ -41,6 +45,8 @@ LEGACY_EOS_TOKEN = "<|eos|>"
 SUMMARY_FIELDNAMES = [
     "experiment_name",
     "model_family",
+    "eval_name",
+    "eval_path",
     "pruning_mode",
     "pruning_method",
     "target_sparsity",
@@ -78,6 +84,7 @@ SUMMARY_FIELDNAMES = [
 ]
 PREDICTION_FIELDNAMES = [
     "sample_id",
+    "eval_name",
     "input",
     "target",
     "difficulty",
@@ -106,10 +113,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pruning_modes", nargs="+", default=["dense", "oneshot", "progressive"], choices=("dense", "oneshot", "one_shot", "progressive"))
     parser.add_argument("--pruning_mode", nargs="+", default=None, choices=("dense", "oneshot", "one_shot", "progressive"))
     parser.add_argument("--prune_scope", default="linear_weights", choices=("linear_weights",))
-    parser.add_argument("--prune_method", default="magnitude", choices=("magnitude",))
+    parser.add_argument("--prune_method", default="magnitude", choices=("magnitude", "gradient", "taylor"))
     parser.add_argument("--progressive_schedule", default="staged", choices=("staged",))
     parser.add_argument("--recovery_epochs_per_stage", type=int, default=1)
-    parser.add_argument("--final_recovery_epochs", type=int, default=2)
+    parser.add_argument("--final_recovery_epochs", type=int, default=1)
+    parser.add_argument("--gradient_calibration_batches", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_length", type=int, default=256)
@@ -119,6 +127,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--benchmark_path", required=True)
     parser.add_argument("--benchmark_difficulty_path", default=None)
+    parser.add_argument(
+        "--extra_eval_path",
+        action="append",
+        default=[],
+        metavar="NAME=PATH",
+        help="Additional final eval split to run after each dense/pruned checkpoint, for example training_dataset=data/train.json.",
+    )
     parser.add_argument("--recovery_train_path", default=None, help="Optional prompt/response data for progressive recovery fine-tuning.")
     parser.add_argument("--validation_path", default=None, help="Optional validation data for progressive stage EM logs.")
     parser.add_argument("--output_dir", required=True)
@@ -377,6 +392,106 @@ def make_magnitude_masks(model: torch.nn.Module, sparsity: float, args: argparse
     return layerwise_magnitude_masks(model, sparsity=float(sparsity), include_lm_head=bool(args.prune_output_heads))
 
 
+def gradient_calibration_batches(
+    tokenizer: Any,
+    samples: list[dict[str, Any]],
+    args: argparse.Namespace,
+    device: torch.device,
+) -> list[dict[str, torch.Tensor]]:
+    if normalize_family(args.model_family) != "decoder_only":
+        raise ValueError("Gradient/Taylor progressive pruning is currently supported for decoder-only models.")
+    batches: list[dict[str, torch.Tensor]] = []
+    for batch in batched(samples, int(args.batch_size)):
+        prompt_texts = [decoder_prompt(sample["input"], tokenizer, args) for sample in batch]
+        eos = str(getattr(tokenizer, "eos_token", None) or LEGACY_EOS_TOKEN)
+        target_texts = [sample["target"] + ("" if str(sample["target"]).endswith(eos) else eos) for sample in batch]
+        full_texts = [prompt + target for prompt, target in zip(prompt_texts, target_texts)]
+        encoded = tokenizer(
+            full_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=int(args.max_length),
+            add_special_tokens=False,
+        ).to(device)
+        labels = encoded["input_ids"].clone()
+        prompt_encoded = tokenizer(
+            prompt_texts,
+            padding=True,
+            truncation=True,
+            max_length=int(args.max_length),
+            add_special_tokens=False,
+        )
+        prompt_lengths = [int(sum(mask)) for mask in prompt_encoded["attention_mask"]]
+        for row, prompt_length in enumerate(prompt_lengths):
+            labels[row, :prompt_length] = -100
+        labels[encoded["attention_mask"] == 0] = -100
+        batches.append(
+            {
+                "input_ids": encoded["input_ids"],
+                "attention_mask": encoded["attention_mask"],
+                "labels": labels,
+            }
+        )
+        if len(batches) >= int(args.gradient_calibration_batches):
+            break
+    return batches
+
+
+def make_gradient_masks(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    sparsity: float,
+    recovery_samples: list[dict[str, Any]],
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if float(sparsity) <= 0.0:
+        return {}
+    if not recovery_samples:
+        raise ValueError("--prune_method gradient requires --recovery_train_path for calibration batches.")
+    calibration_batches = gradient_calibration_batches(tokenizer, recovery_samples, args, device)
+    scores = collect_gradient_scores(
+        model,
+        calibration_batches,
+        device=device,
+        max_batches=int(args.gradient_calibration_batches),
+        include_lm_head=bool(args.prune_output_heads),
+    )
+    report = gradient_saliency_report(scores)
+    if not report["all_modules_valid"]:
+        raise ValueError(f"Invalid gradient saliency statistics: {report['blocking_issues']}")
+    if args.global_pruning:
+        return gradient_score_masks(
+            model,
+            gradient_scores=scores,
+            sparsity=float(sparsity),
+            include_lm_head=bool(args.prune_output_heads),
+        )
+    return layerwise_gradient_score_masks(
+        model,
+        gradient_scores=scores,
+        sparsity=float(sparsity),
+        include_lm_head=bool(args.prune_output_heads),
+    )
+
+
+def make_pruning_masks(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    sparsity: float,
+    recovery_samples: list[dict[str, Any]],
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    method = str(args.prune_method).strip().lower()
+    if method == "magnitude":
+        return make_magnitude_masks(model, sparsity, args)
+    if method in {"gradient", "taylor"}:
+        return make_gradient_masks(model, tokenizer, sparsity, recovery_samples, args, device)
+    raise ValueError(f"Unsupported prune_method: {args.prune_method}")
+
+
 def combine_masks(
     previous: dict[str, torch.Tensor] | None,
     current: dict[str, torch.Tensor],
@@ -547,7 +662,7 @@ def run_progressive(
     logs: list[dict[str, Any]] = []
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.learning_rate)) if recovery_samples else None
     for stage_index, stage_sparsity in enumerate(staged_schedule(target_sparsity), start=1):
-        stage_masks = make_magnitude_masks(model, stage_sparsity, args)
+        stage_masks = make_pruning_masks(model, tokenizer, stage_sparsity, recovery_samples, args, device)
         masks = combine_masks(masks, stage_masks, allow_regrowth=bool(args.regrowth))
         apply_masks(model, masks)
         epochs = max(0, int(args.recovery_epochs_per_stage))
@@ -665,6 +780,8 @@ def write_paper_table(output_dir: Path, rows: list[dict[str, Any]]) -> None:
 def run_single_eval(
     model: Any,
     tokenizer: Any,
+    eval_name: str,
+    eval_path: str,
     samples: list[dict[str, Any]],
     args: argparse.Namespace,
     output_dir: Path,
@@ -690,7 +807,12 @@ def run_single_eval(
         whole_model_sparsity_actual=stats["whole_model_sparsity_actual"],
         seed=int(args.seed),
     )
+    for row in prediction_rows:
+        row["eval_name"] = eval_name
     prediction_path = output_dir / f"predictions_{family}_{pruning_mode}_{target_sparsity:g}_{int(args.seed)}.csv"
+    if eval_name != "benchmark":
+        safe_eval_name = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in eval_name)
+        prediction_path = output_dir / f"predictions_{safe_eval_name}_{family}_{pruning_mode}_{target_sparsity:g}_{int(args.seed)}.csv"
     write_csv_rows(prediction_path, prediction_rows, PREDICTION_FIELDNAMES)
     summary = summarize_prediction_rows(
         prediction_rows,
@@ -700,6 +822,8 @@ def run_single_eval(
     row = {
         "experiment_name": args.experiment_name,
         "model_family": family,
+        "eval_name": eval_name,
+        "eval_path": eval_path,
         "pruning_mode": pruning_mode,
         "pruning_method": args.prune_method,
         "target_sparsity": float(target_sparsity),
@@ -724,13 +848,33 @@ def run_plots(output_dir: Path) -> None:
         print(f"[warning] Could not generate plots automatically: {exc}", flush=True)
 
 
+def parse_extra_eval_paths(values: list[str]) -> list[tuple[str, str]]:
+    evals: list[tuple[str, str]] = []
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"--extra_eval_path must be NAME=PATH, got {value!r}")
+        name, path = value.split("=", 1)
+        name = name.strip()
+        path = path.strip()
+        if not name or not path:
+            raise ValueError(f"--extra_eval_path must be NAME=PATH, got {value!r}")
+        evals.append((name, path))
+    return evals
+
+
 def main() -> None:
     args = parse_args()
     set_seeds(args.seed)
     output_dir = resolve_output_dir(args.output_dir)
-    samples = load_benchmark_samples(args.benchmark_path, args.benchmark_difficulty_path)
+    benchmark_samples = load_benchmark_samples(args.benchmark_path, args.benchmark_difficulty_path)
     if args.limit is not None:
-        samples = samples[: int(args.limit)]
+        benchmark_samples = benchmark_samples[: int(args.limit)]
+    eval_sets: list[tuple[str, str, list[dict[str, Any]]]] = [("benchmark", args.benchmark_path, benchmark_samples)]
+    for eval_name, eval_path in parse_extra_eval_paths(args.extra_eval_path):
+        extra_samples = load_prompt_response_samples(eval_path)
+        if args.limit is not None:
+            extra_samples = extra_samples[: int(args.limit)]
+        eval_sets.append((eval_name, eval_path, extra_samples))
     recovery_samples = load_prompt_response_samples(args.recovery_train_path) if args.recovery_train_path else []
     validation_samples = load_prompt_response_samples(args.validation_path) if args.validation_path else []
     modes = normalize_modes(args)
@@ -743,13 +887,17 @@ def main() -> None:
         "created_at_utc": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "benchmark_path": args.benchmark_path,
         "benchmark_difficulty_path": args.benchmark_difficulty_path or "",
-        "difficulty_counts": {level: sum(1 for sample in samples if sample["difficulty"] == level) for level in DIFFICULTY_LEVELS},
+        "extra_eval_paths": {name: path for name, path, _samples in eval_sets if name != "benchmark"},
+        "difficulty_counts": {
+            name: {level: sum(1 for sample in samples if sample["difficulty"] == level) for level in DIFFICULTY_LEVELS}
+            for name, _path, samples in eval_sets
+        },
         "args": vars(args),
     }
     write_json(output_dir / "run_config.json", metadata)
 
     summary_rows: list[dict[str, Any]] = []
-    dense_by_family: dict[str, dict[str, Any]] = {}
+    dense_by_family_eval: dict[tuple[str, str], dict[str, Any]] = {}
     family = normalize_family(args.model_family)
 
     for mode in modes:
@@ -760,7 +908,7 @@ def main() -> None:
             device = next(model.parameters()).device
             masks: dict[str, torch.Tensor] | None = None
             if mode == "oneshot":
-                masks = make_magnitude_masks(model, target_sparsity, args)
+                masks = make_pruning_masks(model, tokenizer, target_sparsity, recovery_samples, args, device)
                 apply_masks(model, masks)
             elif mode == "progressive":
                 masks, logs = run_progressive(
@@ -798,29 +946,32 @@ def main() -> None:
                 target_sparsity,
                 int(args.seed),
             )
-            row = run_single_eval(
-                model,
-                tokenizer,
-                samples,
-                args,
-                output_dir,
-                mode,
-                target_sparsity,
-                masks,
-                checkpoint_path,
-                mask_path,
-                device,
-            )
-            if mode == "dense":
-                dense_by_family[family] = row
-            row = add_retention_metrics(row, dense_by_family.get(family))
-            summary_rows.append(row)
-            print(
-                f"EM@1={row['em1_overall']:.4f} EM@5={row['em5_overall']:.4f} "
-                f"targeted_linear_sparsity={row['targeted_linear_sparsity_actual']:.4f} "
-                f"whole_model_sparsity={row['whole_model_sparsity_actual']:.4f}",
-                flush=True,
-            )
+            for eval_name, eval_path, eval_samples in eval_sets:
+                row = run_single_eval(
+                    model,
+                    tokenizer,
+                    eval_name,
+                    eval_path,
+                    eval_samples,
+                    args,
+                    output_dir,
+                    mode,
+                    target_sparsity,
+                    masks,
+                    checkpoint_path,
+                    mask_path,
+                    device,
+                )
+                if mode == "dense":
+                    dense_by_family_eval[(family, eval_name)] = row
+                row = add_retention_metrics(row, dense_by_family_eval.get((family, eval_name)))
+                summary_rows.append(row)
+                print(
+                    f"{eval_name} EM@1={row['em1_overall']:.4f} EM@5={row['em5_overall']:.4f} "
+                    f"targeted_linear_sparsity={row['targeted_linear_sparsity_actual']:.4f} "
+                    f"whole_model_sparsity={row['whole_model_sparsity_actual']:.4f}",
+                    flush=True,
+                )
 
     write_csv_rows(output_dir / "summary_metrics.csv", summary_rows, SUMMARY_FIELDNAMES)
     write_paper_table(output_dir, summary_rows)
