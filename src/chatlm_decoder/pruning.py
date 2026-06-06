@@ -16,6 +16,11 @@ PROTECTED_NAME_PATTERNS = (
     "wpe",
     "lm_head",
     "output_head",
+    "classifier",
+    "classification_head",
+    "response_projection",
+    "response_proj",
+    "final_projection",
     "score",
     "norm",
     "layernorm",
@@ -121,7 +126,15 @@ def protected_reason(name: str, module: torch.nn.Module | None = None) -> str:
         return "bias_parameter"
     if isinstance(module, torch.nn.Embedding) or "embed" in lower or "wte" in lower or "wpe" in lower:
         return "embedding_or_position_embedding"
-    if "lm_head" in lower or "output_head" in lower:
+    if (
+        "lm_head" in lower
+        or "output_head" in lower
+        or "classifier" in lower
+        or "classification_head" in lower
+        or "response_projection" in lower
+        or "response_proj" in lower
+        or "final_projection" in lower
+    ):
         return "lm_head_or_output_head"
     if "norm" in lower or "layernorm" in lower or ".ln_" in lower or lower.startswith("ln_"):
         return "normalization"
