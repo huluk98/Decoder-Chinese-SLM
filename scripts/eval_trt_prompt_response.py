@@ -428,6 +428,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--num-shards", type=int, default=1, help="Total number of dataset shards for parallel eval.")
+    parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard index for this eval process.")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--max-seq-len", type=int, default=128)
     parser.add_argument("--exact-match-top-k", type=int, default=5)
@@ -450,13 +452,66 @@ def main() -> None:
     setup_logging(bool(args.verbose))
     if int(args.exact_match_top_k) < 1:
         raise ValueError("--exact-match-top-k must be at least 1.")
+    if int(args.num_shards) < 1:
+        raise ValueError("--num-shards must be at least 1.")
+    if not 0 <= int(args.shard_index) < int(args.num_shards):
+        raise ValueError("--shard-index must satisfy 0 <= shard-index < num-shards.")
     max_records = args.limit if args.limit is not None else args.max_samples
     engine_path = expand_path(args.engine)
     if not engine_path.exists():
         raise FileNotFoundError(f"TensorRT engine does not exist: {engine_path}")
     tokenizer = load_tokenizer(args.model_path, trust_remote_code=bool(args.trust_remote_code))
     records = read_records(args.dataset, limit=max_records)
+    if int(args.num_shards) > 1:
+        records = [
+            {**record, "_global_index": original_index}
+            for original_index, record in enumerate(records)
+            if original_index % int(args.num_shards) == int(args.shard_index)
+        ]
     if not records:
+        if int(args.num_shards) > 1:
+            empty_summary: dict[str, Any] = {
+                "runtime": str(args.runtime),
+                "engine_path": str(engine_path),
+                "onnx_path": str(args.onnx_path or ""),
+                "model_path": str(args.model_path),
+                "dataset_file": str(args.dataset),
+                "precision": str(args.precision),
+                "variant": str(args.variant or args.precision),
+                "batch_size": int(args.batch_size),
+                "total_examples": 0,
+                "shard_index": int(args.shard_index),
+                "num_shards": int(args.num_shards),
+                "exact_match_accuracy": 0.0,
+                "exact_match_correct": 0,
+                "exact_match_at_top_k_accuracy": 0.0,
+                "exact_match_at_top_k_correct": 0,
+                "top_k_exact_match": int(args.exact_match_top_k),
+                "comparison_mode": args.comparison_mode,
+                "input_length": int(args.max_seq_len),
+                "max_new_tokens": int(args.max_new_tokens),
+                "max_seq_len": int(args.max_seq_len),
+                "reached_max_new_tokens": 0,
+                "reached_max_new_tokens_rate": 0.0,
+                "avg_latency_ms": 0.0,
+                "mean_latency_ms": 0.0,
+                "p95_latency_ms": None,
+                "queries_per_second": 0.0,
+                "tokens_per_sec": 0.0,
+                "peak_memory_mb": None,
+                "engine_size_mb": file_size_mb(engine_path),
+                "onnx_size_mb": file_size_mb(args.onnx_path),
+                "model_artifact_size_mb": artifact_size_mb(args.model_path),
+                "empty_shard": True,
+            }
+            if int(args.exact_match_top_k) == 5:
+                empty_summary["exact_match_at_5_accuracy"] = 0.0
+                empty_summary["exact_match_at_5_correct"] = 0
+                empty_summary["top5_exact_match_accuracy"] = 0.0
+                empty_summary["top5_exact_match_correct"] = 0
+            write_outputs(Path(args.output_dir).expanduser(), empty_summary, [], overwrite=bool(args.overwrite))
+            print(f"{empty_summary['variant']} shard {int(args.shard_index)}: empty")
+            return
         raise ValueError(f"Dataset produced zero records: {args.dataset}")
     runner = TensorRTEngineRunner(engine_path, verbose=bool(args.verbose))
     cache_inputs = [name for name in runner.input_names if "past_key_values" in name or name.startswith("past_")]
@@ -482,6 +537,7 @@ def main() -> None:
 
         results: list[dict[str, Any]] = []
         for index, record in enumerate(records):
+            global_index = int(record.get("_global_index", index))
             prompt, reference = prompt_and_reference(record, prompt_field=args.prompt_field)
             formatted = apply_prompt_format(tokenizer, prompt, args.prompt_format, args.system_prompt)
             generation = beam_generate_nocache(
@@ -507,7 +563,9 @@ def main() -> None:
                     top_k_match_rank = int(candidate["rank"])
                 candidates.append({**candidate, "normalized_text": candidate_normalized, "exact_match": candidate_exact})
             row = {
-                "index": index,
+                "index": global_index,
+                "shard_index": int(args.shard_index),
+                "num_shards": int(args.num_shards),
                 "prompt": prompt,
                 "formatted_prompt": formatted,
                 "reference": reference,
@@ -555,6 +613,8 @@ def main() -> None:
         "variant": str(args.variant or args.precision),
         "batch_size": int(args.batch_size),
         "total_examples": len(results),
+        "shard_index": int(args.shard_index),
+        "num_shards": int(args.num_shards),
         "exact_match_accuracy": exact_correct / float(len(results) or 1),
         "exact_match_correct": exact_correct,
         "exact_match_at_top_k_accuracy": top_k_correct / float(len(results) or 1),
