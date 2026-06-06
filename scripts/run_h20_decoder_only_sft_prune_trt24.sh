@@ -56,9 +56,7 @@ H20 ONNX GPU benchmark environment checklist:
 
      conda activate chatlm-decoder
 
-3. Install/update the required Python runtime packages:
-
-     python -m pip install --upgrade -r requirements.txt
+3. Install/update the required H20 runtime packages from requirements_h20.txt.
 
    Or install only the ONNX additions:
 
@@ -397,7 +395,7 @@ if missing:
     raise SystemExit(
         "Missing runtime requirements: "
         + ", ".join(missing)
-        + ". Install with `python -m pip install --upgrade onnx onnxruntime-gpu` in the active env."
+        + ". Install with `python -m pip install --upgrade -r requirements_h20.txt` in the active env."
     )
 PY
 }

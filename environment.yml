@@ -12,12 +12,12 @@ dependencies:
   - pyyaml>=6.0
   - tqdm>=4.66
   - pip:
-      - transformers>=4.48
+      - transformers>=4.48,<5
       - datasets>=2.19
       - huggingface_hub>=0.24
       - tokenizers>=0.19
-      - numpy>=1.26
-      - accelerate>=1.0
+      - numpy>=1.26,<3
+      - accelerate>=1.0,<2
       - onnx>=1.16
       - onnxruntime-gpu>=1.18
       - safetensors>=0.4.5
