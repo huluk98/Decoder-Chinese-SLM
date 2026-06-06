@@ -19,11 +19,12 @@ Run shape:
      with its achieved sparsity instead of pretending it can be true 30%.
      The BASE_MODEL_PATH itself is only a precursor and is not included as a
      dense baseline row by default.
-  3. Added linear-sparsity experiment: progressive 30/50% from each trained
-     checkpoint, with one recovery epoch per pruning stage and two final
-     recovery epochs by default.
-  4. Write one final revision summary JSON that points to native one-shot and
-     progressive artifacts.
+  3. Added linear-sparsity experiment: progressive gradient/Taylor 30/50%
+     from each trained checkpoint, with one recovery epoch per pruning stage
+     and one final recovery epoch by default.
+  4. Write one final revision summary JSON with a fused 20-row matrix:
+     18 pruning outcomes plus 2 dense baselines, each carrying training-data
+     EM@1/EM@5 and benchmark EM@1/EM@5 plus easy/medium/hard benchmark metrics.
 
 Environment overrides:
   PYTHON                         default: python3, then python
@@ -34,7 +35,9 @@ Environment overrides:
   BENCHMARK_PATH                 default: data/benchmarks/iot_instruction_benchmark_200.json
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
-  FINAL_RECOVERY_EPOCHS          default: 2
+  FINAL_RECOVERY_EPOCHS          default: 1
+  PROGRESSIVE_PRUNE_METHOD       default: gradient
+  PROGRESSIVE_GRADIENT_CALIBRATION_BATCHES default: 64
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
   MODEL_FAMILY                   default: decoder_only
@@ -91,21 +94,24 @@ run_progressive_linear_sparsity() {
   local label="$1"
   local checkpoint="$2"
   local output_dir="${LINEAR_SPARSITY_BASE_DIR}/${label}"
+  local progressive_method="${PROGRESSIVE_PRUNE_METHOD:-gradient}"
 
   echo
-  echo "== Added linear-sparsity experiment for ${label}: progressive 30/50% =="
+  echo "== Added linear-sparsity experiment for ${label}: progressive ${progressive_method} 30/50% =="
   "${python_bin}" scripts/run_sparsity_experiments.py \
     --experiment_name "${EXPERIMENT_NAME:-scenic_linear_sparsity_0_30_50_from_base}_${label}" \
     --model_family "${MODEL_FAMILY:-decoder_only}" \
     --model_checkpoint "${checkpoint}" \
     --benchmark_path "${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}" \
+    --extra_eval_path "training_dataset=${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
     --sparsity_levels 0 0.3 0.5 \
     --pruning_modes dense progressive \
     --prune_scope linear_weights \
-    --prune_method magnitude \
+    --prune_method "${progressive_method}" \
     --recovery_train_path "${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
     --recovery_epochs_per_stage "${RECOVERY_EPOCHS_PER_STAGE:-1}" \
-    --final_recovery_epochs "${FINAL_RECOVERY_EPOCHS:-2}" \
+    --final_recovery_epochs "${FINAL_RECOVERY_EPOCHS:-1}" \
+    --gradient_calibration_batches "${PROGRESSIVE_GRADIENT_CALIBRATION_BATCHES:-64}" \
     --num_beams "${NUM_BEAMS:-5}" \
     --num_return_sequences "${NUM_RETURN_SEQUENCES:-5}" \
     --max_new_tokens "${MAX_NEW_TOKENS:-64}" \
