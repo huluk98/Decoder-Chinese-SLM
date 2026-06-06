@@ -1,0 +1,5 @@
+# H20 CUDA overlay. Create the conda env from environment.yml first so
+# PyTorch comes from the pytorch/nvidia channels with CUDA 12.4 support.
+-r requirements.txt
+onnxruntime-gpu>=1.18; platform_system == "Linux"
+deepspeed>=0.14.5; platform_system == "Linux"

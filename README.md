@@ -60,11 +60,13 @@ Unlike the upstream T5-style model, this project does not use text-to-text encod
 
 ## Conda Setup
 
-Python 3.11 plus CUDA 12.4 PyTorch is defined in `environment.yml`.
+Python 3.11 plus CUDA 12.4 PyTorch for the H20 machine is defined in `environment.yml`.
+The base `requirements.txt` is portable/common and intentionally excludes NVIDIA GPU runtime packages. Use `requirements_h20.txt` or the `h20` optional extra on the H20 box.
 
 ```bash
 conda env create -f environment.yml
 conda activate chatlm-decoder
+python -m pip install -e ".[h20]"
 ```
 
 For an existing environment:
@@ -72,7 +74,7 @@ For an existing environment:
 ```bash
 conda env update -f environment.yml --prune
 conda activate chatlm-decoder
-pip install -e ".[deepspeed]"
+python -m pip install -e ".[h20]"
 ```
 
 ## Start-To-Finish Workflow
@@ -84,7 +86,7 @@ git clone https://github.com/huluk98/Decoder-Chinese-SLM.git
 cd Decoder-Chinese-SLM
 conda env create -f environment.yml
 conda activate chatlm-decoder
-pip install -e ".[deepspeed]"
+python -m pip install -e ".[h20]"
 HF_HUB_ENABLE_HF_TRANSFER=1 python scripts/download_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
 python scripts/prepare_data.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
 python scripts/train_tokenizer.py --config configs/h20_8gpu_llama_0p2b_deepspeed.yaml
@@ -501,7 +503,7 @@ LAUNCHER=torchrun CONFIG=configs/h20_7gpu_llama_0p2b_fast.yaml ./scripts/launch_
 
 In this repo, Accelerate is used as the launcher while `scripts/train.py` keeps ownership of DDP, DeepSpeed initialization, loss averaging, metrics logging, and checkpoint saving. That keeps the DDP, DeepSpeed, and Accelerate launch commands comparable.
 
-The conda environment installs DeepSpeed. If you are managing packages manually on the H20 machine, install the optional extra with `pip install -e ".[deepspeed]"`.
+The conda environment installs DeepSpeed. If you are managing packages manually on the H20 machine, install the optional extra with `pip install -e ".[h20]"`.
 
 DeepSpeed is not required for this 0.2B model to fit in 143711 MiB H20 memory, so ZeRO-1 is the first recommended DeepSpeed mode. ZeRO-2 or ZeRO-3 can save more optimizer/parameter memory, but they add extra communication and are usually slower for a model this small unless memory pressure is the real bottleneck.
 
