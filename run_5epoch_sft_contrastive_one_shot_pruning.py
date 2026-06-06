@@ -61,6 +61,7 @@ CONFIG: dict[str, Any] = {
     "num_beams": 5,
     "max_new_token_hit_rate_threshold": 0.5,
     "sparsity": 0.5,
+    "sparsity_levels": None,  # None -> use the single SPARSITY value.
     "pruning_scope": "transformer_linears",
     "sparsity_denominator": "prunable",
     "granularity": "global",
@@ -120,6 +121,7 @@ ENV_OVERRIDES = {
     "NUM_BEAMS": "num_beams",
     "MAX_NEW_TOKEN_HIT_RATE_THRESHOLD": "max_new_token_hit_rate_threshold",
     "SPARSITY": "sparsity",
+    "SPARSITY_LEVELS": "sparsity_levels",
     "PRUNING_SCOPE": "pruning_scope",
     "SPARSITY_DENOMINATOR": "sparsity_denominator",
     "GRANULARITY": "granularity",
@@ -150,6 +152,38 @@ def coerce_value(value: str, current: Any) -> Any:
     if isinstance(current, list):
         return str(value).replace(",", " ").split()
     return value
+
+
+def parse_sparsity_levels(value: Any, fallback: Any) -> list[float]:
+    if value in (None, ""):
+        raw_levels = [fallback]
+    elif isinstance(value, (int, float)):
+        raw_levels = [value]
+    elif isinstance(value, str):
+        raw_levels = value.replace(",", " ").split()
+    else:
+        raw_levels = []
+        for item in value:
+            raw_levels.extend(str(item).replace(",", " ").split())
+    levels: list[float] = []
+    for raw_level in raw_levels:
+        level = float(raw_level)
+        if not 0.0 <= level <= 1.0:
+            raise ValueError(f"sparsity levels must be between 0 and 1, got {level}")
+        if level not in levels:
+            levels.append(level)
+    if not levels:
+        raise ValueError("At least one sparsity level is required.")
+    return levels
+
+
+def sparsity_slug(level: float) -> str:
+    text = f"{float(level):.6g}".replace(".", "p")
+    return f"sparsity_{text}"
+
+
+def sparsity_label(level: float) -> str:
+    return f"{float(level):.0%}"
 
 
 def apply_env_overrides(config: dict[str, Any]) -> None:
@@ -363,6 +397,8 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["base_model"] = str(base_model)
     settings["original_model"] = str(config.get("original_model") or settings["base_model"])
     settings["contrastive_base_model"] = config.get("contrastive_base_model") or str(settings["regular_final"])
+    settings["sparsity_levels"] = parse_sparsity_levels(config.get("sparsity_levels"), config.get("sparsity", 0.5))
+    settings["sparsity"] = float(settings["sparsity_levels"][0])
     settings["python"] = str(repo_path(config["python"])) if config.get("python") else sys.executable
     torchrun = config.get("torchrun")
     if torchrun:
@@ -491,8 +527,10 @@ def benchmark_config(
     output_dir: Path,
     inputs: dict[str, str],
     methods: list[str] | None = None,
+    sparsity: float | None = None,
 ) -> dict[str, Any]:
     benchmark_methods = list(settings["methods"] if methods is None else methods)
+    target_sparsity = float(settings["sparsity"] if sparsity is None else sparsity)
     max_length = (
         int(settings["max_length"])
         if settings.get("max_length") not in (None, "")
@@ -539,7 +577,7 @@ def benchmark_config(
             "continue_on_error": bool(settings["keep_going"]),
         },
         "prune": {
-            "sparsity": float(settings["sparsity"]),
+            "sparsity": target_sparsity,
             "scope": str(settings["pruning_scope"]),
             "sparsity_denominator": str(settings["sparsity_denominator"]),
             "granularity": str(settings["granularity"]),
@@ -566,14 +604,26 @@ def benchmark_config(
     }
 
 
-def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, Path, Path]:
+def pruning_output_dir_for_level(base_dir: Path, level: float, settings: dict[str, Any]) -> Path:
+    levels = settings.get("sparsity_levels") or [settings["sparsity"]]
+    if len(levels) == 1:
+        return Path(base_dir)
+    return Path(base_dir) / sparsity_slug(level)
+
+
+def generated_config_name(base_name: str, level: float, settings: dict[str, Any]) -> str:
+    levels = settings.get("sparsity_levels") or [settings["sparsity"]]
+    if len(levels) == 1:
+        return f"{base_name}.yaml"
+    return f"{base_name}_{sparsity_slug(level)}.yaml"
+
+
+def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, list[Path], list[Path]]:
     sft_config = sft_config_with_overrides(read_yaml(settings["sft_config"]), settings)
     contrastive_config = contrastive_config_with_overrides(read_yaml(settings["contrastive_config"]), settings)
     generated_dir = Path(settings["generated_config_dir"])
     generated_dir.mkdir(parents=True, exist_ok=True)
     original_path = generated_dir / "original_decoder_dense_eval.yaml"
-    regular_path = generated_dir / "base_sft_one_shot_pruning.yaml"
-    contrastive_path = generated_dir / "contrastive_sft_one_shot_pruning.yaml"
     write_yaml(
         original_path,
         benchmark_config(
@@ -587,31 +637,40 @@ def write_generated_benchmark_configs(settings: dict[str, Any]) -> tuple[Path, P
             methods=[],
         ),
     )
-    write_yaml(
-        regular_path,
-        benchmark_config(
-            label="base_sft",
-            source_config=sft_config,
-            config_path=settings["sft_config"],
-            settings=settings,
-            base_checkpoint=settings["regular_final"],
-            output_dir=settings["regular_pruning_output_dir"],
-            inputs=sft_eval_inputs(sft_config, settings["sft_config"]),
-        ),
-    )
-    write_yaml(
-        contrastive_path,
-        benchmark_config(
-            label="contrastive_sft",
-            source_config=contrastive_config,
-            config_path=settings["contrastive_config"],
-            settings=settings,
-            base_checkpoint=settings["contrastive_final"],
-            output_dir=settings["contrastive_pruning_output_dir"],
-            inputs=contrastive_eval_inputs(contrastive_config, settings["contrastive_config"]),
-        ),
-    )
-    return original_path, regular_path, contrastive_path
+    regular_paths: list[Path] = []
+    contrastive_paths: list[Path] = []
+    for level in settings["sparsity_levels"]:
+        regular_path = generated_dir / generated_config_name("base_sft_one_shot_pruning", level, settings)
+        contrastive_path = generated_dir / generated_config_name("contrastive_sft_one_shot_pruning", level, settings)
+        write_yaml(
+            regular_path,
+            benchmark_config(
+                label="base_sft",
+                source_config=sft_config,
+                config_path=settings["sft_config"],
+                settings=settings,
+                base_checkpoint=settings["regular_final"],
+                output_dir=pruning_output_dir_for_level(settings["regular_pruning_output_dir"], level, settings),
+                inputs=sft_eval_inputs(sft_config, settings["sft_config"]),
+                sparsity=level,
+            ),
+        )
+        write_yaml(
+            contrastive_path,
+            benchmark_config(
+                label="contrastive_sft",
+                source_config=contrastive_config,
+                config_path=settings["contrastive_config"],
+                settings=settings,
+                base_checkpoint=settings["contrastive_final"],
+                output_dir=pruning_output_dir_for_level(settings["contrastive_pruning_output_dir"], level, settings),
+                inputs=contrastive_eval_inputs(contrastive_config, settings["contrastive_config"]),
+                sparsity=level,
+            ),
+        )
+        regular_paths.append(regular_path)
+        contrastive_paths.append(contrastive_path)
+    return original_path, regular_paths, contrastive_paths
 
 
 def run_pruning_benchmark(
@@ -661,13 +720,22 @@ def read_pruning_summary(output_dir: Path) -> dict[str, Any]:
         return json.load(handle)
 
 
-def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
+def rows_for_family(
+    family: str,
+    output_dir: Path,
+    *,
+    target_sparsity: float | None = None,
+    include_dense: bool = True,
+) -> list[dict[str, Any]]:
     payload = read_pruning_summary(output_dir)
     rows: list[dict[str, Any]] = []
-    all_rows = list(payload.get("dense_baseline", []) or []) + list(payload.get("results", []) or [])
+    all_rows = (list(payload.get("dense_baseline", []) or []) if include_dense else []) + list(payload.get("results", []) or [])
     for row in all_rows:
         phase = str(row.get("phase", ""))
         method = "base_model" if phase == "dense_baseline" else str(row.get("method", ""))
+        row_target_sparsity = 0.0 if phase == "dense_baseline" else target_sparsity
+        if row_target_sparsity is None:
+            row_target_sparsity = safe_float(metric(row, "target_whole_model_sparsity", "target_prunable_sparsity"))
         rows.append(
             {
                 "model_family": family,
@@ -675,6 +743,8 @@ def rows_for_family(family: str, output_dir: Path) -> list[dict[str, Any]]:
                 "eval_file": row.get("eval_file", ""),
                 "phase": phase,
                 "method": method,
+                "target_sparsity": safe_float(row_target_sparsity),
+                "target_sparsity_label": sparsity_label(float(row_target_sparsity)) if row_target_sparsity not in ("", None) else "",
                 "status": row.get("status", ""),
                 "em1": safe_float(metric(row, "exact_match_accuracy", "exact_match_accuracy_mean")),
                 "em5": safe_float(
@@ -715,6 +785,15 @@ def json_ready(value: Any) -> Any:
     return value
 
 
+def sparsity_key(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        return f"{float(value):.6g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
     expected_eval_names = ["training_dataset", "benchmark"]
     expected_rows: list[dict[str, str]] = []
@@ -728,19 +807,37 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
             {"model_family": family, "eval_name": eval_name, "method": "base_model"}
             for eval_name in expected_eval_names
         )
-        expected_rows.extend(
-            {"model_family": family, "eval_name": eval_name, "method": str(method)}
-            for eval_name in expected_eval_names
-            for method in settings["methods"]
-        )
-        if settings.get("eos_retune", False):
+        for level in settings.get("sparsity_levels", [settings["sparsity"]]):
             expected_rows.extend(
-                {"model_family": family, "eval_name": eval_name, "method": str(method), "phase": "retuned"}
+                {
+                    "model_family": family,
+                    "eval_name": eval_name,
+                    "method": str(method),
+                    "target_sparsity": sparsity_key(level),
+                }
                 for eval_name in expected_eval_names
                 for method in settings["methods"]
             )
+            if settings.get("eos_retune", False):
+                expected_rows.extend(
+                    {
+                        "model_family": family,
+                        "eval_name": eval_name,
+                        "method": str(method),
+                        "phase": "retuned",
+                        "target_sparsity": sparsity_key(level),
+                    }
+                    for eval_name in expected_eval_names
+                    for method in settings["methods"]
+                )
     present = {
-        (str(row.get("model_family")), str(row.get("eval_name")), str(row.get("method")), str(row.get("phase", "")))
+        (
+            str(row.get("model_family")),
+            str(row.get("eval_name")),
+            str(row.get("method")),
+            str(row.get("phase", "")),
+            sparsity_key(row.get("target_sparsity", "")) if row.get("method") != "base_model" else "",
+        )
         for row in rows
     }
     missing = [
@@ -751,6 +848,7 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
             expected["eval_name"],
             expected["method"],
             str(expected.get("phase", "one_shot" if expected["method"] != "base_model" else "dense_baseline")),
+            expected.get("target_sparsity", "") if expected["method"] != "base_model" else "",
         )
         not in present
     ]
@@ -765,21 +863,27 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
 def write_results_json(
     settings: dict[str, Any],
     original_config: Path,
-    regular_config: Path,
-    contrastive_config: Path,
+    regular_configs: list[Path],
+    contrastive_configs: list[Path],
 ) -> None:
     original_summary = (
         read_pruning_summary(settings["original_eval_output_dir"])
         if settings.get("run_original_decoder_eval", True)
         else {}
     )
-    base_summary = read_pruning_summary(settings["regular_pruning_output_dir"])
-    contrastive_summary = read_pruning_summary(settings["contrastive_pruning_output_dir"])
     rows: list[dict[str, Any]] = []
     if settings.get("run_original_decoder_eval", True):
         rows.extend(rows_for_family("original_decoder", settings["original_eval_output_dir"]))
-    rows.extend(rows_for_family("base_sft", settings["regular_pruning_output_dir"]))
-    rows.extend(rows_for_family("contrastive_sft", settings["contrastive_pruning_output_dir"]))
+    base_summaries: dict[str, Any] = {}
+    contrastive_summaries: dict[str, Any] = {}
+    for index, level in enumerate(settings["sparsity_levels"]):
+        slug = sparsity_slug(level)
+        base_dir = pruning_output_dir_for_level(settings["regular_pruning_output_dir"], level, settings)
+        contrastive_dir = pruning_output_dir_for_level(settings["contrastive_pruning_output_dir"], level, settings)
+        rows.extend(rows_for_family("base_sft", base_dir, target_sparsity=level, include_dense=index == 0))
+        rows.extend(rows_for_family("contrastive_sft", contrastive_dir, target_sparsity=level, include_dense=index == 0))
+        base_summaries[slug] = read_pruning_summary(base_dir)
+        contrastive_summaries[slug] = read_pruning_summary(contrastive_dir)
     datasets = dataset_summary(settings)
     output_path = Path(settings["results_json"])
     payload = {
@@ -810,11 +914,12 @@ def write_results_json(
             "datasets": datasets,
             "generated_configs": {
                 "original_decoder": original_config,
-                "base_sft": regular_config,
-                "contrastive_sft": contrastive_config,
+                "base_sft": regular_configs,
+                "contrastive_sft": contrastive_configs,
             },
             "pruning": {
                 "sparsity": settings["sparsity"],
+                "sparsity_levels": settings["sparsity_levels"],
                 "scope": settings["pruning_scope"],
                 "sparsity_denominator": settings["sparsity_denominator"],
                 "granularity": settings["granularity"],
@@ -842,8 +947,8 @@ def write_results_json(
         "results": rows,
         "raw_benchmark_summaries": {
             "original_decoder": original_summary,
-            "base_sft": base_summary,
-            "contrastive_sft": contrastive_summary,
+            "base_sft": base_summaries,
+            "contrastive_sft": contrastive_summaries,
         },
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -856,6 +961,8 @@ def write_results_json(
         "eval_name",
         "phase",
         "method",
+        "target_sparsity",
+        "target_sparsity_label",
         "status",
         "em1",
         "em5",
@@ -864,11 +971,11 @@ def write_results_json(
         "total_examples",
         "mean_response_loss",
         "response_perplexity",
-                "avg_generated_tokens",
-                "max_token_hit_rate",
-                "hit_eos",
-                "eos_hit_rate",
-                "achieved_whole_model_sparsity",
+        "avg_generated_tokens",
+        "max_token_hit_rate",
+        "hit_eos",
+        "eos_hit_rate",
+        "achieved_whole_model_sparsity",
         "achieved_prunable_sparsity",
         "checkpoint_evaluated",
         "eval_output_dir",
@@ -898,7 +1005,8 @@ def print_plan(settings: dict[str, Any]) -> None:
     )
     print(
         "  pruning target:        "
-        f"{float(settings['sparsity']):.0%} {settings['sparsity_denominator']} "
+        f"{', '.join(sparsity_label(level) for level in settings['sparsity_levels'])} "
+        f"{settings['sparsity_denominator']} "
         f"{settings['pruning_scope']} ({settings['granularity']})"
     )
     print(f"  calibration batches:   {settings['calibration_batches']}")
@@ -960,20 +1068,23 @@ def main() -> None:
         print(f"Contrastive 5-epoch SFT checkpoint:  {settings['contrastive_final']}")
         return
 
-    original_config, regular_config, contrastive_config = write_generated_benchmark_configs(settings)
-    print(f"\nGenerated benchmark configs:\n  {original_config}\n  {regular_config}\n  {contrastive_config}")
+    original_config, regular_configs, contrastive_configs = write_generated_benchmark_configs(settings)
+    generated_config_lines = [str(original_config), *[str(path) for path in regular_configs], *[str(path) for path in contrastive_configs]]
+    print("\nGenerated benchmark configs:\n  " + "\n  ".join(generated_config_lines))
 
     if settings["run_original_decoder_eval"]:
         run_pruning_benchmark(original_config, settings, env, methods=[])
     if settings["run_pruning_benchmarks"]:
-        run_pruning_benchmark(regular_config, settings, env)
-        run_pruning_benchmark(contrastive_config, settings, env)
+        for config_path in regular_configs:
+            run_pruning_benchmark(config_path, settings, env)
+        for config_path in contrastive_configs:
+            run_pruning_benchmark(config_path, settings, env)
 
     if settings["dry_run"]:
         print("\nDry run complete.")
         return
 
-    write_results_json(settings, original_config, regular_config, contrastive_config)
+    write_results_json(settings, original_config, regular_configs, contrastive_configs)
     print("\nDone.")
 
 
