@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -309,6 +310,43 @@ def progressive_result_counts(progressive: list[dict[str, Any]]) -> dict[str, An
     }
 
 
+def execution_plan() -> dict[str, Any]:
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    nproc_per_node = numeric(os.environ.get("NPROC_PER_NODE", ""))
+    return {
+        "cuda_visible_devices": cuda_visible_devices,
+        "nproc_per_node": nproc_per_node,
+        "sft_training": {
+            "launcher": "torchrun",
+            "distributed": True,
+            "uses_nproc_per_node": True,
+            "notes": "Regular SFT and contrastive SFT are launched by run_5epoch_sft_contrastive_one_shot_pruning.py with torchrun.",
+        },
+        "native_eval": {
+            "launcher": "torchrun",
+            "distributed": True,
+            "uses_nproc_per_node": True,
+            "notes": "Native dense and one-shot evals are launched through scripts/run_pruning_benchmark.py with torchrun.",
+        },
+        "native_pruning_transform": {
+            "launcher": "python scripts/prune.py",
+            "distributed": False,
+            "uses_nproc_per_node": False,
+            "notes": "Mask generation/model rewrite for magnitude, WANDA, Taylor, and 2:4 is single-process per outcome.",
+        },
+        "progressive_gradient": {
+            "launcher": "python scripts/run_sparsity_experiments.py",
+            "distributed": False,
+            "uses_nproc_per_node": False,
+            "notes": "Gradual gradient pruning, recovery epochs, and final progressive evals are single-process unless that runner is later made DDP-aware.",
+        },
+        "timing_interpretation": (
+            "Training and native eval timings are 8-GPU timings when CUDA_VISIBLE_DEVICES exposes 8 GPUs and NPROC_PER_NODE=8. "
+            "Native pruning transforms and progressive gradient rows are not full 8-GPU distributed timings."
+        ),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Combine native and progressive SCENIC sparsity revision summaries.")
     parser.add_argument("--native-results-json", required=True)
@@ -338,6 +376,7 @@ def main() -> None:
             "regular_sft": str(regular_path),
             "contrastive_sft": str(contrastive_path),
         },
+        "execution_plan": execution_plan(),
         "matrix_counts": {
             **native_result_counts(native_payload),
             **progressive_result_counts(progressive),

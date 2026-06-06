@@ -196,3 +196,5 @@ def test_write_revision_summary_emits_final_matrix(tmp_path: Path, monkeypatch) 
     assert len(payload["final_matrix_rows"]) == 20
     assert payload["matrix_counts"]["final_pruning_result_rows"] == 18
     assert payload["matrix_counts"]["final_matrix_complete"] is True
+    assert payload["execution_plan"]["sft_training"]["distributed"] is True
+    assert payload["execution_plan"]["progressive_gradient"]["distributed"] is False
