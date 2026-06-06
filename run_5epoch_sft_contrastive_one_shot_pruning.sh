@@ -16,7 +16,7 @@ WANDA, Taylor saliency, and NVIDIA 2:4 while keeping embeddings, norms, and
 lm_head dense for EOS stability.
 
 Commands:
-  retune, eos-retune   run 50% pruning, then add fixed-mask EOS retune rows.
+  retune, eos-retune   run configured pruning target(s), then add fixed-mask EOS retune rows.
   one-shot, no-retune  run the original one-shot pruning benchmark only.
   train-only           stop after the two 5-epoch training runs.
 
@@ -33,6 +33,9 @@ Environment overrides:
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
                         default: 0.5, so eval fails when most generations hit max_new_tokens without EOS.
   METHODS               default: "magnitude wanda taylor 2of4".
+  SPARSITY_LEVELS        optional whitespace/comma list such as "0.3 0.5";
+                        when set, pruning/eval runs once per level after training.
+  SPARSITY               default: 0.5 when SPARSITY_LEVELS is unset.
   SPARSITY_DENOMINATOR  default: prunable, so 50% means selected Linear weights rather than whole model parameters.
   GRANULARITY           default: global for magnitude/WANDA/Taylor; 2:4 remains fixed per 4-weight group.
   EOS_RETUNE            set to 1 to add masked SFT recovery rows after one-shot pruning.

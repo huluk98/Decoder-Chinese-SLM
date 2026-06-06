@@ -118,7 +118,7 @@ For the revision run from one base model path, use the one-line wrapper:
 PYTHON=/path/to/env/bin/python bash run_linear_sparsity_revision_from_base.sh /path/to/base_model
 ```
 
-This wrapper keeps the original four methods (`magnitude`, `wanda`, `taylor`, `2of4`) as one-shot-only runs. It then runs the added Linear sparsity experiment with one recovery epoch per progressive stage and one final recovery epoch.
+This wrapper keeps the original four methods (`magnitude`, `wanda`, `taylor`, `2of4`) as one-shot-only runs and now sweeps the native-method pruning targets with `SPARSITY_LEVELS="0.3 0.5"` by default. Exact NVIDIA `2of4` is still a fixed 50% structured condition; a requested 30% native sweep records the request but reports the achieved 50% 2:4 sparsity rather than treating it as a true 30% unstructured result. It then runs the added Linear sparsity experiment with one recovery epoch per progressive stage and one final recovery epoch.
 
 Example:
 

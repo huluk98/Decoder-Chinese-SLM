@@ -168,7 +168,7 @@ def make_masks(
 
     if method == "2of4":
         method_target_note = ""
-        if scope != "full_model" and str(target_resolution["target_sparsity_denominator"]) == "whole_model" and abs(sparsity - 0.5) > 1e-12:
+        if scope != "full_model" and abs(sparsity - 0.5) > 1e-12:
             requested_resolution = target_resolution
             target_resolution = resolve_prunable_sparsity_for_target(
                 model,
@@ -182,9 +182,9 @@ def make_masks(
             prune_config["_resolved_prunable_sparsity"] = sparsity
             method_target_note = (
                 "Pure NVIDIA 2:4 is a fixed vanilla method: exactly 50% sparsity within each prunable "
-                "Linear 4-weight group. It cannot also satisfy a 50% whole-model target while protected "
-                "parameters remain unchanged, so this method is run and reported as 50% prunable 2:4. "
-                f"The requested whole-model target would have required "
+                "Linear 4-weight group. It cannot also satisfy the requested protected-parameter target "
+                "while remaining native 2:4, so this method is run and reported as 50% prunable 2:4. "
+                f"The requested {requested_resolution['target_sparsity_denominator']} target would have required "
                 f"{float(requested_resolution['target_prunable_sparsity']):.8f} prunable sparsity."
             )
         masks = two_of_four_masks(model, include_lm_head=include_lm_head, scope=scope, sparsity=sparsity)

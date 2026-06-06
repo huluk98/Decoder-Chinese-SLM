@@ -11,7 +11,9 @@ Usage:
 
 Run shape:
   1. Original four methods: magnitude, WANDA, Taylor, NVIDIA 2:4.
-     These stay one-shot only; no masked retune rows are added.
+     These stay one-shot only at 30% and 50%; no masked retune rows are added.
+     Exact NVIDIA 2:4 remains a fixed 50% structured condition and is reported
+     with its achieved sparsity instead of pretending it can be true 30%.
   2. Added linear-sparsity experiment: dense 0%, one-shot 30/50%,
      progressive 30/50% with one recovery epoch per pruning stage and one
      final recovery epoch.
@@ -19,6 +21,7 @@ Run shape:
 Environment overrides:
   PYTHON                         default: python3, then python
   ORIGINAL_RUN_ROOT              default: runs/revision-original-four-one-shot
+  NATIVE_SPARSITY_LEVELS         default: "0.3 0.5"
   LINEAR_SPARSITY_OUTPUT_DIR     default: results/scenic_linear_sparsity_0_30_50_from_base
   BENCHMARK_PATH                 default: data/benchmarks/iot_instruction_benchmark_200.json
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
@@ -59,13 +62,14 @@ export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
 
 export RUN_ROOT="${ORIGINAL_RUN_ROOT:-runs/revision-original-four-one-shot}"
 export METHODS="${METHODS:-magnitude wanda taylor 2of4}"
+export SPARSITY_LEVELS="${SPARSITY_LEVELS:-${NATIVE_SPARSITY_LEVELS:-0.3 0.5}}"
 export EOS_RETUNE=0
 export BENCHMARK_FILE="${BENCHMARK_FILE:-${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}}"
 export TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-5}"
 export COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
 export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-0.5}"
 
-echo "== Original four methods: one-shot only =="
+echo "== Original four methods: one-shot only at ${SPARSITY_LEVELS} =="
 bash run_5epoch_sft_contrastive_one_shot_pruning.sh one-shot "${BASE_MODEL_PATH}"
 
 echo
