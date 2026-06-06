@@ -190,7 +190,8 @@ def methods_for_sparsity_level(methods: list[str], level: float) -> list[str]:
     """Native 2:4 is only meaningful at its fixed 50% structured target."""
     if abs(float(level) - 0.5) <= 1e-12:
         return list(methods)
-    return [method for method in methods if method != "2of4"]
+    two_of_four_aliases = {"2of4", "2:4", "2_4", "2-of-4", "2_of_4", "nvidia-2of4", "nvidia_2of4", "nvidia24", "nvidia_24", "nvidia_2_4"}
+    return [method for method in methods if str(method).strip().lower().replace("-", "_") not in two_of_four_aliases]
 
 
 def apply_env_overrides(config: dict[str, Any]) -> None:

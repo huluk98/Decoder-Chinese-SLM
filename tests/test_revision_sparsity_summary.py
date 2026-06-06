@@ -46,7 +46,7 @@ def native_eval_row(
     }
 
 
-def write_progressive_csv(path: Path, family: str) -> None:
+def write_progressive_csv(path: Path, family: str, sparsities: tuple[float, ...] = (0.3, 0.5)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "eval_name",
@@ -71,14 +71,14 @@ def write_progressive_csv(path: Path, family: str) -> None:
         "targeted_linear_sparsity_actual",
     ]
     rows = []
-    for sparsity in (0.3, 0.5):
+    for sparsity in sparsities:
         for eval_name in ("benchmark", "training_dataset"):
             rows.append(
                 {
                     "eval_name": eval_name,
                     "eval_path": f"{eval_name}.json",
                     "pruning_mode": "progressive",
-                    "pruning_method": "gradient",
+                    "pruning_method": "magnitude",
                     "target_sparsity": sparsity,
                     "em1_overall": 0.61 if eval_name == "training_dataset" else 0.51,
                     "em5_overall": 0.62 if eval_name == "training_dataset" else 0.52,
@@ -137,17 +137,22 @@ def test_final_revision_matrix_has_eighteen_pruning_rows_plus_two_dense_rows(tmp
     assert counts["final_rows_by_family_and_source"] == {
         "contrastive_sft:dense_baseline": 1,
         "contrastive_sft:native_one_shot": 7,
-        "contrastive_sft:progressive_gradient": 2,
+        "contrastive_sft:progressive_magnitude": 2,
         "regular_sft:dense_baseline": 1,
         "regular_sft:native_one_shot": 7,
-        "regular_sft:progressive_gradient": 2,
+        "regular_sft:progressive_magnitude": 2,
     }
+    assert {
+        row["method"]
+        for row in matrix_rows
+        if row["source"] == "native_one_shot" and row["target_sparsity"] == 0.5
+    } == {"magnitude", "wanda", "gradient", "nvidia24"}
 
     regular_progressive = next(
         row
         for row in matrix_rows
         if row["trained_checkpoint_family"] == "regular_sft"
-        and row["source"] == "progressive_gradient"
+        and row["source"] == "progressive_magnitude"
         and row["target_sparsity"] == 0.3
     )
     assert regular_progressive["training_data_em1"] == 0.61
@@ -160,8 +165,10 @@ def test_final_revision_matrix_has_eighteen_pruning_rows_plus_two_dense_rows(tmp
 
 def test_write_revision_summary_emits_final_matrix(tmp_path: Path, monkeypatch) -> None:
     native_path = tmp_path / "native.json"
-    regular_csv = tmp_path / "regular_sft" / "summary_metrics.csv"
-    contrastive_csv = tmp_path / "contrastive_sft" / "summary_metrics.csv"
+    regular_30_csv = tmp_path / "regular_sft" / "sparsity_0p3" / "summary_metrics.csv"
+    regular_50_csv = tmp_path / "regular_sft" / "sparsity_0p5" / "summary_metrics.csv"
+    contrastive_30_csv = tmp_path / "contrastive_sft" / "sparsity_0p3" / "summary_metrics.csv"
+    contrastive_50_csv = tmp_path / "contrastive_sft" / "sparsity_0p5" / "summary_metrics.csv"
     output_path = tmp_path / "revision_summary.json"
 
     native_rows = []
@@ -173,8 +180,10 @@ def test_write_revision_summary_emits_final_matrix(tmp_path: Path, monkeypatch) 
                 for eval_name in ("training_dataset", "benchmark"):
                     native_rows.append(native_eval_row(family, "one_shot", method, sparsity, eval_name))
     native_path.write_text(json.dumps({"results": native_rows}), encoding="utf-8")
-    write_progressive_csv(regular_csv, "regular_sft")
-    write_progressive_csv(contrastive_csv, "contrastive_sft")
+    write_progressive_csv(regular_30_csv, "regular_sft", (0.3,))
+    write_progressive_csv(regular_50_csv, "regular_sft", (0.5,))
+    write_progressive_csv(contrastive_30_csv, "contrastive_sft", (0.3,))
+    write_progressive_csv(contrastive_50_csv, "contrastive_sft", (0.5,))
 
     monkeypatch.setattr(
         "sys.argv",
@@ -183,9 +192,13 @@ def test_write_revision_summary_emits_final_matrix(tmp_path: Path, monkeypatch) 
             "--native-results-json",
             str(native_path),
             "--regular-progressive-summary",
-            str(regular_csv),
+            str(regular_30_csv),
+            "--regular-progressive-summary",
+            str(regular_50_csv),
             "--contrastive-progressive-summary",
-            str(contrastive_csv),
+            str(contrastive_30_csv),
+            "--contrastive-progressive-summary",
+            str(contrastive_50_csv),
             "--output-json",
             str(output_path),
         ],
@@ -197,4 +210,5 @@ def test_write_revision_summary_emits_final_matrix(tmp_path: Path, monkeypatch) 
     assert payload["matrix_counts"]["final_pruning_result_rows"] == 18
     assert payload["matrix_counts"]["final_matrix_complete"] is True
     assert payload["execution_plan"]["sft_training"]["distributed"] is True
-    assert payload["execution_plan"]["progressive_gradient"]["distributed"] is False
+    assert payload["execution_plan"]["progressive_magnitude"]["distributed"] is False
+    assert payload["execution_plan"]["progressive_magnitude"]["parallel_jobs"] is True
