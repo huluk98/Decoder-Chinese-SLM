@@ -11,6 +11,33 @@ This repository is currently set up for one local H20 workflow:
 
 Everything below assumes the model is already on the machine as a local checkpoint directory.
 
+## How The Model Was Made
+
+The local checkpoint is a decoder-only Chinese SLM built to stay near the same 0.2B parameter budget and 29,298-token vocabulary target as `charent/ChatLM-mini-Chinese`, but with a modern causal decoder architecture instead of a T5-style encoder-decoder model.
+
+The base model recipe uses:
+
+- Llama-family causal LM modeling through `transformers.LlamaForCausalLM`.
+- RoPE position embeddings, RMSNorm, SwiGLU MLPs, grouped-query attention, bias-free projections, and SDPA attention.
+- A Chinese-friendly BPE tokenizer with the project special tokens.
+- Public Chinese prompt/response, QA, instruction, web, wiki-like, and domain dialogue sources normalized into one decoder-only text corpus.
+- H20 multi-GPU training with checkpointing, metrics logging, and safetensors checkpoint output.
+
+The pruning pipeline below starts from the resulting local checkpoint. It does not download or create the base model during the pruning run.
+
+## Public Data Provenance
+
+The base model data recipe follows the public-data spirit of `charent/ChatLM-mini-Chinese` while converting the task to decoder-only causal-LM training. The configured public sources include:
+
+- `YeungNLP/firefly-pretrain-dataset`, including `webText2019zh.jsonl`, for Chinese web/community text.
+- `ZhouLV/Chinese-Train-Datasets`, `baike2018qa/baike_qa_train.json`, for encyclopedia QA.
+- `ticoAg/Chinese-medical-dialogue` for Chinese medical dialogue and QA.
+- `wangrui6/Zhihu-KOL` for Zhihu-style QA.
+- `BelleGroup/train_1M_CN`, `BelleGroup/train_2M_CN`, and `BelleGroup/train_3.5M_CN` for Chinese instruction/chat data.
+- `YeungNLP/firefly-pretrain-dataset`, including `wiki_zh.jsonl`, for Chinese Wikipedia-like text.
+
+The data preparation path downloads/cache-stages those sources, normalizes local/cache-backed records into one JSONL corpus, trains or loads the fixed tokenizer, and then trains the decoder-only model with next-token prediction.
+
 ## Local Checkpoint
 
 Set the model path once:
@@ -82,6 +109,56 @@ Counting dense baselines, the expected final JSON has 20 result rows:
 Progressive recovery uses 1 recovery epoch after every pruning stage and 1 final recovery epoch after all stages.
 
 The summary is intended to include training-data EM@1/EM@5, benchmark EM@1/EM@5, and benchmark easy/medium/hard breakdowns when those eval files are available.
+
+## Decoder-Only C-Eval Metrics
+
+C-Eval is still part of the decoder-only model reporting. It is separate from the pruning summary JSON and is run directly on whichever local checkpoint you want to report.
+
+Run C-Eval on the local base checkpoint:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint "$MODEL" \
+  --split val \
+  --n-shot 5 \
+  --dtype fp16 \
+  --device cuda \
+  --output-dir results/ceval_local_decoder
+```
+
+Run C-Eval on the regular SFT checkpoint:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/revision-original-four-one-shot/training/base_sft_5ep/final \
+  --split val \
+  --n-shot 5 \
+  --dtype fp16 \
+  --device cuda \
+  --output-dir results/ceval_regular_sft
+```
+
+Run C-Eval on the contrastive SFT checkpoint:
+
+```bash
+python scripts/eval_ceval.py \
+  --checkpoint runs/revision-original-four-one-shot/training/contrastive_sft_5ep/final \
+  --split val \
+  --n-shot 5 \
+  --dtype fp16 \
+  --device cuda \
+  --output-dir results/ceval_contrastive_sft
+```
+
+The evaluator scores the conditional log probability of answer choices `A`, `B`, `C`, and `D`, which is more stable for decoder-only checkpoints than free-form generation. Each C-Eval run writes:
+
+```text
+ceval_summary.json
+ceval_predictions.csv
+ceval_category_summary.csv
+```
+
+The category summary reports Humanities, STEM, Social Science, and Other accuracy.
 
 ## Important Defaults
 
@@ -201,3 +278,28 @@ bash run_linear_sparsity_revision_from_base.sh "$MODEL"
 ```
 
 The main launcher sets those defaults automatically.
+
+## References And Citations
+
+Reference model and benchmark:
+
+- `charent/ChatLM-mini-Chinese`: same-size reference target for the 0.2B parameter budget, 29,298-token vocabulary, Chinese public-data recipe, loss-curve style, and C-Eval reporting comparison: `https://huggingface.co/charent/ChatLM-mini-Chinese`.
+- `ceval/ceval-exam`: C-Eval validation/test loading: `https://huggingface.co/datasets/ceval/ceval-exam`.
+- `hkust-nlp/ceval`: official C-Eval benchmark context and subject/category mapping: `https://github.com/hkust-nlp/ceval`.
+
+Public data repositories:
+
+- `YeungNLP/firefly-pretrain-dataset`: `https://huggingface.co/datasets/YeungNLP/firefly-pretrain-dataset`.
+- `ZhouLV/Chinese-Train-Datasets`: `https://huggingface.co/datasets/ZhouLV/Chinese-Train-Datasets`.
+- `ticoAg/Chinese-medical-dialogue`: `https://huggingface.co/datasets/ticoAg/Chinese-medical-dialogue`.
+- `wangrui6/Zhihu-KOL`: `https://huggingface.co/datasets/wangrui6/Zhihu-KOL`.
+- `BelleGroup/train_1M_CN`: `https://huggingface.co/datasets/BelleGroup/train_1M_CN`.
+- `BelleGroup/train_2M_CN`: `https://huggingface.co/datasets/BelleGroup/train_2M_CN`.
+- `BelleGroup/train_3.5M_CN`: `https://huggingface.co/datasets/BelleGroup/train_3.5M_CN`.
+
+Software:
+
+- Hugging Face Transformers for model definitions, tokenizer/model loading, generation, and checkpoint serialization: `https://github.com/huggingface/transformers`.
+- Hugging Face Datasets for public data and C-Eval loading: `https://github.com/huggingface/datasets`.
+- Hugging Face Tokenizers for BPE tokenizer training/runtime components: `https://github.com/huggingface/tokenizers`.
+- Safetensors for model tensor serialization: `https://github.com/huggingface/safetensors`.
