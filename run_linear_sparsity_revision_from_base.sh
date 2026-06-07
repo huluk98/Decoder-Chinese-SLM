@@ -36,9 +36,7 @@ Environment overrides:
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
-  SPARSITY_GPU_IDS               default: 0,1,2,3,4,5,6,7
-                                  Progressive jobs are launched in parallel
-                                  and assigned to these GPU ids round-robin.
+  TORCHRUN                       default: torchrun
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
   MODEL_FAMILY                   default: decoder_only
@@ -73,10 +71,14 @@ if [[ "${python_bin}" != */* ]]; then
   python_bin="$(command -v "${python_bin}")"
 fi
 
+torchrun_bin="${TORCHRUN:-torchrun}"
+if [[ "${torchrun_bin}" != */* ]]; then
+  torchrun_bin="$(command -v "${torchrun_bin}")"
+fi
+
 export PYTHON="${python_bin}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
-export SPARSITY_GPU_IDS="${SPARSITY_GPU_IDS:-0,1,2,3,4,5,6,7}"
 export SYMPY_GROUND_TYPES="${SYMPY_GROUND_TYPES:-python}"
 export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
@@ -99,33 +101,16 @@ REGULAR_SFT_FINAL="${RUN_ROOT}/training/base_sft_5ep/final"
 CONTRASTIVE_SFT_FINAL="${RUN_ROOT}/training/contrastive_sft_5ep/final"
 LINEAR_SPARSITY_BASE_DIR="${LINEAR_SPARSITY_OUTPUT_DIR:-results/scenic_linear_sparsity_0_30_50_from_base}"
 
-IFS=',' read -r -a SPARSITY_GPU_ID_ARRAY <<< "${SPARSITY_GPU_IDS}"
-if [[ ${#SPARSITY_GPU_ID_ARRAY[@]} -lt 1 || -z "${SPARSITY_GPU_ID_ARRAY[0]}" ]]; then
-  echo "SPARSITY_GPU_IDS must list at least one GPU id, for example: 0,1,2,3,4,5,6,7" >&2
-  exit 2
-fi
-
-gpu_for_progressive_job() {
-  local index="$1"
-  local gpu_count="${#SPARSITY_GPU_ID_ARRAY[@]}"
-  local gpu_index=$((index % gpu_count))
-  echo "${SPARSITY_GPU_ID_ARRAY[$gpu_index]}"
-}
-
 run_progressive_linear_sparsity() {
   local label="$1"
   local checkpoint="$2"
   local target_sparsity="$3"
-  local job_index="$4"
   local output_dir="${LINEAR_SPARSITY_BASE_DIR}/${label}"
-  local gpu_id
-  gpu_id="$(gpu_for_progressive_job "${job_index}")"
 
   echo
-  echo "== Added linear-sparsity experiment for ${label}: progressive magnitude ${target_sparsity} on GPU ${gpu_id} =="
-  (
-    CUDA_VISIBLE_DEVICES="${gpu_id}" \
-    "${python_bin}" scripts/run_sparsity_experiments.py \
+  echo "== Added linear-sparsity experiment for ${label}: progressive magnitude ${target_sparsity} on ${NPROC_PER_NODE} GPU(s) =="
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+    "${torchrun_bin}" --standalone --nproc_per_node "${NPROC_PER_NODE}" scripts/run_sparsity_experiments.py \
       --experiment_name "${EXPERIMENT_NAME:-scenic_linear_sparsity_0_30_50_from_base}_${label}_${target_sparsity}" \
       --model_family "${MODEL_FAMILY:-decoder_only}" \
       --model_checkpoint "${checkpoint}" \
@@ -145,22 +130,12 @@ run_progressive_linear_sparsity() {
       --seed "${SEED:-42}" \
       --dtype "${DTYPE:-fp16}" \
       --output_dir "${output_dir}/sparsity_${target_sparsity//./p}"
-  ) &
 }
 
-progressive_pids=()
-run_progressive_linear_sparsity "regular_sft" "${REGULAR_SFT_FINAL}" "0.3" 0
-progressive_pids+=("$!")
-run_progressive_linear_sparsity "regular_sft" "${REGULAR_SFT_FINAL}" "0.5" 1
-progressive_pids+=("$!")
-run_progressive_linear_sparsity "contrastive_sft" "${CONTRASTIVE_SFT_FINAL}" "0.3" 2
-progressive_pids+=("$!")
-run_progressive_linear_sparsity "contrastive_sft" "${CONTRASTIVE_SFT_FINAL}" "0.5" 3
-progressive_pids+=("$!")
-
-for pid in "${progressive_pids[@]}"; do
-  wait "${pid}"
-done
+run_progressive_linear_sparsity "regular_sft" "${REGULAR_SFT_FINAL}" "0.3"
+run_progressive_linear_sparsity "regular_sft" "${REGULAR_SFT_FINAL}" "0.5"
+run_progressive_linear_sparsity "contrastive_sft" "${CONTRASTIVE_SFT_FINAL}" "0.3"
+run_progressive_linear_sparsity "contrastive_sft" "${CONTRASTIVE_SFT_FINAL}" "0.5"
 
 echo
 echo "== Writing final revision sparsity summary JSON =="

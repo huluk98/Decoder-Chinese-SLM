@@ -5,12 +5,15 @@ import argparse
 import datetime as dt
 import json
 import math
+import os
 import random
 import sys
 from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -190,6 +193,58 @@ def select_device(requested: str) -> torch.device:
     return torch.device("cpu")
 
 
+def is_dist() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def setup_distributed(requested: str) -> tuple[torch.device, int, int, int]:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size > 1:
+        if not torch.cuda.is_available():
+            raise RuntimeError("Distributed sparsity experiments require CUDA.")
+        torch.cuda.set_device(local_rank)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        return torch.device("cuda", local_rank), rank, local_rank, world_size
+    return select_device(requested), rank, local_rank, world_size
+
+
+def cleanup_distributed() -> None:
+    if is_dist():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def is_main_process(rank: int) -> bool:
+    return int(rank) == 0
+
+
+def maybe_print(rank: int, message: str) -> None:
+    if is_main_process(rank):
+        print(message, flush=True)
+
+
+def maybe_barrier(world_size: int) -> None:
+    if int(world_size) > 1 and is_dist():
+        dist.barrier()
+
+
+def unwrap_model(model: Any) -> Any:
+    while hasattr(model, "module"):
+        model = model.module
+    return model
+
+
+def all_gather_object(obj: Any, world_size: int) -> list[Any]:
+    if int(world_size) <= 1:
+        return [obj]
+    gathered = [None for _ in range(int(world_size))]
+    dist.all_gather_object(gathered, obj)
+    return gathered
+
+
 def dtype_for(name: str, device: torch.device) -> torch.dtype | str:
     if name == "auto":
         return "auto"
@@ -276,6 +331,7 @@ def generate_decoder_or_seq2seq_candidates(
     samples: list[dict[str, Any]],
     args: argparse.Namespace,
     device: torch.device,
+    rank: int = 0,
 ) -> list[list[str]]:
     family = normalize_family(args.model_family)
     if family == "decoder_only":
@@ -287,7 +343,7 @@ def generate_decoder_or_seq2seq_candidates(
     batch_size = max(1, int(args.batch_size))
     return_sequences = max(5, int(args.num_return_sequences))
     beams = max(int(args.num_beams), return_sequences)
-    for start in tqdm(range(0, len(prompts), batch_size), desc="benchmark-generate"):
+    for start in tqdm(range(0, len(prompts), batch_size), desc="benchmark-generate", disable=not is_main_process(rank)):
         batch_prompts = prompts[start : start + batch_size]
         encoded = move_batch_to_device(
             tokenizer(
@@ -329,13 +385,14 @@ def score_encoder_candidates(
     samples: list[dict[str, Any]],
     args: argparse.Namespace,
     device: torch.device,
+    rank: int = 0,
 ) -> list[list[str]]:
     id2label = getattr(model.config, "id2label", None) or {}
     if not id2label:
         raise ValueError("Encoder-only EM@5 requires model.config.id2label to map class ids to canonical responses.")
     predictions: list[list[str]] = []
     batch_size = max(1, int(args.batch_size))
-    for start in tqdm(range(0, len(samples), batch_size), desc="benchmark-score"):
+    for start in tqdm(range(0, len(samples), batch_size), desc="benchmark-score", disable=not is_main_process(rank)):
         batch = samples[start : start + batch_size]
         encoded = move_batch_to_device(
             tokenizer(
@@ -360,12 +417,29 @@ def evaluate_model(
     samples: list[dict[str, Any]],
     args: argparse.Namespace,
     device: torch.device,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> list[list[str]]:
     family = normalize_family(args.model_family)
     model.eval()
+    if int(world_size) > 1:
+        indexed_samples = [(index, sample) for index, sample in enumerate(samples) if index % int(world_size) == int(rank)]
+        local_samples = [sample for _index, sample in indexed_samples]
+        if family == "encoder_only":
+            local_candidates = score_encoder_candidates(model, tokenizer, local_samples, args, device, rank=rank)
+        else:
+            local_candidates = generate_decoder_or_seq2seq_candidates(model, tokenizer, local_samples, args, device, rank=rank)
+        gathered = all_gather_object(list(zip([index for index, _sample in indexed_samples], local_candidates)), world_size)
+        if not is_main_process(rank):
+            return []
+        ordered: list[tuple[int, list[str]]] = []
+        for payload in gathered:
+            ordered.extend(payload or [])
+        ordered.sort(key=lambda item: int(item[0]))
+        return [candidates for _index, candidates in ordered]
     if family == "encoder_only":
-        return score_encoder_candidates(model, tokenizer, samples, args, device)
-    return generate_decoder_or_seq2seq_candidates(model, tokenizer, samples, args, device)
+        return score_encoder_candidates(model, tokenizer, samples, args, device, rank=rank)
+    return generate_decoder_or_seq2seq_candidates(model, tokenizer, samples, args, device, rank=rank)
 
 
 def targeted_linear_zero_fraction(model: torch.nn.Module, include_heads: bool) -> float:
@@ -538,14 +612,36 @@ def batched(items: list[dict[str, Any]], batch_size: int) -> list[list[dict[str,
     return [items[start : start + batch_size] for start in range(0, len(items), max(1, batch_size))]
 
 
+def epoch_batches(items: list[dict[str, Any]], batch_size: int, rank: int, world_size: int) -> list[list[dict[str, Any]]]:
+    if int(world_size) <= 1:
+        return batched(items, batch_size)
+    if not items:
+        return []
+    batch_size = max(1, int(batch_size))
+    world_size = max(1, int(world_size))
+    global_batch_size = batch_size * world_size
+    steps = max(1, math.ceil(len(items) / float(global_batch_size)))
+    batches: list[list[dict[str, Any]]] = []
+    for step in range(steps):
+        base = step * global_batch_size + int(rank) * batch_size
+        local = [items[index] for index in range(base, min(base + batch_size, len(items)))]
+        while len(local) < batch_size:
+            local.append(items[(base + len(local)) % len(items)])
+        batches.append(local)
+    return batches
+
+
 def train_one_epoch(
     model: Any,
+    train_model: Any,
     tokenizer: Any,
     samples: list[dict[str, Any]],
     masks: dict[str, torch.Tensor],
     args: argparse.Namespace,
     device: torch.device,
     optimizer: torch.optim.Optimizer,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> float | None:
     if not samples:
         return None
@@ -553,8 +649,9 @@ def train_one_epoch(
     if family == "encoder_only":
         raise ValueError("Progressive recovery fine-tuning for encoder-only models needs class ids and is not supported by this runner.")
     model.train()
+    train_model.train()
     losses: list[float] = []
-    for batch in batched(samples, int(args.batch_size)):
+    for batch in epoch_batches(samples, int(args.batch_size), rank=rank, world_size=world_size):
         optimizer.zero_grad(set_to_none=True)
         if family == "encoder_decoder":
             encoded = move_batch_to_device(
@@ -575,7 +672,7 @@ def train_one_epoch(
                 max_length=int(args.max_new_tokens),
             )["input_ids"].to(device)
             labels[labels == int(tokenizer.pad_token_id)] = -100
-            outputs = model(**encoded, labels=labels)
+            outputs = train_model(**encoded, labels=labels)
         else:
             prompt_texts = [decoder_prompt(sample["input"], tokenizer, args) for sample in batch]
             eos = str(getattr(tokenizer, "eos_token", None) or LEGACY_EOS_TOKEN)
@@ -604,15 +701,23 @@ def train_one_epoch(
             for row, prompt_length in enumerate(prompt_lengths):
                 labels[row, :prompt_length] = -100
             labels[encoded["attention_mask"] == 0] = -100
-            outputs = model(**encoded, labels=labels)
+            outputs = train_model(**encoded, labels=labels)
         loss = outputs.loss
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(unwrap_model(train_model).parameters(), 1.0)
         optimizer.step()
         apply_masks(model, masks)
         losses.append(float(loss.detach().cpu()))
     model.eval()
-    return sum(losses) / len(losses) if losses else None
+    train_model.eval()
+    loss_sum = sum(losses)
+    loss_count = len(losses)
+    if int(world_size) > 1 and is_dist():
+        stats = torch.tensor([loss_sum, float(loss_count)], dtype=torch.float32, device=device)
+        dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+        loss_sum = float(stats[0].detach().cpu())
+        loss_count = int(stats[1].detach().cpu())
+    return loss_sum / float(loss_count or 1) if loss_count else None
 
 
 def maybe_validation_metrics(
@@ -621,10 +726,14 @@ def maybe_validation_metrics(
     validation_samples: list[dict[str, Any]],
     args: argparse.Namespace,
     device: torch.device,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> tuple[float | None, float | None]:
     if not validation_samples:
         return None, None
-    candidates = evaluate_model(model, tokenizer, validation_samples, args, device)
+    candidates = evaluate_model(model, tokenizer, validation_samples, args, device, rank=rank, world_size=world_size)
+    if not is_main_process(rank):
+        return None, None
     rows = prediction_result_rows(
         validation_samples,
         candidates,
@@ -667,6 +776,7 @@ def save_run_artifacts(
 
 def run_progressive(
     model: Any,
+    train_model: Any,
     tokenizer: Any,
     target_sparsity: float,
     recovery_samples: list[dict[str, Any]],
@@ -674,6 +784,8 @@ def run_progressive(
     args: argparse.Namespace,
     output_dir: Path,
     device: torch.device,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> tuple[dict[str, torch.Tensor], list[dict[str, Any]]]:
     masks: dict[str, torch.Tensor] | None = None
     logs: list[dict[str, Any]] = []
@@ -684,51 +796,92 @@ def run_progressive(
         apply_masks(model, masks)
         epochs = max(0, int(args.recovery_epochs_per_stage))
         if epochs == 0 or optimizer is None:
-            stats = sparsity_stats(model, masks, stage_sparsity, include_heads=bool(args.prune_output_heads))
-            logs.append(
-                {
-                    "stage": stage_index,
-                    "stage_target_sparsity": stage_sparsity,
-                    **stats,
-                    "recovery_epoch": 0,
-                    "train_loss": None,
-                    "val_em1": None,
-                    "val_em5": None,
-                }
-            )
+            if is_main_process(rank):
+                stats = sparsity_stats(model, masks, stage_sparsity, include_heads=bool(args.prune_output_heads))
+                logs.append(
+                    {
+                        "stage": stage_index,
+                        "stage_target_sparsity": stage_sparsity,
+                        **stats,
+                        "recovery_epoch": 0,
+                        "train_loss": None,
+                        "val_em1": None,
+                        "val_em5": None,
+                    }
+                )
             continue
         for epoch in range(1, epochs + 1):
-            train_loss = train_one_epoch(model, tokenizer, recovery_samples, masks, args, device, optimizer)
-            val_em1, val_em5 = maybe_validation_metrics(model, tokenizer, validation_samples, args, device)
-            stats = sparsity_stats(model, masks, stage_sparsity, include_heads=bool(args.prune_output_heads))
-            logs.append(
-                {
-                    "stage": stage_index,
-                    "stage_target_sparsity": stage_sparsity,
-                    **stats,
-                    "recovery_epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_em1": val_em1,
-                    "val_em5": val_em5,
-                }
+            train_loss = train_one_epoch(
+                model,
+                train_model,
+                tokenizer,
+                recovery_samples,
+                masks,
+                args,
+                device,
+                optimizer,
+                rank=rank,
+                world_size=world_size,
             )
+            val_em1, val_em5 = maybe_validation_metrics(
+                model,
+                tokenizer,
+                validation_samples,
+                args,
+                device,
+                rank=rank,
+                world_size=world_size,
+            )
+            if is_main_process(rank):
+                stats = sparsity_stats(model, masks, stage_sparsity, include_heads=bool(args.prune_output_heads))
+                logs.append(
+                    {
+                        "stage": stage_index,
+                        "stage_target_sparsity": stage_sparsity,
+                        **stats,
+                        "recovery_epoch": epoch,
+                        "train_loss": train_loss,
+                        "val_em1": val_em1,
+                        "val_em5": val_em5,
+                    }
+                )
     if optimizer is not None and int(args.final_recovery_epochs) > 0 and masks is not None:
         final_stage = len(staged_schedule(target_sparsity)) + 1
         for epoch in range(1, int(args.final_recovery_epochs) + 1):
-            train_loss = train_one_epoch(model, tokenizer, recovery_samples, masks, args, device, optimizer)
-            val_em1, val_em5 = maybe_validation_metrics(model, tokenizer, validation_samples, args, device)
-            stats = sparsity_stats(model, masks, target_sparsity, include_heads=bool(args.prune_output_heads))
-            logs.append(
-                {
-                    "stage": final_stage,
-                    "stage_target_sparsity": target_sparsity,
-                    **stats,
-                    "recovery_epoch": epoch,
-                    "train_loss": train_loss,
-                    "val_em1": val_em1,
-                    "val_em5": val_em5,
-                }
+            train_loss = train_one_epoch(
+                model,
+                train_model,
+                tokenizer,
+                recovery_samples,
+                masks,
+                args,
+                device,
+                optimizer,
+                rank=rank,
+                world_size=world_size,
             )
+            val_em1, val_em5 = maybe_validation_metrics(
+                model,
+                tokenizer,
+                validation_samples,
+                args,
+                device,
+                rank=rank,
+                world_size=world_size,
+            )
+            if is_main_process(rank):
+                stats = sparsity_stats(model, masks, target_sparsity, include_heads=bool(args.prune_output_heads))
+                logs.append(
+                    {
+                        "stage": final_stage,
+                        "stage_target_sparsity": target_sparsity,
+                        **stats,
+                        "recovery_epoch": epoch,
+                        "train_loss": train_loss,
+                        "val_em1": val_em1,
+                        "val_em5": val_em5,
+                    }
+                )
     return masks or {}, logs
 
 
@@ -808,9 +961,13 @@ def run_single_eval(
     checkpoint_path: str,
     mask_path: str,
     device: torch.device,
-) -> dict[str, Any]:
+    rank: int = 0,
+    world_size: int = 1,
+) -> dict[str, Any] | None:
     stats = sparsity_stats(model, masks, target_sparsity, include_heads=bool(args.prune_output_heads))
-    candidates = evaluate_model(model, tokenizer, samples, args, device)
+    candidates = evaluate_model(model, tokenizer, samples, args, device, rank=rank, world_size=world_size)
+    if not is_main_process(rank):
+        return None
     family = normalize_family(args.model_family)
     prediction_rows = prediction_result_rows(
         samples,
@@ -881,7 +1038,8 @@ def parse_extra_eval_paths(values: list[str]) -> list[tuple[str, str]]:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(args.seed)
+    device, rank, local_rank, world_size = setup_distributed(args.device)
+    set_seeds(int(args.seed) + int(rank))
     output_dir = resolve_output_dir(args.output_dir)
     benchmark_samples = load_benchmark_samples(args.benchmark_path, args.benchmark_difficulty_path)
     if args.limit is not None:
@@ -911,7 +1069,15 @@ def main() -> None:
         },
         "args": vars(args),
     }
-    write_json(output_dir / "run_config.json", metadata)
+    if is_main_process(rank):
+        metadata["distributed"] = {
+            "rank": int(rank),
+            "local_rank": int(local_rank),
+            "world_size": int(world_size),
+            "launcher": "torchrun" if int(world_size) > 1 else "python",
+        }
+        write_json(output_dir / "run_config.json", metadata)
+    maybe_barrier(world_size)
 
     summary_rows: list[dict[str, Any]] = []
     dense_by_family_eval: dict[tuple[str, str], dict[str, Any]] = {}
@@ -920,9 +1086,17 @@ def main() -> None:
     for mode in modes:
         mode_sparsities = [0.0] if mode == "dense" else [level for level in sparsity_levels if level > 0.0]
         for target_sparsity in mode_sparsities:
-            print(f"\n=== {family} {mode} target_sparsity={target_sparsity:g} ===", flush=True)
-            model, tokenizer = load_model_and_tokenizer(args, select_device(args.device))
+            maybe_print(rank, f"\n=== {family} {mode} target_sparsity={target_sparsity:g} ===")
+            model, tokenizer = load_model_and_tokenizer(args, device)
             device = next(model.parameters()).device
+            train_model: Any = model
+            if int(world_size) > 1:
+                train_model = DistributedDataParallel(
+                    model,
+                    device_ids=[local_rank] if device.type == "cuda" else None,
+                    output_device=local_rank if device.type == "cuda" else None,
+                    find_unused_parameters=False,
+                )
             masks: dict[str, torch.Tensor] | None = None
             if mode == "oneshot":
                 masks = make_pruning_masks(model, tokenizer, target_sparsity, recovery_samples, args, device)
@@ -930,6 +1104,7 @@ def main() -> None:
             elif mode == "progressive":
                 masks, logs = run_progressive(
                     model,
+                    train_model,
                     tokenizer,
                     target_sparsity,
                     recovery_samples,
@@ -937,32 +1112,40 @@ def main() -> None:
                     args,
                     output_dir,
                     device,
+                    rank=rank,
+                    world_size=world_size,
                 )
                 log_path = output_dir / f"progressive_logs_{family}_{target_sparsity:g}_{int(args.seed)}.csv"
-                write_csv_rows(
-                    log_path,
-                    logs,
-                    [
-                        "stage",
-                        "stage_target_sparsity",
-                        "targeted_linear_sparsity_actual",
-                        "whole_model_sparsity_actual",
-                        "recovery_epoch",
-                        "train_loss",
-                        "val_em1",
-                        "val_em5",
-                    ],
+                if is_main_process(rank):
+                    write_csv_rows(
+                        log_path,
+                        logs,
+                        [
+                            "stage",
+                            "stage_target_sparsity",
+                            "targeted_linear_sparsity_actual",
+                            "whole_model_sparsity_actual",
+                            "recovery_epoch",
+                            "train_loss",
+                            "val_em1",
+                            "val_em5",
+                        ],
+                    )
+            maybe_barrier(world_size)
+            checkpoint_path = ""
+            mask_path = ""
+            if is_main_process(rank):
+                checkpoint_path, mask_path = save_run_artifacts(
+                    model,
+                    tokenizer,
+                    masks,
+                    output_dir,
+                    family,
+                    mode,
+                    target_sparsity,
+                    int(args.seed),
                 )
-            checkpoint_path, mask_path = save_run_artifacts(
-                model,
-                tokenizer,
-                masks,
-                output_dir,
-                family,
-                mode,
-                target_sparsity,
-                int(args.seed),
-            )
+            maybe_barrier(world_size)
             for eval_name, eval_path, eval_samples in eval_sets:
                 row = run_single_eval(
                     model,
@@ -978,27 +1161,34 @@ def main() -> None:
                     checkpoint_path,
                     mask_path,
                     device,
+                    rank=rank,
+                    world_size=world_size,
                 )
+                if not is_main_process(rank) or row is None:
+                    continue
                 if mode == "dense":
                     dense_by_family_eval[(family, eval_name)] = row
                 row = add_retention_metrics(row, dense_by_family_eval.get((family, eval_name)))
                 summary_rows.append(row)
-                print(
+                maybe_print(
+                    rank,
                     f"{eval_name} EM@1={row['em1_overall']:.4f} EM@5={row['em5_overall']:.4f} "
                     f"targeted_linear_sparsity={row['targeted_linear_sparsity_actual']:.4f} "
                     f"whole_model_sparsity={row['whole_model_sparsity_actual']:.4f}",
-                    flush=True,
                 )
 
-    write_csv_rows(output_dir / "summary_metrics.csv", summary_rows, SUMMARY_FIELDNAMES)
-    write_paper_table(output_dir, summary_rows)
-    if not args.skip_plots:
-        run_plots(output_dir)
-    print("\nSparsity experiment complete.", flush=True)
-    print(f"  predictions: {output_dir}/predictions_*.csv", flush=True)
-    print(f"  summary: {output_dir / 'summary_metrics.csv'}", flush=True)
-    print(f"  paper table: {output_dir / 'paper_table_sparsity_difficulty.csv'}", flush=True)
-    print(f"  figures: {output_dir / 'figures'}", flush=True)
+    if is_main_process(rank):
+        write_csv_rows(output_dir / "summary_metrics.csv", summary_rows, SUMMARY_FIELDNAMES)
+        write_paper_table(output_dir, summary_rows)
+        if not args.skip_plots:
+            run_plots(output_dir)
+        print("\nSparsity experiment complete.", flush=True)
+        print(f"  distributed world_size: {world_size}", flush=True)
+        print(f"  predictions: {output_dir}/predictions_*.csv", flush=True)
+        print(f"  summary: {output_dir / 'summary_metrics.csv'}", flush=True)
+        print(f"  paper table: {output_dir / 'paper_table_sparsity_difficulty.csv'}", flush=True)
+        print(f"  figures: {output_dir / 'figures'}", flush=True)
+    cleanup_distributed()
 
 
 if __name__ == "__main__":

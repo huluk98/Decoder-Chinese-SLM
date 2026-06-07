@@ -73,15 +73,15 @@ PY
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 NPROC_PER_NODE=8 \
-SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7 \
 DTYPE=fp16 \
 bash run_linear_sparsity_revision_from_base.sh "$MODEL"
 ```
 
 The launcher uses:
 
-- `torchrun` with `NPROC_PER_NODE=8` for regular SFT, contrastive SFT, and original one-shot pruning.
-- `SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7` to split progressive pruning jobs across GPUs.
+- `torchrun` with `NPROC_PER_NODE=8` for regular SFT, contrastive SFT, original one-shot evaluation, and progressive magnitude pruning.
+- `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` to expose all 8 H20 GPUs to every distributed stage.
+- Progressive magnitude jobs run sequentially at 30% and 50%; each progressive job uses all visible GPUs instead of splitting one job per GPU.
 - The active terminal environment's `python`/`python3`; bare executable names are resolved through `PATH`.
 - FP16 autocast training with GradScaler, while keeping trainable weights in full precision.
 - SDPA attention by default, not FlashAttention 2.
