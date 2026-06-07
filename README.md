@@ -280,11 +280,29 @@ bash run_linear_sparsity_revision_from_base.sh "$MODEL"
 
 The main launcher sets those defaults automatically.
 
+## How To Cite
+
+GitHub can read [`CITATION.cff`](CITATION.cff) and show a "Cite this repository" button. Use this BibTeX entry for this codebase:
+
+```bibtex
+@software{decoder_chinese_slm_2026,
+  author = {huluk98},
+  title = {Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Training Codebase},
+  year = {2026},
+  version = {0.1.0},
+  url = {https://github.com/huluk98/Decoder-Chinese-SLM}
+}
+```
+
+When describing the model design target, also cite the same-size public reference model:
+
+- `charent/ChatLM-mini-Chinese`: `https://huggingface.co/charent/ChatLM-mini-Chinese`.
+
 ## References And Citations
 
 Reference model and benchmark:
 
-- `charent/ChatLM-mini-Chinese`: same-size reference target for the 0.2B parameter budget, 29,298-token vocabulary, Chinese public-data recipe, loss-curve style, and C-Eval reporting comparison: `https://huggingface.co/charent/ChatLM-mini-Chinese`.
+- `charent/ChatLM-mini-Chinese`: same-size public reference target for the 0.2B parameter budget, 29,298-token vocabulary, Chinese public-data recipe, loss-curve style, and C-Eval reporting comparison. Repository: `https://huggingface.co/charent/ChatLM-mini-Chinese`; config: `https://huggingface.co/charent/ChatLM-mini-Chinese/blob/main/config.json`.
 - `ceval/ceval-exam`: C-Eval validation/test loading: `https://huggingface.co/datasets/ceval/ceval-exam`.
 - `hkust-nlp/ceval`: official C-Eval benchmark context and subject/category mapping: `https://github.com/hkust-nlp/ceval`.
 
