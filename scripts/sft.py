@@ -44,7 +44,7 @@ from chatlm_decoder.pruning import (
     write_json,
 )
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 try:
     import numpy as np
@@ -875,9 +875,7 @@ def evaluate_exact_match(
                     truncation=True,
                     max_length=int(max_seq_length),
                 )
-                encoded = strip_unused_decoder_model_kwargs(
-                    {key: value.to(device) for key, value in encoded.items()}
-                )
+                encoded = move_batch_to_device(encoded, device)
                 generated = eval_model.generate(
                     **encoded,
                     max_new_tokens=int(max_new_tokens),

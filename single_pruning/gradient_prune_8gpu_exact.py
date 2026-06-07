@@ -44,7 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 # =========================
 # Fixed experiment settings
@@ -497,15 +497,13 @@ def evaluate(
             ]
             if has_prompt_response and prompt_indices:
                 prompts = [batch["prompts"][i] for i in prompt_indices]
-                enc = tokenizer(
+                enc = move_batch_to_device(tokenizer(
                     prompts,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
                     max_length=MAX_PROMPT_LEN,
-                )
-                enc = {k: v.to(device) for k, v in enc.items()}
-                strip_unused_decoder_model_kwargs(enc)
+                ), device)
                 gen = model.generate(
                     **enc,
                     max_new_tokens=MAX_NEW_TOKENS,

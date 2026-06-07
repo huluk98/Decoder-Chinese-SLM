@@ -35,7 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.command_eval import canonicalize_command_response
 from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
 ANCHOR_ID_FIELDS = ("anchor_id", "semantic_anchor_id", "group_id", "cluster_id", "intent_id", "anchor")
@@ -585,8 +585,7 @@ def generate_completion(
     num_beams: int,
     repetition_penalty: float,
 ) -> tuple[str, int, bool, bool]:
-    inputs = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
-    strip_unused_decoder_model_kwargs(inputs)
+    inputs = move_batch_to_device(tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False), device)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": bool(do_sample),
@@ -630,15 +629,17 @@ def generate_completions_batch(
     previous_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     try:
-        inputs = tokenizer(
-            prompt_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max(1, int(max_prompt_tokens)),
-            add_special_tokens=False,
-        ).to(device)
-        strip_unused_decoder_model_kwargs(inputs)
+        inputs = move_batch_to_device(
+            tokenizer(
+                prompt_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max(1, int(max_prompt_tokens)),
+                add_special_tokens=False,
+            ),
+            device,
+        )
     finally:
         tokenizer.padding_side = previous_padding_side
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -685,15 +686,17 @@ def generate_topk_completions_batch(
     previous_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     try:
-        inputs = tokenizer(
-            prompt_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max(1, int(max_prompt_tokens)),
-            add_special_tokens=False,
-        ).to(device)
-        strip_unused_decoder_model_kwargs(inputs)
+        inputs = move_batch_to_device(
+            tokenizer(
+                prompt_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max(1, int(max_prompt_tokens)),
+                add_special_tokens=False,
+            ),
+            device,
+        )
     finally:
         tokenizer.padding_side = previous_padding_side
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -1248,6 +1251,7 @@ def main() -> None:
         trust_remote_code=False,
     ).to(device)
     model.eval()
+    device = next(model.parameters()).device
 
     max_length = args.max_length
     if max_length is None:

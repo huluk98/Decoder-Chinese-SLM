@@ -38,7 +38,7 @@ from chatlm_decoder.sparsity_experiments import (  # noqa: E402
     summarize_prediction_rows,
     write_csv_rows,
 )
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs  # noqa: E402
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer  # noqa: E402
 
 LEGACY_USER_TOKEN = "<|user|>"
 LEGACY_ASSISTANT_TOKEN = "<|assistant|>"
@@ -289,15 +289,17 @@ def generate_decoder_or_seq2seq_candidates(
     beams = max(int(args.num_beams), return_sequences)
     for start in tqdm(range(0, len(prompts), batch_size), desc="benchmark-generate"):
         batch_prompts = prompts[start : start + batch_size]
-        encoded = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max(1, int(args.max_length) - int(args.max_new_tokens)),
-            add_special_tokens=False,
-        ).to(device)
-        strip_unused_decoder_model_kwargs(encoded)
+        encoded = move_batch_to_device(
+            tokenizer(
+                batch_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max(1, int(args.max_length) - int(args.max_new_tokens)),
+                add_special_tokens=False,
+            ),
+            device,
+        )
         prompt_width = int(encoded["input_ids"].shape[-1])
         output_ids = model.generate(
             **encoded,
@@ -335,14 +337,16 @@ def score_encoder_candidates(
     batch_size = max(1, int(args.batch_size))
     for start in tqdm(range(0, len(samples), batch_size), desc="benchmark-score"):
         batch = samples[start : start + batch_size]
-        encoded = tokenizer(
-            [sample["input"] for sample in batch],
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=int(args.max_length),
-        ).to(device)
-        strip_unused_decoder_model_kwargs(encoded)
+        encoded = move_batch_to_device(
+            tokenizer(
+                [sample["input"] for sample in batch],
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=int(args.max_length),
+            ),
+            device,
+        )
         logits = model(**encoded).logits
         topk = torch.topk(logits, k=min(5, logits.shape[-1]), dim=-1).indices.detach().cpu().tolist()
         for row in topk:
@@ -410,15 +414,17 @@ def gradient_calibration_batches(
         eos = str(getattr(tokenizer, "eos_token", None) or LEGACY_EOS_TOKEN)
         target_texts = [sample["target"] + ("" if str(sample["target"]).endswith(eos) else eos) for sample in batch]
         full_texts = [prompt + target for prompt, target in zip(prompt_texts, target_texts)]
-        encoded = tokenizer(
-            full_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=int(args.max_length),
-            add_special_tokens=False,
-        ).to(device)
-        strip_unused_decoder_model_kwargs(encoded)
+        encoded = move_batch_to_device(
+            tokenizer(
+                full_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=int(args.max_length),
+                add_special_tokens=False,
+            ),
+            device,
+        )
         labels = encoded["input_ids"].clone()
         prompt_encoded = tokenizer(
             prompt_texts,
@@ -551,14 +557,16 @@ def train_one_epoch(
     for batch in batched(samples, int(args.batch_size)):
         optimizer.zero_grad(set_to_none=True)
         if family == "encoder_decoder":
-            encoded = tokenizer(
-                [sample["input"] for sample in batch],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=int(args.max_length),
-            ).to(device)
-            strip_unused_decoder_model_kwargs(encoded)
+            encoded = move_batch_to_device(
+                tokenizer(
+                    [sample["input"] for sample in batch],
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=int(args.max_length),
+                ),
+                device,
+            )
             labels = tokenizer(
                 [sample["target"] for sample in batch],
                 return_tensors="pt",
@@ -573,15 +581,17 @@ def train_one_epoch(
             eos = str(getattr(tokenizer, "eos_token", None) or LEGACY_EOS_TOKEN)
             target_texts = [sample["target"] + ("" if str(sample["target"]).endswith(eos) else eos) for sample in batch]
             full_texts = [prompt + target for prompt, target in zip(prompt_texts, target_texts)]
-            encoded = tokenizer(
-                full_texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=int(args.max_length),
-                add_special_tokens=False,
-            ).to(device)
-            strip_unused_decoder_model_kwargs(encoded)
+            encoded = move_batch_to_device(
+                tokenizer(
+                    full_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=int(args.max_length),
+                    add_special_tokens=False,
+                ),
+                device,
+            )
             labels = encoded["input_ids"].clone()
             prompt_encoded = tokenizer(
                 prompt_texts,

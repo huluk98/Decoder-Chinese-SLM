@@ -50,7 +50,7 @@ from chatlm_decoder.qwen25_instruct_data import (
     format_qwen_sft_example,
     read_records,
 )
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
@@ -447,8 +447,10 @@ def overfit_sanity_check(
     correct = 0
     for index, record in enumerate(records):
         example = format_qwen_sft_example(tokenizer, record, system_prompt)
-        encoded = tokenizer(example["prompt_text"], return_tensors="pt", add_special_tokens=False).to(device)
-        strip_unused_decoder_model_kwargs(encoded)
+        encoded = move_batch_to_device(
+            tokenizer(example["prompt_text"], return_tensors="pt", add_special_tokens=False),
+            device,
+        )
         generated = eval_model.generate(
             **encoded,
             do_sample=False,

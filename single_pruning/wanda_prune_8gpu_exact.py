@@ -48,7 +48,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 # -----------------------------
 # Fixed experiment defaults
@@ -453,15 +453,14 @@ def benchmark_model(
             prompt_response_batch = [ex for ex in batch if ex.prompt is not None and ex.response is not None]
             if prompt_response_batch:
                 prompts = [str(ex.prompt) for ex in prompt_response_batch]
-                enc = tokenizer(
+                enc = move_batch_to_device(tokenizer(
                     prompts,
                     return_tensors="pt",
                     padding=True,
                     truncation=True,
                     max_length=MAX_SEQ_LEN,
                     add_special_tokens=True,
-                ).to(device)
-                strip_unused_decoder_model_kwargs(enc)
+                ), device)
                 generated = model.generate(
                     **enc,
                     max_new_tokens=MAX_NEW_TOKENS,

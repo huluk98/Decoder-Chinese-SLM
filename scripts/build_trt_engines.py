@@ -15,7 +15,7 @@ PROJECT_ROOT = SCRIPT_DIR.parents[0]
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 from trt_edge_common import (
     CudaRuntime,
     apply_prompt_format,
@@ -383,13 +383,12 @@ def run_forward_loop_for_modelopt(model: Any, tokenizer: Any, records: list[dict
             for record in records[: int(args.calib_samples)]:
                 prompt, _ = prompt_and_reference(record)
                 prompt = apply_prompt_format(tokenizer, prompt, args.prompt_format, args.system_prompt)
-                encoded = tokenizer(
+                encoded = move_batch_to_device(tokenizer(
                     prompt,
                     return_tensors="pt",
                     truncation=True,
                     max_length=int(args.opt_seq_len),
-                ).to(device)
-                strip_unused_decoder_model_kwargs(encoded)
+                ), device)
                 model_inner(**encoded, use_cache=False)
 
     return loop

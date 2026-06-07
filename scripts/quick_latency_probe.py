@@ -15,7 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 
 DEFAULT_PROMPT = "Explain artificial intelligence in one short sentence."
@@ -101,14 +101,13 @@ def timed_generate(
     num_beams: int,
 ) -> dict[str, Any]:
     token_start = time.perf_counter()
-    inputs = tokenizer(
+    inputs = move_batch_to_device(tokenizer(
         prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
         add_special_tokens=False,
-    ).to(device)
-    strip_unused_decoder_model_kwargs(inputs)
+    ), device)
     tokenization_ms = (time.perf_counter() - token_start) * 1000.0
 
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -188,6 +187,7 @@ def main() -> None:
         trust_remote_code=bool(args.trust_remote_code),
     ).to(device)
     model.eval()
+    device = next(model.parameters()).device
 
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
