@@ -5,7 +5,7 @@
 Inspect the checkpoint tokenizer metadata:
 
 ```bash
-MODEL=/path/to/base_model
+export MODEL="/path/to/the/folder/that/contains/tokenizer.json"
 
 python - <<'PY'
 import json, os, pathlib
@@ -27,10 +27,10 @@ PY
 Regenerate the fast tokenizer wrapper files from `tokenizer.json`:
 
 ```bash
-MODEL=/path/to/base_model
+export MODEL="/path/to/the/folder/that/contains/tokenizer.json"
 
 python - <<'PY'
-import json, os, pathlib, shutil
+import os, pathlib, shutil
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 p = pathlib.Path(os.environ["MODEL"]).expanduser()
@@ -42,14 +42,6 @@ for name in ["tokenizer_config.json", "special_tokens_map.json"]:
     f = p / name
     if f.exists():
         shutil.copy2(f, p / f"{name}.bak")
-
-cfg = p / "config.json"
-if cfg.exists():
-    shutil.copy2(cfg, p / "config.json.bak")
-    data = json.loads(cfg.read_text())
-    if data.get("tokenizer_class") not in (None, "PreTrainedTokenizerFast"):
-        data.pop("tokenizer_class", None)
-        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
 
 tok = PreTrainedTokenizerFast(
     tokenizer_file=str(tok_json),
