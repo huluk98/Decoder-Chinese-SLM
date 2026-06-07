@@ -18,6 +18,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("SYMPY_GROUND_TYPES", "python")
+
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -630,6 +632,16 @@ def load_model(checkpoint: str, device: torch.device, train_config: dict[str, An
         return AutoModelForCausalLM.from_pretrained(checkpoint, **kwargs)
 
 
+def ensure_scalable_amp_weights(model: torch.nn.Module, train_config: dict[str, Any], rank: int) -> torch.nn.Module:
+    precision = str(train_config.get("precision", "bf16")).lower()
+    if precision != "fp16" or bool(train_config.get("load_in_training_dtype", False)):
+        return model
+    if any(param.dtype == torch.float16 for param in model.parameters()):
+        maybe_print(rank, "FP16 autocast: casting trainable weights to FP32 so GradScaler can unscale gradients.")
+        model = model.float()
+    return model
+
+
 def print_startup_summary(
     rank: int,
     config_path: str,
@@ -1008,6 +1020,7 @@ def main(argv: list[str] | None = None) -> None:
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     configure_tokenizer(tokenizer)
     model = load_model(checkpoint, device, train_config, rank)
+    model = ensure_scalable_amp_weights(model, train_config, rank)
 
     gradient_checkpointing = bool(config["model"].get("gradient_checkpointing", False))
     if gradient_checkpointing:

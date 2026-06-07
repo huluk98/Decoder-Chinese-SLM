@@ -32,7 +32,11 @@ DTYPE=fp16 \
 bash run_linear_sparsity_revision_from_base.sh "$MODEL"
 ```
 
-This takes the model path as the precursor checkpoint, trains regular SFT for 5 epochs in FP16, trains contrastive SFT for 5 epochs in FP16, runs the original one-shot pruning rows at 30% and 50%, runs progressive magnitude pruning at 30% and 50% with FP16 eval/recovery, and writes the final summary JSON to `results/scenic_revision_sparsity_summary.json`. Counting dense baselines, the expected final JSON has 20 result rows: 2 dense baselines, 14 original one-shot rows, and 4 progressive magnitude rows.
+This takes the model path as the precursor checkpoint, trains regular SFT for 5 epochs with FP16 autocast, trains contrastive SFT for 5 epochs with FP16 autocast, runs the original one-shot pruning rows at 30% and 50%, runs progressive magnitude pruning at 30% and 50% with FP16 eval/recovery, and writes the final summary JSON to `results/scenic_revision_sparsity_summary.json`. Counting dense baselines, the expected final JSON has 20 result rows: 2 dense baselines, 14 original one-shot rows, and 4 progressive magnitude rows.
+
+For FP16 training, the configs keep model parameters in full precision and use autocast plus GradScaler. Do not set `load_in_training_dtype: true` unless you intentionally want pure FP16 weights and have disabled scaler-based gradient clipping.
+
+The launcher also defaults `SYMPY_GROUND_TYPES=python` and disables Torch Dynamo/compile paths for this run, which avoids the native `gmp: overflow in mpz type` abort seen on the H20 conda environment.
 
 ## Check And Repair Checkpoint Tokenizer
 

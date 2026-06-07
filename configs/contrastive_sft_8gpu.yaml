@@ -37,7 +37,7 @@ train:
   beta2: 0.95
   max_grad_norm: 1.0
   precision: fp16
-  load_in_training_dtype: true
+  load_in_training_dtype: false
   tf32: true
   num_workers: 8
   pin_memory: true

@@ -17,6 +17,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("SYMPY_GROUND_TYPES", "python")
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -61,6 +63,15 @@ def import_deepspeed():
             "Install it with `pip install deepspeed` or recreate the conda env from environment.yml."
         ) from exc
     return deepspeed
+
+
+def ensure_scalable_amp_weights(model: torch.nn.Module, train_config: dict[str, Any], rank: int) -> torch.nn.Module:
+    if str(train_config.get("precision", "")).lower() != "fp16":
+        return model
+    if any(param.dtype == torch.float16 for param in model.parameters()):
+        maybe_print(rank, "FP16 autocast: casting trainable weights to FP32 so GradScaler can unscale gradients.")
+        model = model.float()
+    return model
 
 
 def distributed_is_initialized() -> bool:
@@ -922,6 +933,8 @@ def main() -> None:
         model = AutoModelForCausalLM.from_pretrained(args.resume)
     else:
         model = create_model(config["model"], tokenizer)
+    if not use_deepspeed:
+        model = ensure_scalable_amp_weights(model, train_config, rank)
 
     model.to(device)
     if world_size > 1 and not use_deepspeed:
