@@ -39,6 +39,8 @@ Environment overrides:
   TORCHRUN                       default: torchrun
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
+  EXPECTED_GPU_COUNT             default: 8
+  ALLOW_H20_WORLD_SIZE_MISMATCH  set to 1 only for deliberate debug runs
   MODEL_FAMILY                   default: decoder_only
   DTYPE                          default: fp16
 
@@ -73,12 +75,17 @@ fi
 
 torchrun_bin="${TORCHRUN:-torchrun}"
 if [[ "${torchrun_bin}" != */* ]]; then
-  torchrun_bin="$(command -v "${torchrun_bin}")"
+  if ! torchrun_bin="$(command -v "${torchrun_bin}")"; then
+    echo "Could not find TORCHRUN executable '${TORCHRUN:-torchrun}' on PATH." >&2
+    echo "Activate the chatlm-decoder environment or set TORCHRUN=/path/to/env/bin/torchrun." >&2
+    exit 2
+  fi
 fi
 
 export PYTHON="${python_bin}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export EXPECTED_GPU_COUNT="${EXPECTED_GPU_COUNT:-8}"
 export SYMPY_GROUND_TYPES="${SYMPY_GROUND_TYPES:-python}"
 export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
@@ -93,6 +100,49 @@ export BENCHMARK_FILE="${BENCHMARK_FILE:-${BENCHMARK_PATH:-data/benchmarks/iot_i
 export TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-5}"
 export COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
 export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-1.01}"
+
+visible_gpu_count() {
+  local visible="${CUDA_VISIBLE_DEVICES:-}"
+  local count=0
+  local gpu_id
+  if [[ -z "${visible}" ]]; then
+    echo 0
+    return
+  fi
+  IFS=',' read -r -a gpu_ids <<< "${visible}"
+  for gpu_id in "${gpu_ids[@]}"; do
+    gpu_id="${gpu_id//[[:space:]]/}"
+    if [[ -n "${gpu_id}" ]]; then
+      count=$((count + 1))
+    fi
+  done
+  echo "${count}"
+}
+
+VISIBLE_GPU_COUNT="$(visible_gpu_count)"
+if [[ "${ALLOW_H20_WORLD_SIZE_MISMATCH:-0}" != "1" ]]; then
+  if [[ "${VISIBLE_GPU_COUNT}" -ne "${EXPECTED_GPU_COUNT}" ]]; then
+    echo "Expected ${EXPECTED_GPU_COUNT} visible GPUs, got ${VISIBLE_GPU_COUNT}: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" >&2
+    echo "Set CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 or ALLOW_H20_WORLD_SIZE_MISMATCH=1 for a deliberate debug run." >&2
+    exit 2
+  fi
+  if [[ "${NPROC_PER_NODE}" -ne "${EXPECTED_GPU_COUNT}" ]]; then
+    echo "Expected NPROC_PER_NODE=${EXPECTED_GPU_COUNT}, got ${NPROC_PER_NODE}." >&2
+    echo "Set NPROC_PER_NODE=8 or ALLOW_H20_WORLD_SIZE_MISMATCH=1 for a deliberate debug run." >&2
+    exit 2
+  fi
+fi
+if [[ "${VISIBLE_GPU_COUNT}" -gt 0 && "${NPROC_PER_NODE}" -gt "${VISIBLE_GPU_COUNT}" ]]; then
+  echo "NPROC_PER_NODE=${NPROC_PER_NODE} cannot exceed visible GPU count ${VISIBLE_GPU_COUNT}: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}" >&2
+  exit 2
+fi
+
+echo "== H20 GPU layout =="
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "visible_gpu_count=${VISIBLE_GPU_COUNT}"
+echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo "EXPECTED_GPU_COUNT=${EXPECTED_GPU_COUNT}"
+echo
 
 echo "== Original four methods: one-shot only at ${SPARSITY_LEVELS} =="
 bash run_5epoch_sft_contrastive_one_shot_pruning.sh one-shot "${BASE_MODEL_PATH}"
