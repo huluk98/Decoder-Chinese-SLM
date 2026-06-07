@@ -42,7 +42,7 @@ Environment overrides:
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
   MODEL_FAMILY                   default: decoder_only
-  DTYPE                          default: bf16
+  DTYPE                          default: fp16
 
 Example:
   PYTHON=/path/to/env/bin/python bash run_linear_sparsity_revision_from_base.sh /path/to/base_model
@@ -136,7 +136,7 @@ run_progressive_linear_sparsity() {
       --max_new_tokens "${MAX_NEW_TOKENS:-64}" \
       --normalization_mode "${NORMALIZATION_MODE:-command}" \
       --seed "${SEED:-42}" \
-      --dtype "${DTYPE:-bf16}" \
+      --dtype "${DTYPE:-fp16}" \
       --output_dir "${output_dir}/sparsity_${target_sparsity//./p}"
   ) &
 }
