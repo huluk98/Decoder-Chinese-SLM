@@ -148,7 +148,19 @@ def dtype_kwargs(device: torch.device, precision: str) -> dict[str, Any]:
 def load_model(checkpoint: str, device: torch.device, config: dict[str, Any], rank: int) -> torch.nn.Module:
     precision = str(config.get("precision", "bf16")).lower()
     kwargs = dtype_kwargs(device, precision)
-    if bool(config.get("flash_attention", True)):
+    requested_attn = str(config.get("attn_implementation") or "").strip()
+    if requested_attn:
+        try:
+            maybe_print(rank, f"Attention implementation: {requested_attn}")
+            return AutoModelForCausalLM.from_pretrained(
+                checkpoint,
+                attn_implementation=requested_attn,
+                trust_remote_code=False,
+                **kwargs,
+            )
+        except Exception as exc:
+            maybe_print(rank, f"[warning] requested attention implementation {requested_attn!r} unavailable ({exc}); trying fallback.")
+    if bool(config.get("flash_attention", False)):
         try:
             maybe_print(rank, "Attention implementation: trying flash_attention_2")
             return AutoModelForCausalLM.from_pretrained(

@@ -566,7 +566,8 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
         config["model"]["gradient_checkpointing"] = bool(config["gradient_checkpointing"])
     if "flash_attention" in config:
         train_config["flash_attention"] = bool(config["flash_attention"])
-        train_config["sdp_flash"] = bool(config["flash_attention"])
+        if "sdp_flash" not in config:
+            train_config["sdp_flash"] = bool(config["flash_attention"])
     if "bf16" in config or "fp16" in config:
         if bool(config.get("bf16", False)):
             train_config["precision"] = "bf16"
