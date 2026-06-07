@@ -1,5 +1,34 @@
 # Decoder-Only Chinese Mini LM
 
+## Temporary PyCharm `chatlm-decoder` Env Check
+
+Delete this section after the PyCharm env is stable.
+
+Verification:
+
+```bash
+conda activate chatlm-decoder
+python - <<'PY'
+import torch, transformers, tokenizers
+print("python env ok")
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("transformers:", transformers.__version__)
+print("tokenizers:", tokenizers.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("gpu count:", torch.cuda.device_count())
+PY
+```
+
+Repair the PyCharm env without changing the working PyTorch/CUDA install:
+
+```bash
+conda activate chatlm-decoder
+python -m pip uninstall -y transformers tokenizers
+python -m pip install --no-cache-dir "transformers==4.48.3" "tokenizers>=0.21,<0.22"
+python -m pip install -e . --no-deps
+```
+
 This is a clean starter codebase for training a decoder-only autoregressive Chinese language model at roughly the same parameter budget as [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), with an 8x NVIDIA H20 launch recipe for the same 0.2B target.
 
 The upstream ChatLM-mini-Chinese model is a T5-style text-to-text model, not decoder-only. Its model card reports a 0.2B parameter model, a 29,298 token vocabulary, and public dataset sources. This project keeps the size target and Chinese data recipe, but uses a modern Llama-family causal LM.

@@ -1,10 +1,10 @@
 # Portable/common dependencies. NVIDIA runtime packages live in
 # requirements_h20.txt so CPU/Mac envs do not try to install CUDA-only wheels.
 torch>=2.2,<3
-transformers>=4.48,<5
+transformers==4.48.3
 datasets>=2.19
 huggingface_hub>=0.24
-tokenizers>=0.19
+tokenizers>=0.21,<0.22
 PyYAML>=6.0
 tqdm>=4.66
 numpy>=1.26,<3
