@@ -69,6 +69,9 @@ if [[ -z "${python_bin}" ]]; then
     python_bin="python"
   fi
 fi
+if [[ "${python_bin}" != */* ]]; then
+  python_bin="$(command -v "${python_bin}")"
+fi
 
 export PYTHON="${python_bin}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"

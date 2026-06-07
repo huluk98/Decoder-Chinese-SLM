@@ -82,6 +82,7 @@ The launcher uses:
 
 - `torchrun` with `NPROC_PER_NODE=8` for regular SFT, contrastive SFT, and original one-shot pruning.
 - `SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7` to split progressive pruning jobs across GPUs.
+- The active terminal environment's `python`/`python3`; bare executable names are resolved through `PATH`.
 - FP16 autocast training with GradScaler, while keeping trainable weights in full precision.
 - SDPA attention by default, not FlashAttention 2.
 - `SYMPY_GROUND_TYPES=python` and disabled Dynamo/compile paths to avoid the H20 `gmp: overflow in mpz type` abort.

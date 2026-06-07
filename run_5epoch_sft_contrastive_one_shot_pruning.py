@@ -7,6 +7,7 @@ import json
 import math
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -223,6 +224,17 @@ def repo_path(path: str | Path) -> Path:
     return candidate if candidate.is_absolute() else Path.cwd() / candidate
 
 
+def resolve_executable(value: str | None, *, fallback: str) -> str:
+    """Resolve shell command names through PATH, but keep explicit paths explicit."""
+    executable = str(value or fallback).strip()
+    if not executable:
+        executable = fallback
+    if "/" in executable or "\\" in executable:
+        return str(Path(executable).expanduser())
+    resolved = shutil.which(executable)
+    return resolved or executable
+
+
 def read_yaml(path: str | Path) -> dict[str, Any]:
     with repo_path(path).open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
@@ -407,13 +419,13 @@ def resolved_settings(config: dict[str, Any]) -> dict[str, Any]:
     settings["contrastive_base_model"] = config.get("contrastive_base_model") or str(settings["regular_final"])
     settings["sparsity_levels"] = parse_sparsity_levels(config.get("sparsity_levels"), config.get("sparsity", 0.5))
     settings["sparsity"] = float(settings["sparsity_levels"][0])
-    settings["python"] = str(repo_path(config["python"])) if config.get("python") else sys.executable
+    settings["python"] = resolve_executable(str(config["python"]) if config.get("python") else None, fallback=sys.executable)
     torchrun = config.get("torchrun")
     if torchrun:
-        settings["torchrun"] = str(repo_path(torchrun))
+        settings["torchrun"] = resolve_executable(str(torchrun), fallback="torchrun")
     else:
         beside_python = Path(settings["python"]).with_name("torchrun")
-        settings["torchrun"] = str(beside_python) if beside_python.exists() else "torchrun"
+        settings["torchrun"] = str(beside_python) if beside_python.exists() else resolve_executable(None, fallback="torchrun")
     return settings
 
 
@@ -450,8 +462,9 @@ def command_env(settings: dict[str, Any]) -> dict[str, str]:
     env["ACCELERATE_DYNAMO_BACKEND"] = str(env.get("ACCELERATE_DYNAMO_BACKEND") or "no")
     env["OMP_NUM_THREADS"] = str(settings["omp_num_threads"])
     env["PYTHON"] = str(settings["python"])
-    python_bin = str(Path(settings["python"]).parent)
-    env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
+    python_path = Path(str(settings["python"]))
+    if python_path.is_absolute():
+        env["PATH"] = str(python_path.parent) + os.pathsep + env.get("PATH", "")
     return env
 
 
