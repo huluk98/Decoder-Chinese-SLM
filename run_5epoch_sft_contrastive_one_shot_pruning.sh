@@ -94,6 +94,9 @@ run_5epoch_sft_contrastive_from_base() {
       python_bin="python"
     fi
   fi
+  if [[ "${python_bin}" != */* ]]; then
+    python_bin="$(command -v "${python_bin}")"
+  fi
 
   exec "${python_bin}" run_5epoch_sft_contrastive_one_shot_pruning.py "$@"
 }
