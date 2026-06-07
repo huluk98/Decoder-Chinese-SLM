@@ -211,9 +211,16 @@ def setup_distributed(requested: str) -> tuple[torch.device, int, int, int]:
     return select_device(requested), rank, local_rank, world_size
 
 
+def distributed_barrier(local_rank: int) -> None:
+    if is_dist():
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[int(local_rank)])
+        else:
+            dist.barrier()
+
+
 def cleanup_distributed() -> None:
     if is_dist():
-        dist.barrier()
         dist.destroy_process_group()
 
 
@@ -226,9 +233,9 @@ def maybe_print(rank: int, message: str) -> None:
         print(message, flush=True)
 
 
-def maybe_barrier(world_size: int) -> None:
+def maybe_barrier(world_size: int, local_rank: int = 0) -> None:
     if int(world_size) > 1 and is_dist():
-        dist.barrier()
+        distributed_barrier(local_rank)
 
 
 def unwrap_model(model: Any) -> Any:
@@ -1057,6 +1064,14 @@ def main() -> None:
     if "dense" in modes and 0.0 not in sparsity_levels:
         sparsity_levels.insert(0, 0.0)
 
+    rank_device = {
+        "rank": int(rank),
+        "local_rank": int(local_rank),
+        "device": str(device),
+        "cuda_current_device": int(torch.cuda.current_device()) if torch.cuda.is_available() else None,
+    }
+    rank_devices = all_gather_object(rank_device, world_size)
+
     metadata = {
         "experiment_name": args.experiment_name,
         "created_at_utc": dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
@@ -1075,9 +1090,21 @@ def main() -> None:
             "local_rank": int(local_rank),
             "world_size": int(world_size),
             "launcher": "torchrun" if int(world_size) > 1 else "python",
+            "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+            "torch_cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "rank_devices": rank_devices,
         }
         write_json(output_dir / "run_config.json", metadata)
-    maybe_barrier(world_size)
+        print(
+            "Linear sparsity runtime: "
+            f"world_size={world_size} cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', '')} "
+            f"torch_cuda_device_count={torch.cuda.device_count() if torch.cuda.is_available() else 0} "
+            f"rank_devices={rank_devices}",
+            flush=True,
+        )
+        if int(world_size) > 1:
+            print("Progress bars show rank 0 only; other ranks run their distributed shards without progress bars.", flush=True)
+    maybe_barrier(world_size, local_rank)
 
     summary_rows: list[dict[str, Any]] = []
     dense_by_family_eval: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1131,7 +1158,7 @@ def main() -> None:
                             "val_em5",
                         ],
                     )
-            maybe_barrier(world_size)
+            maybe_barrier(world_size, local_rank)
             checkpoint_path = ""
             mask_path = ""
             if is_main_process(rank):
@@ -1145,7 +1172,7 @@ def main() -> None:
                     target_sparsity,
                     int(args.seed),
                 )
-            maybe_barrier(world_size)
+            maybe_barrier(world_size, local_rank)
             for eval_name, eval_path, eval_samples in eval_sets:
                 row = run_single_eval(
                     model,
