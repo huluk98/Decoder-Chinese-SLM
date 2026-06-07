@@ -41,6 +41,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+
 # =========================
 # Fixed experiment settings
 # =========================
@@ -147,6 +152,7 @@ def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
 
 
 def prepare_tokenizer(tokenizer: Any) -> Any:
+    prepare_decoder_tokenizer(tokenizer)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token if tokenizer.eos_token is not None else tokenizer.unk_token
@@ -499,6 +505,7 @@ def evaluate(
                     max_length=MAX_PROMPT_LEN,
                 )
                 enc = {k: v.to(device) for k, v in enc.items()}
+                strip_unused_decoder_model_kwargs(enc)
                 gen = model.generate(
                     **enc,
                     max_new_tokens=MAX_NEW_TOKENS,

@@ -14,6 +14,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+
 
 DEFAULT_TEXT_FIELDS = ("prompt", "instruction", "question", "input", "text", "query")
 
@@ -103,6 +105,7 @@ def generate_text(
 ) -> str:
     formatted_prompt = format_prompt(prompt, chat_format=chat_format)
     inputs = tokenizer(formatted_prompt, return_tensors="pt").to(device)
+    strip_unused_decoder_model_kwargs(inputs)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": temperature > 0,
@@ -140,9 +143,7 @@ def main() -> None:
     args = parser.parse_args()
 
     device = select_device(args.device)
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint)
-    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = prepare_decoder_tokenizer(AutoTokenizer.from_pretrained(args.checkpoint))
     model = AutoModelForCausalLM.from_pretrained(args.checkpoint, torch_dtype=dtype_for(args.dtype, device)).to(device)
     model.eval()
 

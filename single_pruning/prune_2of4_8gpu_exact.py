@@ -49,6 +49,11 @@ import torch.distributed as dist
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+
 # =========================
 # User-editable constants
 # =========================
@@ -179,6 +184,7 @@ def choose_dtype(device: torch.device) -> torch.dtype:
 
 
 def prepare_tokenizer(tokenizer: Any) -> Any:
+    prepare_decoder_tokenizer(tokenizer)
     tokenizer.padding_side = "left"
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -336,6 +342,7 @@ def generate_batch(
         max_length=MAX_INPUT_TOKENS,
     )
     enc = {k: v.to(device) for k, v in enc.items()}
+    strip_unused_decoder_model_kwargs(enc)
     prompt_width = int(enc["input_ids"].shape[1])
 
     with torch.inference_mode():

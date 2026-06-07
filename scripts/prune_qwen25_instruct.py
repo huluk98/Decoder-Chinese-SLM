@@ -50,6 +50,7 @@ from chatlm_decoder.qwen25_instruct_data import (
     DEFAULT_SYSTEM_PROMPT,
     build_qwen25_instruct_dataloader,
 )
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer
 
 METHOD_CHOICES = ("2of4", "2:4", "nvidia_2of4", "magnitude", "wanda", "gradient", "taylor", "taylor_gradient")
 
@@ -99,6 +100,7 @@ def dtype_for(name: str, device: torch.device) -> torch.dtype | None:
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
+    prepare_decoder_tokenizer(tokenizer)
     if not hasattr(tokenizer, "apply_chat_template"):
         raise AttributeError("Qwen2.5-Instruct tokenizer must provide apply_chat_template.")
     if tokenizer.eos_token is None:

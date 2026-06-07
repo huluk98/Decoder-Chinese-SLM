@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parents[0]
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 from trt_edge_common import (
     CudaRuntime,
     apply_prompt_format,
@@ -283,9 +286,9 @@ def make_int8_calibrator(trt: Any, network: Any, args: argparse.Namespace) -> An
     tokenizer_path = args.tokenizer_path or args.model_path
     if not tokenizer_path:
         raise ValueError("--model-path or --tokenizer-path is required for INT8 calibration tokenization.")
-    tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=bool(args.trust_remote_code))
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = prepare_decoder_tokenizer(
+        transformers.AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=bool(args.trust_remote_code))
+    )
     records = read_records(args.calib_json, limit=int(args.calib_samples))
     names = input_names(network)
     cache_path = Path(args.output_dir).expanduser() / "model_int8_calib.cache"
@@ -386,6 +389,7 @@ def run_forward_loop_for_modelopt(model: Any, tokenizer: Any, records: list[dict
                     truncation=True,
                     max_length=int(args.opt_seq_len),
                 ).to(device)
+                strip_unused_decoder_model_kwargs(encoded)
                 model_inner(**encoded, use_cache=False)
 
     return loop
@@ -420,9 +424,9 @@ def attempt_int4_modelopt(args: argparse.Namespace) -> Path:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=bool(args.trust_remote_code))
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = prepare_decoder_tokenizer(
+        transformers.AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=bool(args.trust_remote_code))
+    )
     model = transformers.AutoModelForCausalLM.from_pretrained(
         args.model_path,
         torch_dtype=dtype,

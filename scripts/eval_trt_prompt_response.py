@@ -21,6 +21,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.command_eval import canonicalize_command_response
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer
 from trt_edge_common import (
     TensorRTEngineRunner,
     apply_prompt_format,
@@ -127,9 +128,7 @@ class Beam:
 def load_tokenizer(model_path: str, trust_remote_code: bool) -> Any:
     transformers = import_required("transformers", "TensorRT prompt-response eval tokenizer loading")
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    return prepare_decoder_tokenizer(tokenizer)
 
 
 def output_logits(outputs: dict[str, Any]) -> Any:

@@ -10,6 +10,10 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+PROJECT_ROOT = SCRIPT_DIR.parents[0]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 from trt_edge_common import (
     TensorRTEngineRunner,
@@ -45,9 +49,7 @@ def dtype_for(torch: Any, name: str, device: Any) -> Any:
 def load_tokenizer(args: argparse.Namespace) -> Any:
     transformers = import_required("transformers", "comparison tokenizer loading")
     tokenizer = transformers.AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=bool(args.trust_remote_code))
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    return prepare_decoder_tokenizer(tokenizer)
 
 
 def output_logits(outputs: dict[str, Any]) -> Any:
@@ -93,6 +95,7 @@ def run_pytorch(args: argparse.Namespace, prompt: str, tokenizer: Any) -> tuple[
         max_length=int(args.max_seq_len),
         add_special_tokens=bool(args.add_special_tokens),
     ).to(device)
+    strip_unused_decoder_model_kwargs(encoded)
     with torch.no_grad():
         outputs = model(**encoded, use_cache=False, return_dict=True)
         generated_ids = model.generate(

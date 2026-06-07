@@ -19,6 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 DEFAULT_BENCHMARK_FILE = PROJECT_ROOT / "data" / "benchmarks" / "iot_instruction_benchmark_200.json"
 DEFAULT_CONFIG_FILE = PROJECT_ROOT / "configs" / "iot_benchmark_eval.yaml"
 LEGACY_USER_TOKEN = "<|user|>"
@@ -54,6 +55,8 @@ HF_WEIGHT_FILENAMES = (
     "pytorch_model.bin",
     "pytorch_model.bin.index.json",
 )
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 
 def parse_simple_yaml_scalar(value: str) -> Any:
@@ -237,6 +240,7 @@ def dtype_for(name: str, device: torch.device) -> torch.dtype | str:
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
+    prepare_decoder_tokenizer(tokenizer)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.pad_token_id is None:
@@ -413,6 +417,7 @@ def generate_batch(
         max_length=max(1, int(max_prompt_tokens)),
         add_special_tokens=False,
     ).to(device)
+    strip_unused_decoder_model_kwargs(inputs)
     prompt_width = int(inputs["input_ids"].shape[-1])
     output_ids = model.generate(
         **inputs,

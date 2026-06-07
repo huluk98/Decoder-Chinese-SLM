@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from pathlib import Path
-from typing import Iterable
-
-from transformers import PreTrainedTokenizerFast
+from typing import Any, Iterable
 
 PAD_TOKEN = "<|pad|>"
 UNK_TOKEN = "<|unk|>"
@@ -23,6 +22,8 @@ SPECIAL_TOKENS = [
     SYSTEM_TOKEN,
 ]
 
+UNUSED_DECODER_MODEL_KWARGS = ("token_type_ids",)
+
 
 def train_tokenizer_from_iterator(
     texts: Iterable[str],
@@ -31,6 +32,7 @@ def train_tokenizer_from_iterator(
     min_frequency: int = 2,
     model_max_length: int = 512,
 ) -> PreTrainedTokenizerFast:
+    from transformers import PreTrainedTokenizerFast
     from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers, trainers
 
     tokenizer = Tokenizer(models.BPE(unk_token=UNK_TOKEN))
@@ -62,6 +64,8 @@ def train_tokenizer_from_iterator(
 
 
 def load_tokenizer(path: str | Path) -> PreTrainedTokenizerFast:
+    from transformers import PreTrainedTokenizerFast
+
     tokenizer = PreTrainedTokenizerFast.from_pretrained(str(Path(path).expanduser()))
     additions: dict[str, str | list[str]] = {}
 
@@ -83,4 +87,21 @@ def load_tokenizer(path: str | Path) -> PreTrainedTokenizerFast:
 
     if additions:
         tokenizer.add_special_tokens(additions)
+    return prepare_decoder_tokenizer(tokenizer)
+
+
+def prepare_decoder_tokenizer(tokenizer: Any) -> Any:
+    """Make a tokenizer safe for decoder-only causal-LM calls."""
+    input_names = list(getattr(tokenizer, "model_input_names", []) or [])
+    filtered = [name for name in input_names if name not in UNUSED_DECODER_MODEL_KWARGS]
+    tokenizer.model_input_names = filtered or ["input_ids", "attention_mask"]
+    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
+        tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
+
+def strip_unused_decoder_model_kwargs(batch: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    """Remove tokenizer fields that decoder-only models reject in forward/generate."""
+    for key in UNUSED_DECODER_MODEL_KWARGS:
+        batch.pop(key, None)
+    return batch

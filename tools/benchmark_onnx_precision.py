@@ -23,6 +23,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer
 
 try:
     from trt_edge_common import apply_prompt_format, prompt_and_reference, read_records, setup_logging
@@ -327,6 +332,7 @@ class InputFactory:
             self.args.model_path,
             trust_remote_code=bool(self.args.trust_remote_code),
         )
+        prepare_decoder_tokenizer(self.tokenizer)
         if getattr(self.tokenizer, "pad_token_id", None) is None and getattr(self.tokenizer, "eos_token_id", None) is not None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         if getattr(self.tokenizer, "pad_token_id", None) is None:

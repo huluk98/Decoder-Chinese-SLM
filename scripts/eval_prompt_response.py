@@ -35,6 +35,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from chatlm_decoder.command_eval import canonicalize_command_response
 from chatlm_decoder.sft_data import EOS_TOKEN, normalize_sft_record
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 JSON_LIST_KEYS = ("data", "records", "items", "examples", "eval", "validation", "test")
 ANCHOR_ID_FIELDS = ("anchor_id", "semantic_anchor_id", "group_id", "cluster_id", "intent_id", "anchor")
@@ -585,6 +586,7 @@ def generate_completion(
     repetition_penalty: float,
 ) -> tuple[str, int, bool, bool]:
     inputs = tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False).to(device)
+    strip_unused_decoder_model_kwargs(inputs)
     generation_kwargs = {
         "max_new_tokens": max_new_tokens,
         "do_sample": bool(do_sample),
@@ -636,6 +638,7 @@ def generate_completions_batch(
             max_length=max(1, int(max_prompt_tokens)),
             add_special_tokens=False,
         ).to(device)
+        strip_unused_decoder_model_kwargs(inputs)
     finally:
         tokenizer.padding_side = previous_padding_side
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -690,6 +693,7 @@ def generate_topk_completions_batch(
             max_length=max(1, int(max_prompt_tokens)),
             add_special_tokens=False,
         ).to(device)
+        strip_unused_decoder_model_kwargs(inputs)
     finally:
         tokenizer.padding_side = previous_padding_side
     prompt_width = int(inputs["input_ids"].shape[-1])
@@ -1235,9 +1239,7 @@ def main() -> None:
     requested_checkpoint = args.checkpoint
     args.requested_checkpoint = requested_checkpoint
     args.checkpoint = resolve_checkpoint_for_evaluation(args.checkpoint)
-    tokenizer = AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=False)
-    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = prepare_decoder_tokenizer(AutoTokenizer.from_pretrained(args.checkpoint, trust_remote_code=False))
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
 
     model = AutoModelForCausalLM.from_pretrained(

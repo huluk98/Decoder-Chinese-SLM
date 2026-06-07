@@ -8,6 +8,8 @@ from typing import Any, Iterable
 
 import torch
 
+from .tokenizer import strip_unused_decoder_model_kwargs
+
 
 PROTECTED_NAME_PATTERNS = (
     "embed",
@@ -72,6 +74,7 @@ def accepts_cache_position(model: torch.nn.Module) -> bool:
 
 
 def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    strip_unused_decoder_model_kwargs(kwargs)
     input_ids = kwargs.get("input_ids")
     if (
         input_ids is not None
