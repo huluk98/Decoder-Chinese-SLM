@@ -37,7 +37,7 @@ def test_full_decoder_launcher_defaults_are_guarded_and_report_em5() -> None:
     assert config["methods"] == ["magnitude", "wanda", "taylor", "2of4"]
     assert config["top_k_exact_match"] == 5
     assert config["max_new_tokens"] == 64
-    assert config["max_new_token_hit_rate_threshold"] == 0.5
+    assert config["max_new_token_hit_rate_threshold"] == 1.01
     assert config["sparsity_denominator"] == "prunable"
     assert config["granularity"] == "global"
     assert config["pruning_scope"] == "transformer_linears"
@@ -99,4 +99,4 @@ def test_full_decoder_shell_wrapper_help_describes_one_argument_run() -> None:
 
     assert "bash run_full_decoder_sft_contrastive_pruning.sh /path/to/original_decoder_checkpoint" in result.stdout
     assert "EM@1 and EM@5" in result.stdout
-    assert "MAX_NEW_TOKEN_HIT_RATE_THRESHOLD=0.5" in result.stdout
+    assert "MAX_NEW_TOKEN_HIT_RATE_THRESHOLD=1.01" in result.stdout
