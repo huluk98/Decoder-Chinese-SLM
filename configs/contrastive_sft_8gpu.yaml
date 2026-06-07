@@ -36,7 +36,8 @@ train:
   beta1: 0.9
   beta2: 0.95
   max_grad_norm: 1.0
-  precision: bf16
+  precision: fp16
+  load_in_training_dtype: true
   tf32: true
   num_workers: 8
   pin_memory: true
