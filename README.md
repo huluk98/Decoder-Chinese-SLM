@@ -1,5 +1,75 @@
 # Decoder-Only Chinese Mini LM
 
+## Check And Repair Checkpoint Tokenizer
+
+Inspect the checkpoint tokenizer metadata:
+
+```bash
+MODEL=/path/to/base_model
+
+python - <<'PY'
+import json, os, pathlib
+
+p = pathlib.Path(os.environ["MODEL"]).expanduser()
+for name in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "config.json", "generation_config.json", "model.safetensors"]:
+    f = p / name
+    print(name, "exists:", f.exists())
+
+for name in ["tokenizer_config.json", "config.json"]:
+    f = p / name
+    if f.exists():
+        data = json.loads(f.read_text())
+        print(name, "tokenizer_class:", data.get("tokenizer_class"))
+        print(name, "model_type:", data.get("model_type"))
+PY
+```
+
+Regenerate the fast tokenizer wrapper files from `tokenizer.json`:
+
+```bash
+MODEL=/path/to/base_model
+
+python - <<'PY'
+import json, os, pathlib, shutil
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+p = pathlib.Path(os.environ["MODEL"]).expanduser()
+tok_json = p / "tokenizer.json"
+if not tok_json.exists():
+    raise SystemExit(f"Missing tokenizer.json in {p}")
+
+for name in ["tokenizer_config.json", "special_tokens_map.json"]:
+    f = p / name
+    if f.exists():
+        shutil.copy2(f, p / f"{name}.bak")
+
+cfg = p / "config.json"
+if cfg.exists():
+    shutil.copy2(cfg, p / "config.json.bak")
+    data = json.loads(cfg.read_text())
+    if data.get("tokenizer_class") not in (None, "PreTrainedTokenizerFast"):
+        data.pop("tokenizer_class", None)
+        cfg.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+tok = PreTrainedTokenizerFast(
+    tokenizer_file=str(tok_json),
+    pad_token="<|pad|>",
+    unk_token="<|unk|>",
+    bos_token="<|bos|>",
+    eos_token="<|eos|>",
+    additional_special_tokens=["<|user|>", "<|assistant|>", "<|system|>"],
+    model_max_length=2048,
+)
+tok.save_pretrained(str(p))
+
+loaded = AutoTokenizer.from_pretrained(str(p), trust_remote_code=False, use_fast=True)
+print("loaded:", loaded.__class__.__name__)
+print("vocab:", len(loaded))
+print("eos:", loaded.eos_token, loaded.eos_token_id)
+print("pad:", loaded.pad_token, loaded.pad_token_id)
+PY
+```
+
 ## Current Pruning Run
 
 ```bash
