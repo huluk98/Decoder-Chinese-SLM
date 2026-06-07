@@ -112,6 +112,20 @@ def setup_distributed_eval(requested_device: str) -> tuple[torch.device, int, in
     return select_device(requested_device), rank, local_rank, world_size
 
 
+def distributed_barrier(local_rank: int) -> None:
+    if not dist.is_available() or not dist.is_initialized():
+        return
+    if torch.cuda.is_available():
+        dist.barrier(device_ids=[int(local_rank)])
+    else:
+        dist.barrier()
+
+
+def cleanup_distributed_eval() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def dtype_for(name: str, device: torch.device) -> torch.dtype | str:
     if name == "auto":
         return "auto"
@@ -1295,6 +1309,14 @@ def main() -> None:
         validation_file=args.validation_file,
         test_file=args.test_file,
     )
+    batch_size = max(1, int(args.batch_size))
+    indexed_examples = [(index, example) for index, example in enumerate(examples) if index % world_size == rank]
+    local_shard_examples = len(indexed_examples)
+    shard_counts: list[int | None] = [local_shard_examples]
+    if world_size > 1:
+        shard_counts = [None for _ in range(world_size)]
+        dist.all_gather_object(shard_counts, local_shard_examples)
+
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         write_json(output_dir / "split_audit.json", split_audit)
@@ -1323,7 +1345,8 @@ def main() -> None:
         print(
             f"Prompt/response eval runtime: world_size={world_size} "
             f"rank={rank} local_rank={local_rank} device={device} "
-            f"total_examples={len(records)} shard_examples={(len(records) + world_size - 1 - rank) // world_size} "
+            f"total_examples={len(records)} rank0_shard_examples={local_shard_examples} "
+            f"all_rank_shards={shard_counts} "
             f"benchmark_runs={benchmark_runs}\n"
             f"  model_path={args.checkpoint}\n"
             f"  checkpoint_path_used_for_evaluation={args.checkpoint}\n"
@@ -1355,11 +1378,10 @@ def main() -> None:
             f"contains_eos={label_audit['supervised_contains_eos_token']} "
             f"less_than_-100={label_audit['labels_less_than_minus_100']}"
         )
+        if world_size > 1:
+            print("Progress bar shows rank 0's shard only; the other ranks run their shards without progress bars.")
     if world_size > 1:
-        dist.barrier()
-
-    batch_size = max(1, int(args.batch_size))
-    indexed_examples = [(index, example) for index, example in enumerate(examples) if index % world_size == rank]
+        distributed_barrier(local_rank)
     run_summaries: list[dict[str, Any]] = []
 
     for run_index in range(benchmark_runs):
@@ -1379,7 +1401,7 @@ def main() -> None:
         results: list[dict[str, Any]] = []
         progress = tqdm(
             range(0, len(indexed_examples), batch_size),
-            desc=f"prompt-response-eval-run{run_index + 1:02d}-rank{rank}",
+            desc=f"prompt-response-eval-run{run_index + 1:02d}-rank{rank}-shard/{world_size}",
             disable=(rank != 0),
         )
         for start in progress:
@@ -1739,9 +1761,6 @@ def main() -> None:
                 )
 
     if rank != 0:
-        if world_size > 1:
-            dist.barrier()
-            dist.destroy_process_group()
         return
 
     if benchmark_runs > 1:
@@ -1890,10 +1909,8 @@ def main() -> None:
             mirror_summary_to_root(output_root, output_dir, run_summaries[-1], split_audit)
         print(f"Wrote results to {output_dir}")
 
-    if world_size > 1:
-        dist.barrier()
-        dist.destroy_process_group()
-
-
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        cleanup_distributed_eval()

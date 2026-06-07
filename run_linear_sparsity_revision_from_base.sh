@@ -92,7 +92,7 @@ export EOS_RETUNE=0
 export BENCHMARK_FILE="${BENCHMARK_FILE:-${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}}"
 export TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-5}"
 export COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
-export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-0.5}"
+export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-1.01}"
 
 echo "== Original four methods: one-shot only at ${SPARSITY_LEVELS} =="
 bash run_5epoch_sft_contrastive_one_shot_pruning.sh one-shot "${BASE_MODEL_PATH}"

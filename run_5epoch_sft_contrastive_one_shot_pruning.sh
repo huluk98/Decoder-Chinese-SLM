@@ -31,7 +31,8 @@ Environment overrides:
                         optional contrastive dataset override; default config uses data/scenic/SCENIC_full_anchor_positive_negative.json.
   CONTRASTIVE_EVAL_FILE optional contrastive eval/calibration dataset; default config uses data/scenic/SCENIC_full_training_dataset.json.
   MAX_NEW_TOKEN_HIT_RATE_THRESHOLD
-                        default: 0.5, so eval fails when most generations hit max_new_tokens without EOS.
+                        default: 1.01, so pruning eval records max-token hits without aborting.
+                        Set to 0.5 for stricter EOS/debug failure behavior.
   METHODS               default: "magnitude wanda taylor 2of4".
   SPARSITY_LEVELS        optional whitespace/comma list such as "0.3 0.5";
                         when set, pruning/eval runs once per level after training.

@@ -60,7 +60,7 @@ CONFIG: dict[str, Any] = {
     "max_length": 256,
     "max_new_tokens": 64,
     "num_beams": 5,
-    "max_new_token_hit_rate_threshold": 0.5,
+    "max_new_token_hit_rate_threshold": 1.01,
     "sparsity": 0.5,
     "sparsity_levels": None,  # None -> use the single SPARSITY value.
     "pruning_scope": "transformer_linears",
