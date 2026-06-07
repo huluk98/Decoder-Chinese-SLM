@@ -1,5 +1,38 @@
 # Decoder-Only Chinese Mini LM
 
+## Run Training Pruning Eval Pipeline
+
+Set the decoder checkpoint path once:
+
+```bash
+export MODEL="/PATH/TO/MY/DECODER_SLM_CHECKPOINT"
+```
+
+Quick checkpoint sanity check:
+
+```bash
+python - <<'PY'
+import os, pathlib
+
+p = pathlib.Path(os.environ["MODEL"]).expanduser()
+print("path exists:", p.exists())
+print("config:", (p / "config.json").exists())
+print("model:", (p / "model.safetensors").exists())
+print("tokenizer:", (p / "tokenizer.json").exists())
+PY
+```
+
+Run the full 8-GPU training, pruning, and eval pipeline:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7 \
+bash run_linear_sparsity_revision_from_base.sh "$MODEL"
+```
+
+This takes the model path as the precursor checkpoint, trains regular SFT for 5 epochs, trains contrastive SFT for 5 epochs, runs the original one-shot pruning rows at 30% and 50%, runs progressive magnitude pruning at 30% and 50%, and writes the final summary JSON to `results/scenic_revision_sparsity_summary.json`. Counting dense baselines, the expected final JSON has 20 result rows: 2 dense baselines, 14 original one-shot rows, and 4 progressive magnitude rows.
+
 ## Check And Repair Checkpoint Tokenizer
 
 Inspect the checkpoint tokenizer metadata:
@@ -60,15 +93,6 @@ print("vocab:", len(loaded))
 print("eos:", loaded.eos_token, loaded.eos_token_id)
 print("pad:", loaded.pad_token, loaded.pad_token_id)
 PY
-```
-
-## Current Pruning Run
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-NPROC_PER_NODE=8 \
-SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7 \
-bash run_linear_sparsity_revision_from_base.sh /path/to/base_model
 ```
 
 This is a clean starter codebase for training a decoder-only autoregressive Chinese language model at roughly the same parameter budget as [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), with an 8x NVIDIA H20 launch recipe for the same 0.2B target.
