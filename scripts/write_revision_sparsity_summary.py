@@ -342,19 +342,18 @@ def execution_plan() -> dict[str, Any]:
             "launcher": "torchrun for eval; python scripts/prune.py for mask generation/model rewrite",
             "distributed": True,
             "uses_nproc_per_node": True,
-            "notes": "Legacy one-shot evaluations use torchrun/NPROC_PER_NODE. The pruning transform itself is single-process per outcome.",
+            "notes": "Legacy one-shot evaluations use torchrun/NPROC_PER_NODE. The mask construction step writes one checkpoint per outcome.",
         },
         "progressive_magnitude": {
-            "launcher": "python scripts/run_sparsity_experiments.py",
-            "distributed": False,
-            "uses_nproc_per_node": False,
-            "gpu_ids": os.environ.get("SPARSITY_GPU_IDS", ""),
-            "parallel_jobs": True,
-            "notes": "Added progressive magnitude jobs are split across SPARSITY_GPU_IDS by the shell wrapper; each job is single-process on its assigned GPU.",
+            "launcher": "torchrun scripts/run_sparsity_experiments.py",
+            "distributed": True,
+            "uses_nproc_per_node": True,
+            "parallel_jobs": False,
+            "notes": "Added progressive magnitude jobs run sequentially; each 30% or 50% job uses all GPUs exposed by CUDA_VISIBLE_DEVICES.",
         },
         "timing_interpretation": (
-            "Training and native eval timings are 8-GPU timings when CUDA_VISIBLE_DEVICES exposes 8 GPUs and NPROC_PER_NODE=8. "
-            "Added progressive magnitude rows run as independent jobs split across SPARSITY_GPU_IDS, not as one DDP job."
+            "Training, native eval, and progressive magnitude timings are 8-GPU timings when CUDA_VISIBLE_DEVICES exposes 8 GPUs "
+            "and NPROC_PER_NODE=8."
         ),
     }
 
