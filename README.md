@@ -1,16 +1,12 @@
 # Decoder-Only Chinese Mini LM
 
-## Verified PyCharm `chatlm-decoder` Env
+## Current Pruning Run
 
-Current working PyCharm interpreter target:
-
-```text
-torch: 2.5.1
-torch cuda: 12.1
-transformers: 4.48.3
-tokenizers: 0.21.4
-cuda available: True
-gpu count: 8
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+SPARSITY_GPU_IDS=0,1,2,3,4,5,6,7 \
+bash run_linear_sparsity_revision_from_base.sh /path/to/base_model
 ```
 
 This is a clean starter codebase for training a decoder-only autoregressive Chinese language model at roughly the same parameter budget as [`charent/ChatLM-mini-Chinese`](https://huggingface.co/charent/ChatLM-mini-Chinese), with an 8x NVIDIA H20 launch recipe for the same 0.2B target.
