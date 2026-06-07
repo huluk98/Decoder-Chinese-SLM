@@ -44,6 +44,7 @@ from chatlm_decoder.pruning import (
     write_json,
 )
 from chatlm_decoder.sft_data import EOS_TOKEN, build_sft_dataloader, normalize_sft_record, read_records
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 try:
     import numpy as np
@@ -92,6 +93,7 @@ def accepts_cache_position(model: torch.nn.Module) -> bool:
 
 
 def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    strip_unused_decoder_model_kwargs(kwargs)
     input_ids = kwargs.get("input_ids")
     if (
         input_ids is not None
@@ -584,6 +586,7 @@ def _copy_flat_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str,
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
+    prepare_decoder_tokenizer(tokenizer)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
@@ -872,7 +875,9 @@ def evaluate_exact_match(
                     truncation=True,
                     max_length=int(max_seq_length),
                 )
-                encoded = {key: value.to(device) for key, value in encoded.items()}
+                encoded = strip_unused_decoder_model_kwargs(
+                    {key: value.to(device) for key, value in encoded.items()}
+                )
                 generated = eval_model.generate(
                     **encoded,
                     max_new_tokens=int(max_new_tokens),

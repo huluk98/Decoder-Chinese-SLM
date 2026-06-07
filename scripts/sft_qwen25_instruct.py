@@ -50,6 +50,7 @@ from chatlm_decoder.qwen25_instruct_data import (
     format_qwen_sft_example,
     read_records,
 )
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
@@ -196,6 +197,7 @@ def ensure_scalable_amp_weights(model: torch.nn.Module, config: dict[str, Any], 
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
+    prepare_decoder_tokenizer(tokenizer)
     if not hasattr(tokenizer, "apply_chat_template"):
         raise AttributeError("Qwen2.5-Instruct tokenizer must provide apply_chat_template.")
     if tokenizer.eos_token is None:
@@ -446,6 +448,7 @@ def overfit_sanity_check(
     for index, record in enumerate(records):
         example = format_qwen_sft_example(tokenizer, record, system_prompt)
         encoded = tokenizer(example["prompt_text"], return_tensors="pt", add_special_tokens=False).to(device)
+        strip_unused_decoder_model_kwargs(encoded)
         generated = eval_model.generate(
             **encoded,
             do_sample=False,

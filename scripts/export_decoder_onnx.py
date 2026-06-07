@@ -12,7 +12,9 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parents[0]
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer
 from trt_edge_common import ensure_output_path, import_required, setup_logging
 
 
@@ -119,8 +121,7 @@ def dtype_for(torch: Any, name: str, device: Any) -> Any:
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
+    prepare_decoder_tokenizer(tokenizer)
 
 
 def dummy_token_ids(torch: Any, tokenizer: Any, batch_size: int, seq_len: int, device: Any) -> Any:

@@ -45,6 +45,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+
 # -----------------------------
 # Fixed experiment defaults
 # -----------------------------
@@ -320,6 +325,7 @@ def shard_examples(examples: List[EvalExample], rank: int, world_size: int) -> L
 
 
 def prepare_tokenizer(tokenizer):
+    prepare_decoder_tokenizer(tokenizer)
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -454,6 +460,7 @@ def benchmark_model(
                     max_length=MAX_SEQ_LEN,
                     add_special_tokens=True,
                 ).to(device)
+                strip_unused_decoder_model_kwargs(enc)
                 generated = model.generate(
                     **enc,
                     max_new_tokens=MAX_NEW_TOKENS,

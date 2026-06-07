@@ -13,6 +13,10 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
+PROJECT_ROOT = SCRIPT_DIR.parents[0]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer
 
 from trt_edge_common import (
     TensorRTEngineRunner,
@@ -32,9 +36,7 @@ from trt_edge_common import (
 def load_tokenizer(model_path: str, trust_remote_code: bool) -> Any:
     transformers = import_required("transformers", "benchmark tokenizer loading")
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    return tokenizer
+    return prepare_decoder_tokenizer(tokenizer)
 
 
 def output_logits(outputs: dict[str, Any]) -> Any:
@@ -283,4 +285,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

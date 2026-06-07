@@ -48,6 +48,7 @@ from chatlm_decoder.pruning import (
     write_json,
 )
 from chatlm_decoder.sft_data import build_sft_dataloader
+from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
 
 METHOD_CHOICES = ("2of4", "2:4", "nvidia_2of4", "magnitude", "wanda", "gradient", "taylor", "taylor_gradient")
 
@@ -91,6 +92,7 @@ def accepts_cache_position(model: torch.nn.Module) -> bool:
 
 
 def forward_causal_lm(model: torch.nn.Module, **kwargs: Any) -> Any:
+    strip_unused_decoder_model_kwargs(kwargs)
     input_ids = kwargs.get("input_ids")
     if (
         input_ids is not None
@@ -507,7 +509,7 @@ def main() -> None:
 
     output_dir = Path(args.output_dir or prune_config.get("output_dir") or f"runs/pruned-{method}").expanduser()
     device = select_device()
-    tokenizer = AutoTokenizer.from_pretrained(str(checkpoint))
+    tokenizer = prepare_decoder_tokenizer(AutoTokenizer.from_pretrained(str(checkpoint)))
     model = load_causal_lm(str(checkpoint), attn_implementation=prune_config.get("attn_implementation")).to(device)
     model.config.use_cache = False
 
