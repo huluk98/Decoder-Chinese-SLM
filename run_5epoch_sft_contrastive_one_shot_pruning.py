@@ -444,7 +444,10 @@ def command_env(settings: dict[str, Any]) -> dict[str, str]:
     env["CUDA_VISIBLE_DEVICES"] = str(settings["cuda_visible_devices"])
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["NCCL_DEBUG"] = str(env.get("NCCL_DEBUG") or "WARN")
-    env["PYTORCH_CUDA_ALLOC_CONF"] = str(env.get("PYTORCH_CUDA_ALLOC_CONF") or "expandable_segments:True")
+    env["SYMPY_GROUND_TYPES"] = str(env.get("SYMPY_GROUND_TYPES") or "python")
+    env["TORCHDYNAMO_DISABLE"] = str(env.get("TORCHDYNAMO_DISABLE") or "1")
+    env["TORCH_COMPILE_DISABLE"] = str(env.get("TORCH_COMPILE_DISABLE") or "1")
+    env["ACCELERATE_DYNAMO_BACKEND"] = str(env.get("ACCELERATE_DYNAMO_BACKEND") or "no")
     env["OMP_NUM_THREADS"] = str(settings["omp_num_threads"])
     env["PYTHON"] = str(settings["python"])
     python_bin = str(Path(settings["python"]).parent)

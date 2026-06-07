@@ -15,6 +15,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("SYMPY_GROUND_TYPES", "python")
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -135,8 +137,8 @@ def autocast_for(device: torch.device, precision: str):
     return nullcontext()
 
 
-def dtype_kwargs(device: torch.device, precision: str) -> dict[str, Any]:
-    if device.type != "cuda":
+def dtype_kwargs(device: torch.device, precision: str, *, load_in_training_dtype: bool = False) -> dict[str, Any]:
+    if device.type != "cuda" or not load_in_training_dtype:
         return {}
     if precision == "bf16":
         return {"torch_dtype": torch.bfloat16}
@@ -147,7 +149,7 @@ def dtype_kwargs(device: torch.device, precision: str) -> dict[str, Any]:
 
 def load_model(checkpoint: str, device: torch.device, config: dict[str, Any], rank: int) -> torch.nn.Module:
     precision = str(config.get("precision", "bf16")).lower()
-    kwargs = dtype_kwargs(device, precision)
+    kwargs = dtype_kwargs(device, precision, load_in_training_dtype=bool(config.get("load_in_training_dtype", False)))
     requested_attn = str(config.get("attn_implementation") or "").strip()
     if requested_attn:
         try:
@@ -181,6 +183,16 @@ def load_model(checkpoint: str, device: torch.device, config: dict[str, Any], ra
     except Exception as exc:
         maybe_print(rank, f"[warning] SDPA unavailable ({exc}); loading checkpoint defaults.")
         return AutoModelForCausalLM.from_pretrained(checkpoint, trust_remote_code=False, **kwargs)
+
+
+def ensure_scalable_amp_weights(model: torch.nn.Module, config: dict[str, Any], rank: int) -> torch.nn.Module:
+    precision = str(config.get("precision", "bf16")).lower()
+    if precision != "fp16" or bool(config.get("load_in_training_dtype", False)):
+        return model
+    if any(param.dtype == torch.float16 for param in model.parameters()):
+        maybe_print(rank, "FP16 autocast: casting trainable weights to FP32 so GradScaler can unscale gradients.")
+        model = model.float()
+    return model
 
 
 def configure_tokenizer(tokenizer: Any) -> None:
@@ -517,6 +529,7 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=False)
     configure_tokenizer(tokenizer)
     model = load_model(checkpoint, device, {**config, "precision": precision}, rank=rank)
+    model = ensure_scalable_amp_weights(model, {**config, "precision": precision}, rank=rank)
     if bool(config.get("gradient_checkpointing", False)):
         model.gradient_checkpointing_enable()
         if hasattr(model.config, "use_cache"):
