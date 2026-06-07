@@ -25,7 +25,9 @@ per_device_eval_batch_size: 16
 gradient_accumulation_steps: 1
 
 gradient_checkpointing: false
-flash_attention: true
+attn_implementation: sdpa
+flash_attention: false
+sdp_flash: true
 torch_compile: false
 
 logging_steps: 10
