@@ -13,7 +13,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 PROJECT_ROOT = SCRIPT_DIR.parents[0]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 from trt_edge_common import (
     TensorRTEngineRunner,
@@ -88,14 +88,13 @@ def run_pytorch(args: argparse.Namespace, prompt: str, tokenizer: Any) -> tuple[
     ).to(device)
     model.eval()
 
-    encoded = tokenizer(
+    encoded = move_batch_to_device(tokenizer(
         prompt,
         return_tensors="pt",
         truncation=True,
         max_length=int(args.max_seq_len),
         add_special_tokens=bool(args.add_special_tokens),
-    ).to(device)
-    strip_unused_decoder_model_kwargs(encoded)
+    ), device)
     with torch.no_grad():
         outputs = model(**encoded, use_cache=False, return_dict=True)
         generated_ids = model.generate(

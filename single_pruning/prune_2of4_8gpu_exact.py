@@ -52,7 +52,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 # =========================
 # User-editable constants
@@ -334,15 +334,13 @@ def generate_batch(
 ) -> List[str]:
     tokenizer = prepare_tokenizer(tokenizer)
 
-    enc = tokenizer(
+    enc = move_batch_to_device(tokenizer(
         prompts,
         return_tensors="pt",
         padding=True,
         truncation=True,
         max_length=MAX_INPUT_TOKENS,
-    )
-    enc = {k: v.to(device) for k, v in enc.items()}
-    strip_unused_decoder_model_kwargs(enc)
+    ), device)
     prompt_width = int(enc["input_ids"].shape[1])
 
     with torch.inference_mode():

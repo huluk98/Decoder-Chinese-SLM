@@ -43,7 +43,7 @@ from chatlm_decoder.qwen25_instruct_data import (
     qwen_prompt_text,
     read_records,
 )
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 ANCHOR_ID_FIELDS = ("anchor_id", "semantic_anchor_id", "group_id", "cluster_id", "intent_id", "anchor")
 RECORD_ID_FIELDS = ("id", "uid", "uuid", "example_id", "sample_id", "index")
@@ -450,8 +450,10 @@ def generate_batch(
     previous_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     try:
-        inputs = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-        strip_unused_decoder_model_kwargs(inputs)
+        inputs = move_batch_to_device(
+            tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False),
+            device,
+        )
     finally:
         tokenizer.padding_side = previous_padding_side
     input_length = int(inputs["input_ids"].shape[1])

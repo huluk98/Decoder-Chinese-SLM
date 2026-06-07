@@ -56,7 +56,7 @@ HF_WEIGHT_FILENAMES = (
     "pytorch_model.bin.index.json",
 )
 
-from chatlm_decoder.tokenizer import prepare_decoder_tokenizer, strip_unused_decoder_model_kwargs
+from chatlm_decoder.tokenizer import move_batch_to_device, prepare_decoder_tokenizer
 
 
 def parse_simple_yaml_scalar(value: str) -> Any:
@@ -409,15 +409,14 @@ def generate_batch(
     max_new_tokens: int,
     num_beams: int,
 ) -> list[tuple[str, int]]:
-    inputs = tokenizer(
+    inputs = move_batch_to_device(tokenizer(
         prompt_texts,
         return_tensors="pt",
         padding=True,
         truncation=True,
         max_length=max(1, int(max_prompt_tokens)),
         add_special_tokens=False,
-    ).to(device)
-    strip_unused_decoder_model_kwargs(inputs)
+    ), device)
     prompt_width = int(inputs["input_ids"].shape[-1])
     output_ids = model.generate(
         **inputs,

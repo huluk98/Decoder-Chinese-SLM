@@ -105,3 +105,12 @@ def strip_unused_decoder_model_kwargs(batch: MutableMapping[str, Any]) -> Mutabl
     for key in UNUSED_DECODER_MODEL_KWARGS:
         batch.pop(key, None)
     return batch
+
+
+def move_batch_to_device(batch: MutableMapping[str, Any], device: Any) -> dict[str, Any]:
+    """Move tensor values to the model device and drop decoder-unsupported keys."""
+    strip_unused_decoder_model_kwargs(batch)
+    return {
+        key: value.to(device) if hasattr(value, "to") else value
+        for key, value in batch.items()
+    }
