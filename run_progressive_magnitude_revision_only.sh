@@ -28,6 +28,7 @@ Environment overrides:
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
   RECOVERY_PARAM_DTYPE           default: fp32 for stable progressive recovery optimizer updates
+  SPARSITY_DENOMINATOR           default: whole_model, so 30/50 targets are real model sparsity targets
   EOS_LOSS_WEIGHT                default: 5.0
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
@@ -85,6 +86,7 @@ export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
 export ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 export EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-5.0}"
 export RECOVERY_PARAM_DTYPE="${RECOVERY_PARAM_DTYPE:-fp32}"
+export SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
 
 RUN_ROOT="${RUN_ROOT:-runs/revision-original-four-one-shot}"
 if [[ $# -eq 2 ]]; then
@@ -138,6 +140,7 @@ echo "contrastive checkpoint: ${CONTRASTIVE_SFT_FINAL}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "visible_gpu_count=${VISIBLE_GPU_COUNT}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo "SPARSITY_DENOMINATOR=${SPARSITY_DENOMINATOR}"
 echo "RECOVERY_PARAM_DTYPE=${RECOVERY_PARAM_DTYPE}"
 echo "EOS_LOSS_WEIGHT=${EOS_LOSS_WEIGHT}"
 echo
@@ -160,6 +163,7 @@ run_progressive_linear_sparsity() {
       --benchmark_path "${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}" \
       --extra_eval_path "training_dataset=${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
       --sparsity_levels "${target_sparsity}" \
+      --sparsity_denominator "${SPARSITY_DENOMINATOR}" \
       --pruning_modes progressive \
       --prune_scope linear_weights \
       --prune_method magnitude \

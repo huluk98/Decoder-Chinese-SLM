@@ -26,6 +26,7 @@ Environment overrides:
   SFT_EVAL_FILE                  default: data/scenic/SCENIC_full_training_dataset.json
   CONTRASTIVE_EVAL_FILE          default: data/scenic/SCENIC_full_training_dataset.json
   SPARSITY_LEVELS                default: "0.3 0.5"
+  SPARSITY_DENOMINATOR           default: whole_model, so 30/50 targets are real model sparsity targets
   WANDA_GRANULARITY              default: row
   RUN_DENSE_BASELINE             default: 0, so only WANDA rows are rerun
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
@@ -136,6 +137,7 @@ export RUN_PRUNING_BENCHMARKS=1
 export RUN_DENSE_BASELINE="${RUN_DENSE_BASELINE:-0}"
 export METHODS="${METHODS:-wanda}"
 export SPARSITY_LEVELS="${SPARSITY_LEVELS:-0.3 0.5}"
+export SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
 export WANDA_GRANULARITY="${WANDA_GRANULARITY:-row}"
 export BENCHMARK_FILE="${BENCHMARK_FILE:-data/benchmarks/iot_instruction_benchmark_200.json}"
 export SFT_EVAL_FILE="${SFT_EVAL_FILE:-data/scenic/SCENIC_full_training_dataset.json}"
@@ -151,6 +153,7 @@ echo "contrastive checkpoint: ${CONTRASTIVE_OUTPUT_DIR}/final"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "visible_gpu_count=${VISIBLE_GPU_COUNT}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo "SPARSITY_DENOMINATOR=${SPARSITY_DENOMINATOR}"
 echo "WANDA_GRANULARITY=${WANDA_GRANULARITY}"
 echo "RUN_DENSE_BASELINE=${RUN_DENSE_BASELINE}"
 echo "SPARSITY_LEVELS=${SPARSITY_LEVELS}"

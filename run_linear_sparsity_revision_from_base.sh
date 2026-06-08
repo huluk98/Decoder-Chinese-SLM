@@ -30,6 +30,7 @@ Environment overrides:
   PYTHON                         default: python3, then python
   ORIGINAL_RUN_ROOT              default: runs/revision-original-four-one-shot
   NATIVE_SPARSITY_LEVELS         default: "0.3 0.5"
+  SPARSITY_DENOMINATOR           default: whole_model, so 30/50 targets are real model sparsity targets
   LINEAR_SPARSITY_OUTPUT_DIR     default: results/scenic_linear_sparsity_0_30_50_from_base
   REVISION_RESULTS_JSON          default: results/scenic_revision_sparsity_summary.json
   BENCHMARK_PATH                 default: data/benchmarks/iot_instruction_benchmark_200.json
@@ -96,6 +97,7 @@ export ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 export RUN_ROOT="${ORIGINAL_RUN_ROOT:-runs/revision-original-four-one-shot}"
 export METHODS="${METHODS:-magnitude wanda gradient 2of4}"
 export SPARSITY_LEVELS="${SPARSITY_LEVELS:-${NATIVE_SPARSITY_LEVELS:-0.3 0.5}}"
+export SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
 export RUN_ORIGINAL_DECODER_EVAL="${RUN_ORIGINAL_DECODER_EVAL:-0}"
 export EOS_RETUNE=0
 export BENCHMARK_FILE="${BENCHMARK_FILE:-${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}}"
@@ -146,6 +148,7 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "visible_gpu_count=${VISIBLE_GPU_COUNT}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
 echo "EXPECTED_GPU_COUNT=${EXPECTED_GPU_COUNT}"
+echo "SPARSITY_DENOMINATOR=${SPARSITY_DENOMINATOR}"
 echo
 
 echo "== Original four methods: one-shot only at ${SPARSITY_LEVELS} =="
@@ -171,6 +174,7 @@ run_progressive_linear_sparsity() {
       --benchmark_path "${BENCHMARK_PATH:-data/benchmarks/iot_instruction_benchmark_200.json}" \
       --extra_eval_path "training_dataset=${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
       --sparsity_levels 0 "${target_sparsity}" \
+      --sparsity_denominator "${PROGRESSIVE_SPARSITY_DENOMINATOR:-${SPARSITY_DENOMINATOR}}" \
       --pruning_modes dense progressive \
       --prune_scope linear_weights \
       --prune_method magnitude \

@@ -11,7 +11,7 @@ Usage:
 
 Runs the 5-epoch regular SFT, then the 5-epoch contrastive SFT from the fresh
 regular SFT checkpoint, followed by the configured dense eval and one-shot
-pruning benchmark. Defaults to 50% prunable Linear-weight pruning for magnitude,
+pruning benchmark. Defaults to 50% whole-model sparsity for magnitude,
 WANDA, Taylor saliency, and NVIDIA 2:4 while keeping embeddings, norms, and
 lm_head dense for EOS stability.
 
@@ -37,7 +37,7 @@ Environment overrides:
   SPARSITY_LEVELS        optional whitespace/comma list such as "0.3 0.5";
                         when set, pruning/eval runs once per level after training.
   SPARSITY               default: 0.5 when SPARSITY_LEVELS is unset.
-  SPARSITY_DENOMINATOR  default: prunable, so 50% means selected Linear weights rather than whole model parameters.
+  SPARSITY_DENOMINATOR  default: whole_model, so 50% means comparable real model sparsity.
   GRANULARITY           default: global for magnitude/Taylor; 2:4 remains fixed per 4-weight group.
   WANDA_GRANULARITY     default: row, so WANDA prunes each Linear output row to the requested sparsity.
   RUN_DENSE_BASELINE    default: 1; set to 0 for method-only reruns that should skip dense eval.
