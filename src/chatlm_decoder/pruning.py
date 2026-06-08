@@ -542,7 +542,8 @@ def apply_masks(model: torch.nn.Module, masks: dict[str, torch.Tensor]) -> None:
                     f"Pruning mask shape mismatch for {name}: mask={tuple(mask.shape)} "
                     f"parameter={tuple(parameter.shape)}"
                 )
-            parameter.mul_(mask.to(device=parameter.device, dtype=parameter.dtype))
+            mask_on_device = mask.to(device=parameter.device, dtype=torch.bool)
+            parameter.masked_fill_(~mask_on_device, 0)
 
 
 def mask_sparsity(masks: dict[str, torch.Tensor]) -> float:

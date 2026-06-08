@@ -125,6 +125,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient_calibration_batches", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument(
+        "--recovery_param_dtype",
+        "--recovery-param-dtype",
+        default="fp32",
+        choices=("model", "fp32"),
+        help="Parameter dtype to use for progressive recovery optimization. fp32 avoids unstable direct FP16 AdamW updates.",
+    )
+    parser.add_argument(
         "--eos_loss_weight",
         "--eos-loss-weight",
         type=float,
@@ -996,6 +1003,13 @@ def maybe_validation_metrics(
     return summary["em1_overall"], summary["em5_overall"]
 
 
+def configure_recovery_parameter_dtype(model: Any, args: argparse.Namespace, rank: int) -> None:
+    if str(args.recovery_param_dtype).lower() != "fp32":
+        return
+    model.float()
+    maybe_print(rank, "Progressive recovery parameters cast to fp32 for stable optimizer updates.")
+
+
 def save_run_artifacts(
     model: Any,
     tokenizer: Any,
@@ -1166,6 +1180,7 @@ def row_config_json(args: argparse.Namespace, kind: str) -> str:
             "batch_size": int(args.batch_size),
             "recovery_epochs_per_stage": int(args.recovery_epochs_per_stage),
             "final_recovery_epochs": int(args.final_recovery_epochs),
+            "recovery_param_dtype": args.recovery_param_dtype,
             "eos_loss_weight": float(args.eos_loss_weight),
             "seed": int(args.seed),
             "recovery_train_path": args.recovery_train_path or "",
@@ -1375,6 +1390,8 @@ def main() -> None:
             maybe_print(rank, f"\n=== {family} {mode} target_sparsity={target_sparsity:g} ===")
             model, tokenizer = load_model_and_tokenizer(args, device)
             device = next(model.parameters()).device
+            if mode == "progressive" and recovery_samples:
+                configure_recovery_parameter_dtype(model, args, rank)
             train_model: Any = model
             if int(world_size) > 1:
                 train_model = DistributedDataParallel(
