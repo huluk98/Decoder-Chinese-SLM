@@ -555,6 +555,7 @@ def run_eval(
     dry_run: bool,
 ) -> None:
     nproc = int(benchmark.get("nproc_per_node", 8))
+    expected = int(benchmark.get("expected_gpu_count", nproc))
     run_command(
         [
             "torchrun",
@@ -586,6 +587,10 @@ def run_eval(
             str(int(benchmark.get("top_k_exact_match", benchmark.get("exact_match_top_k", 5)))),
             "--comparison-mode",
             str(benchmark.get("comparison_mode", "whitespace")),
+            "--expected-world-size",
+            str(expected),
+            "--expected-visible-gpu-count",
+            str(expected),
         ]
         + (
             [

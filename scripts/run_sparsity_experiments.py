@@ -149,6 +149,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--system_prompt", default="")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--dtype", default="auto", choices=("auto", "fp32", "fp16", "bf16"))
+    parser.add_argument(
+        "--expected_world_size",
+        "--expected-world-size",
+        type=int,
+        default=None,
+        help="Fail unless the actual torch distributed WORLD_SIZE matches this value.",
+    )
+    parser.add_argument(
+        "--expected_visible_gpu_count",
+        "--expected-visible-gpu-count",
+        type=int,
+        default=None,
+        help="Fail unless CUDA_VISIBLE_DEVICES exposes this many GPUs.",
+    )
     parser.add_argument("--trust_remote_code", action="store_true")
     parser.add_argument("--bootstrap_resamples", type=int, default=1000)
     parser.add_argument("--limit", type=int, default=None)
@@ -209,6 +223,28 @@ def setup_distributed(requested: str) -> tuple[torch.device, int, int, int]:
             dist.init_process_group(backend="nccl")
         return torch.device("cuda", local_rank), rank, local_rank, world_size
     return select_device(requested), rank, local_rank, world_size
+
+
+def visible_cuda_device_count() -> int:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible.strip() or visible.strip() == "-1":
+        return int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    return len([part for part in visible.split(",") if part.strip()])
+
+
+def assert_expected_distributed_run(args: argparse.Namespace, world_size: int) -> None:
+    if args.expected_world_size is not None and int(world_size) != int(args.expected_world_size):
+        raise RuntimeError(
+            f"Linear sparsity expected world_size={int(args.expected_world_size)}, got {int(world_size)}. "
+            "Check NPROC_PER_NODE and the torchrun launch command."
+        )
+    if args.expected_visible_gpu_count is not None:
+        visible_count = visible_cuda_device_count()
+        if visible_count != int(args.expected_visible_gpu_count):
+            raise RuntimeError(
+                f"Linear sparsity expected {int(args.expected_visible_gpu_count)} visible GPUs, got {visible_count}: "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')!r}."
+            )
 
 
 def distributed_barrier(local_rank: int) -> None:
@@ -1046,6 +1082,7 @@ def parse_extra_eval_paths(values: list[str]) -> list[tuple[str, str]]:
 def main() -> None:
     args = parse_args()
     device, rank, local_rank, world_size = setup_distributed(args.device)
+    assert_expected_distributed_run(args, world_size)
     set_seeds(int(args.seed) + int(rank))
     output_dir = resolve_output_dir(args.output_dir)
     benchmark_samples = load_benchmark_samples(args.benchmark_path, args.benchmark_difficulty_path)
@@ -1092,6 +1129,9 @@ def main() -> None:
             "launcher": "torchrun" if int(world_size) > 1 else "python",
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
             "torch_cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+            "visible_cuda_device_count": visible_cuda_device_count(),
+            "expected_world_size": args.expected_world_size,
+            "expected_visible_gpu_count": args.expected_visible_gpu_count,
             "rank_devices": rank_devices,
         }
         write_json(output_dir / "run_config.json", metadata)

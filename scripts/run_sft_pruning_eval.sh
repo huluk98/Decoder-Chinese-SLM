@@ -169,6 +169,8 @@ run_eval() {
     --benchmark-runs "${BENCHMARK_RUNS}"
     --exact-match-top-k "${TOP_K_EXACT_MATCH}"
     --comparison-mode "${COMPARISON_MODE}"
+    --expected-world-size "${NPROC}"
+    --expected-visible-gpu-count "${NPROC}"
   )
   if [[ -n "${TRAIN_FILE}" ]]; then
     args+=(--train-file "${TRAIN_FILE}")

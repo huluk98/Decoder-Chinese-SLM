@@ -82,6 +82,7 @@ The launcher uses:
 - `torchrun` with `NPROC_PER_NODE=8` for regular SFT, contrastive SFT, original one-shot evaluation, and progressive magnitude pruning.
 - `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` to expose all 8 H20 GPUs to every distributed stage.
 - The launcher fails fast unless it sees `EXPECTED_GPU_COUNT=8`, 8 visible GPU ids, and `NPROC_PER_NODE=8`. Set `ALLOW_H20_WORLD_SIZE_MISMATCH=1` only for deliberate debug runs.
+- Every prompt/response eval launch passes `--expected-world-size 8` and `--expected-visible-gpu-count 8`; if an eval starts with only 4 ranks or 4 visible GPUs, it aborts before generating metrics.
 - Progressive magnitude jobs run sequentially at 30% and 50%; each progressive job uses all visible GPUs instead of splitting one job per GPU.
 - The active terminal environment's `python`/`python3`; bare executable names are resolved through `PATH`.
 - FP16 autocast training with GradScaler, while keeping trainable weights in full precision.
