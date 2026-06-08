@@ -36,6 +36,7 @@ Environment overrides:
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
+  EOS_LOSS_WEIGHT                default: 5.0 for progressive recovery EOS reinforcement
   TORCHRUN                       default: torchrun
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
@@ -100,6 +101,7 @@ export BENCHMARK_FILE="${BENCHMARK_FILE:-${BENCHMARK_PATH:-data/benchmarks/iot_i
 export TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-5}"
 export COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
 export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-1.01}"
+export EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-5.0}"
 
 visible_gpu_count() {
   local visible="${CUDA_VISIBLE_DEVICES:-}"
@@ -173,6 +175,7 @@ run_progressive_linear_sparsity() {
       --recovery_train_path "${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
       --recovery_epochs_per_stage "${RECOVERY_EPOCHS_PER_STAGE:-1}" \
       --final_recovery_epochs "${FINAL_RECOVERY_EPOCHS:-1}" \
+      --eos_loss_weight "${EOS_LOSS_WEIGHT}" \
       --num_beams "${NUM_BEAMS:-5}" \
       --num_return_sequences "${NUM_RETURN_SEQUENCES:-5}" \
       --max_new_tokens "${MAX_NEW_TOKENS:-64}" \

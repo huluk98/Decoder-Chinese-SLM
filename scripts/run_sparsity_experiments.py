@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from tqdm.auto import tqdm
 
@@ -123,6 +124,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--final_recovery_epochs", type=int, default=1)
     parser.add_argument("--gradient_calibration_batches", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument(
+        "--eos_loss_weight",
+        "--eos-loss-weight",
+        type=float,
+        default=1.0,
+        help="Optional recovery loss multiplier for supervised EOS labels. Values above 1 reinforce stopping behavior.",
+    )
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--max_length", type=int, default=256)
     parser.add_argument("--prune_output_heads", action="store_true")
@@ -674,6 +682,40 @@ def epoch_batches(items: list[dict[str, Any]], batch_size: int, rank: int, world
     return batches
 
 
+def causal_lm_recovery_loss(
+    train_model: Any,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    eos_token_id: int | None,
+    eos_loss_weight: float = 1.0,
+) -> tuple[torch.Tensor, Any]:
+    """Return decoder recovery loss, optionally upweighting supervised EOS labels."""
+    if float(eos_loss_weight) <= 1.0 or eos_token_id is None:
+        outputs = train_model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        return outputs.loss, outputs
+
+    outputs = train_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+    logits = outputs.logits
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+    flat_labels = shift_labels.view(-1)
+    token_loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        flat_labels,
+        ignore_index=-100,
+        reduction="none",
+    )
+    valid = flat_labels.ne(-100)
+    weights = torch.ones_like(token_loss)
+    eos_positions = valid & flat_labels.eq(int(eos_token_id))
+    weights = torch.where(eos_positions, weights * float(eos_loss_weight), weights)
+    denominator = weights[valid].sum().clamp_min(1.0)
+    loss = (token_loss * weights).sum() / denominator
+    return loss, outputs
+
+
 def train_one_epoch(
     model: Any,
     train_model: Any,
@@ -716,6 +758,7 @@ def train_one_epoch(
             )["input_ids"].to(device)
             labels[labels == int(tokenizer.pad_token_id)] = -100
             outputs = train_model(**encoded, labels=labels)
+            loss = outputs.loss
         else:
             prompt_texts = [decoder_prompt(sample["input"], tokenizer, args) for sample in batch]
             eos = str(getattr(tokenizer, "eos_token", None) or LEGACY_EOS_TOKEN)
@@ -744,8 +787,14 @@ def train_one_epoch(
             for row, prompt_length in enumerate(prompt_lengths):
                 labels[row, :prompt_length] = -100
             labels[encoded["attention_mask"] == 0] = -100
-            outputs = train_model(**encoded, labels=labels)
-        loss = outputs.loss
+            loss, _outputs = causal_lm_recovery_loss(
+                train_model,
+                input_ids=encoded["input_ids"],
+                attention_mask=encoded["attention_mask"],
+                labels=labels,
+                eos_token_id=getattr(tokenizer, "eos_token_id", None),
+                eos_loss_weight=float(args.eos_loss_weight),
+            )
         loss.backward()
         torch.nn.utils.clip_grad_norm_(unwrap_model(train_model).parameters(), 1.0)
         optimizer.step()
@@ -950,6 +999,7 @@ def row_config_json(args: argparse.Namespace, kind: str) -> str:
             "batch_size": int(args.batch_size),
             "recovery_epochs_per_stage": int(args.recovery_epochs_per_stage),
             "final_recovery_epochs": int(args.final_recovery_epochs),
+            "eos_loss_weight": float(args.eos_loss_weight),
             "seed": int(args.seed),
             "recovery_train_path": args.recovery_train_path or "",
             "validation_path": args.validation_path or "",
@@ -1081,6 +1131,8 @@ def parse_extra_eval_paths(values: list[str]) -> list[tuple[str, str]]:
 
 def main() -> None:
     args = parse_args()
+    if float(args.eos_loss_weight) < 1.0:
+        raise ValueError(f"eos_loss_weight must be >= 1.0, got {args.eos_loss_weight}.")
     device, rank, local_rank, world_size = setup_distributed(args.device)
     assert_expected_distributed_run(args, world_size)
     set_seeds(int(args.seed) + int(rank))
