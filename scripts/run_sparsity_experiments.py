@@ -1041,6 +1041,22 @@ def configure_recovery_parameter_dtype(model: Any, args: argparse.Namespace, ran
     maybe_print(rank, "Progressive recovery parameters cast to fp32 for stable optimizer updates.")
 
 
+def cast_recovered_model_to_eval_dtype(
+    model: Any,
+    args: argparse.Namespace,
+    device: torch.device,
+    rank: int,
+) -> None:
+    dtype = dtype_for(args.dtype, device)
+    if dtype == "auto":
+        return
+    first_parameter = next(model.parameters(), None)
+    if first_parameter is not None and first_parameter.dtype == dtype:
+        return
+    model.to(dtype=dtype)
+    maybe_print(rank, f"Recovered model cast to {dtype} for final save/eval.")
+
+
 def save_run_artifacts(
     model: Any,
     tokenizer: Any,
@@ -1202,6 +1218,7 @@ def row_config_json(args: argparse.Namespace, kind: str) -> str:
             "max_new_tokens": int(args.max_new_tokens),
             "length_penalty": float(args.length_penalty),
             "early_stopping": bool(args.early_stopping),
+            "dtype": args.dtype,
             "normalization_mode": args.normalization_mode,
             "prompt_format": args.prompt_format,
         }
@@ -1484,6 +1501,8 @@ def main() -> None:
                             "val_em5",
                         ],
                     )
+                cast_recovered_model_to_eval_dtype(model, args, device, rank)
+                apply_masks(model, masks)
             maybe_barrier(world_size, local_rank)
             checkpoint_path = ""
             mask_path = ""
