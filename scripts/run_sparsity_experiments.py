@@ -506,6 +506,11 @@ def targeted_linear_zero_fraction(model: torch.nn.Module, include_heads: bool) -
 def sparsity_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor] | None, target: float, include_heads: bool) -> dict[str, float]:
     if masks:
         accounting = sparsity_accounting(model, masks, target=target)
+        if int(accounting.get("masked_weight_violation_count", 0)) != 0:
+            raise RuntimeError(
+                "Pruning masks are not applied to the model weights: "
+                f"masked_weight_violation_count={accounting['masked_weight_violation_count']}."
+            )
         return {
             "targeted_linear_sparsity_actual": float(accounting["achieved_prunable_sparsity"]),
             "whole_model_sparsity_actual": float(accounting["achieved_whole_model_sparsity"]),
@@ -626,6 +631,155 @@ def make_pruning_masks(
     if method in {"gradient", "taylor"}:
         return make_gradient_masks(model, tokenizer, sparsity, recovery_samples, args, device)
     raise ValueError(f"Unsupported prune_method: {args.prune_method}")
+
+
+def magnitude_score_tensors(model: torch.nn.Module, args: argparse.Namespace) -> dict[str, torch.Tensor]:
+    layers = named_prunable_linears(model, include_lm_head=bool(args.prune_output_heads))
+    return {name: module.weight.detach().abs() for name, module in layers}
+
+
+def expected_target_sparsity_from_shapes(
+    masks: dict[str, torch.Tensor],
+    sparsity: float,
+    *,
+    global_pruning: bool,
+) -> float:
+    total = sum(int(mask.numel()) for mask in masks.values())
+    if total <= 0:
+        return 0.0
+    if global_pruning:
+        return int(float(sparsity) * total) / float(total)
+    pruned = sum(int(float(sparsity) * int(mask.numel())) for mask in masks.values())
+    return pruned / float(total)
+
+
+def assert_mask_matches_stage_target(
+    masks: dict[str, torch.Tensor],
+    sparsity: float,
+    *,
+    global_pruning: bool,
+) -> None:
+    expected = expected_target_sparsity_from_shapes(masks, sparsity, global_pruning=global_pruning)
+    actual = mask_sparsity(masks)
+    total = sum(int(mask.numel()) for mask in masks.values())
+    tolerance = max(1.0 / float(total or 1), 1e-8)
+    if abs(actual - expected) > tolerance:
+        raise RuntimeError(
+            f"Progressive mask target mismatch: requested={float(sparsity):.6f} "
+            f"expected_actual={expected:.10f} got={actual:.10f}."
+        )
+
+
+def _expand_layerwise_magnitude_masks_to_target(
+    scores: dict[str, torch.Tensor],
+    previous: dict[str, torch.Tensor] | None,
+    sparsity: float,
+) -> dict[str, torch.Tensor]:
+    masks: dict[str, torch.Tensor] = {}
+    for name, score in scores.items():
+        old = previous.get(name) if previous is not None else None
+        mask = torch.ones_like(score, dtype=torch.bool) if old is None else old.to(score.device).bool().clone()
+        total = int(mask.numel())
+        target_pruned = max(0, min(total, int(float(sparsity) * total)))
+        current_pruned = total - int(mask.bool().sum().item())
+        if current_pruned > target_pruned:
+            raise RuntimeError(
+                f"Progressive mask for {name} already has {current_pruned} pruned weights, "
+                f"above the stage target {target_pruned}. Start from a fresh checkpoint or enable --regrowth."
+            )
+        additional = target_pruned - current_pruned
+        if additional <= 0:
+            masks[name] = mask
+            continue
+        active_positions = mask.flatten().nonzero(as_tuple=False).flatten()
+        if additional > int(active_positions.numel()):
+            raise RuntimeError(f"Cannot prune {additional} more active weights from {name}.")
+        active_scores = score.flatten()[active_positions].float()
+        prune_local = torch.topk(active_scores, k=additional, largest=False, sorted=False).indices
+        flat_mask = mask.flatten()
+        flat_mask[active_positions[prune_local]] = False
+        masks[name] = flat_mask.reshape_as(mask)
+    return masks
+
+
+def _expand_global_magnitude_masks_to_target(
+    scores: dict[str, torch.Tensor],
+    previous: dict[str, torch.Tensor] | None,
+    sparsity: float,
+) -> dict[str, torch.Tensor]:
+    masks = {
+        name: (
+            torch.ones_like(score, dtype=torch.bool)
+            if previous is None or name not in previous
+            else previous[name].to(score.device).bool().clone()
+        )
+        for name, score in scores.items()
+    }
+    total = sum(int(mask.numel()) for mask in masks.values())
+    target_pruned = max(0, min(total, int(float(sparsity) * total)))
+    current_pruned = sum(int(mask.numel()) - int(mask.bool().sum().item()) for mask in masks.values())
+    if current_pruned > target_pruned:
+        raise RuntimeError(
+            f"Progressive mask already has {current_pruned} pruned weights, "
+            f"above the stage target {target_pruned}. Start from a fresh checkpoint or enable --regrowth."
+        )
+    additional = target_pruned - current_pruned
+    if additional <= 0:
+        return masks
+
+    chunks: list[torch.Tensor] = []
+    refs: list[tuple[str, torch.Tensor]] = []
+    for name, score in scores.items():
+        active_positions = masks[name].flatten().nonzero(as_tuple=False).flatten()
+        if int(active_positions.numel()) == 0:
+            continue
+        chunks.append(score.flatten()[active_positions].float().cpu())
+        refs.append((name, active_positions.cpu()))
+    if not chunks:
+        raise RuntimeError("No active weights remain for progressive global magnitude pruning.")
+    active_scores = torch.cat(chunks)
+    if additional > int(active_scores.numel()):
+        raise RuntimeError(f"Cannot prune {additional} more active weights from progressive global masks.")
+    prune_global = torch.topk(active_scores, k=additional, largest=False, sorted=False).indices
+    selected = torch.zeros(int(active_scores.numel()), dtype=torch.bool)
+    selected[prune_global] = True
+
+    offset = 0
+    for name, active_positions in refs:
+        count = int(active_positions.numel())
+        local = selected[offset : offset + count]
+        if bool(local.any()):
+            flat_mask = masks[name].flatten()
+            flat_mask[active_positions[local].to(flat_mask.device)] = False
+            masks[name] = flat_mask.reshape_as(masks[name])
+        offset += count
+    return masks
+
+
+def make_progressive_stage_masks(
+    model: torch.nn.Module,
+    tokenizer: Any,
+    stage_sparsity: float,
+    previous: dict[str, torch.Tensor] | None,
+    recovery_samples: list[dict[str, Any]],
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    method = str(args.prune_method).strip().lower()
+    if previous is None or bool(args.regrowth) or method != "magnitude":
+        masks = make_pruning_masks(model, tokenizer, stage_sparsity, recovery_samples, args, device)
+    else:
+        scores = magnitude_score_tensors(model, args)
+        if bool(args.global_pruning):
+            masks = _expand_global_magnitude_masks_to_target(scores, previous, stage_sparsity)
+        else:
+            masks = _expand_layerwise_magnitude_masks_to_target(scores, previous, stage_sparsity)
+    assert_mask_matches_stage_target(
+        masks,
+        stage_sparsity,
+        global_pruning=bool(args.global_pruning),
+    )
+    return masks
 
 
 def combine_masks(
@@ -883,9 +1037,22 @@ def run_progressive(
     logs: list[dict[str, Any]] = []
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(args.learning_rate)) if recovery_samples else None
     for stage_index, stage_sparsity in enumerate(staged_schedule(target_sparsity), start=1):
-        stage_masks = make_pruning_masks(model, tokenizer, stage_sparsity, recovery_samples, args, device)
-        masks = combine_masks(masks, stage_masks, allow_regrowth=bool(args.regrowth))
+        masks = make_progressive_stage_masks(
+            model,
+            tokenizer,
+            stage_sparsity,
+            masks,
+            recovery_samples,
+            args,
+            device,
+        )
         apply_masks(model, masks)
+        accounting = sparsity_accounting(model, masks, target=stage_sparsity)
+        if int(accounting.get("masked_weight_violation_count", 0)) != 0:
+            raise RuntimeError(
+                "Progressive masks were not fully applied: "
+                f"masked_weight_violation_count={accounting['masked_weight_violation_count']}."
+            )
         epochs = max(0, int(args.recovery_epochs_per_stage))
         if epochs == 0 or optimizer is None:
             if is_main_process(rank):

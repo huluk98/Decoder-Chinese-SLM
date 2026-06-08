@@ -101,6 +101,24 @@ The final combined JSON is written to:
 results/scenic_revision_sparsity_summary.json
 ```
 
+Run only the progressive magnitude jobs after the 5-epoch regular and contrastive SFT checkpoints already exist:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+DTYPE=fp16 \
+bash run_progressive_magnitude_revision_only.sh
+```
+
+To point at explicit checkpoints:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+NPROC_PER_NODE=8 \
+DTYPE=fp16 \
+bash run_progressive_magnitude_revision_only.sh /path/to/regular_sft_final /path/to/contrastive_sft_final
+```
+
 Counting dense baselines, the expected final JSON has 20 result rows:
 
 - 2 dense baselines: regular SFT and contrastive SFT.
