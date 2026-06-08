@@ -64,7 +64,7 @@ CONFIG: dict[str, Any] = {
     "sparsity": 0.5,
     "sparsity_levels": None,  # None -> use the single SPARSITY value.
     "pruning_scope": "transformer_linears",
-    "sparsity_denominator": "prunable",
+    "sparsity_denominator": "whole_model",
     "granularity": "global",
     "wanda_granularity": "row",
     "include_lm_head": False,
@@ -797,6 +797,9 @@ def rows_for_family(
                 "method": method,
                 "target_sparsity": safe_float(row_target_sparsity),
                 "target_sparsity_label": sparsity_label(float(row_target_sparsity)) if row_target_sparsity not in ("", None) else "",
+                "target_sparsity_denominator": row.get("target_sparsity_denominator", ""),
+                "target_prunable_sparsity": safe_float(metric(row, "target_prunable_sparsity")),
+                "target_whole_model_sparsity": safe_float(metric(row, "target_whole_model_sparsity")),
                 "status": row.get("status", ""),
                 "em1": safe_float(metric(row, "exact_match_accuracy", "exact_match_accuracy_mean")),
                 "em5": safe_float(
@@ -1033,6 +1036,9 @@ def write_results_json(
         "method",
         "target_sparsity",
         "target_sparsity_label",
+        "target_sparsity_denominator",
+        "target_prunable_sparsity",
+        "target_whole_model_sparsity",
         "status",
         "em1",
         "em5",

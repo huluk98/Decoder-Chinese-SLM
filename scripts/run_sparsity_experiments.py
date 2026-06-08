@@ -31,6 +31,7 @@ from chatlm_decoder.pruning import (  # noqa: E402
     mask_sparsity,
     model_parameter_stats,
     named_prunable_linears,
+    resolve_prunable_sparsity_for_target,
     sparsity_accounting,
 )
 from chatlm_decoder.sparsity_experiments import (  # noqa: E402
@@ -55,6 +56,9 @@ SUMMARY_FIELDNAMES = [
     "pruning_mode",
     "pruning_method",
     "target_sparsity",
+    "target_sparsity_denominator",
+    "target_prunable_sparsity",
+    "target_whole_model_sparsity",
     "targeted_linear_sparsity_actual",
     "whole_model_sparsity_actual",
     "seed",
@@ -115,6 +119,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_family", required=True, choices=("encoder-only", "encoder_only", "decoder-only", "decoder_only", "encoder-decoder", "encoder_decoder"))
     parser.add_argument("--model_checkpoint", required=True)
     parser.add_argument("--sparsity_levels", nargs="+", type=float, default=[0.0, 0.3, 0.5])
+    parser.add_argument(
+        "--sparsity_denominator",
+        "--sparsity-denominator",
+        default="prunable",
+        choices=("prunable", "whole_model"),
+        help="Interpret --sparsity_levels as selected Linear-mask sparsity or whole-model sparsity.",
+    )
     parser.add_argument("--pruning_modes", nargs="+", default=["dense", "oneshot", "progressive"], choices=("dense", "oneshot", "one_shot", "progressive"))
     parser.add_argument("--pruning_mode", nargs="+", default=None, choices=("dense", "oneshot", "one_shot", "progressive"))
     parser.add_argument("--prune_scope", default="linear_weights", choices=("linear_weights",))
@@ -527,6 +538,26 @@ def sparsity_stats(model: torch.nn.Module, masks: dict[str, torch.Tensor] | None
         "targeted_linear_sparsity_actual": targeted_linear_zero_fraction(model, include_heads=include_heads),
         "whole_model_sparsity_actual": float(model_stats["achieved_whole_model_sparsity"]),
     }
+
+
+def resolve_experiment_sparsity_target(
+    model: torch.nn.Module,
+    requested_sparsity: float,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    if float(requested_sparsity) <= 0.0:
+        return {
+            "requested_sparsity": 0.0,
+            "target_sparsity_denominator": str(args.sparsity_denominator),
+            "target_prunable_sparsity": 0.0,
+            "target_whole_model_sparsity": 0.0 if str(args.sparsity_denominator) == "whole_model" else None,
+        }
+    return resolve_prunable_sparsity_for_target(
+        model,
+        target_sparsity=float(requested_sparsity),
+        denominator=str(args.sparsity_denominator),
+        include_lm_head=bool(args.prune_output_heads),
+    )
 
 
 def make_magnitude_masks(model: torch.nn.Module, sparsity: float, args: argparse.Namespace) -> dict[str, torch.Tensor]:
@@ -1192,6 +1223,7 @@ def row_config_json(args: argparse.Namespace, kind: str) -> str:
             "prune_scope": args.prune_scope,
             "prune_method": args.prune_method,
             "progressive_schedule": args.progressive_schedule,
+            "sparsity_denominator": args.sparsity_denominator,
             "prune_output_heads": bool(args.prune_output_heads),
             "global_pruning": bool(args.global_pruning),
             "regrowth": bool(args.regrowth),
@@ -1207,6 +1239,9 @@ def write_paper_table(output_dir: Path, rows: list[dict[str, Any]]) -> None:
                 "model_family": row["model_family"],
                 "pruning_mode": row["pruning_mode"],
                 "target_sparsity": row["target_sparsity"],
+                "target_sparsity_denominator": row.get("target_sparsity_denominator", ""),
+                "target_prunable_sparsity": row.get("target_prunable_sparsity", ""),
+                "target_whole_model_sparsity": row.get("target_whole_model_sparsity", ""),
                 "overall EM@1": row.get("em1_overall"),
                 "overall EM@5": row.get("em5_overall"),
                 "easy EM@1": row.get("em1_easy"),
@@ -1232,6 +1267,7 @@ def run_single_eval(
     output_dir: Path,
     pruning_mode: str,
     target_sparsity: float,
+    target_resolution: dict[str, Any],
     masks: dict[str, torch.Tensor] | None,
     checkpoint_path: str,
     mask_path: str,
@@ -1239,7 +1275,8 @@ def run_single_eval(
     rank: int = 0,
     world_size: int = 1,
 ) -> dict[str, Any] | None:
-    stats = sparsity_stats(model, masks, target_sparsity, include_heads=bool(args.prune_output_heads))
+    target_prunable_sparsity = float(target_resolution.get("target_prunable_sparsity", target_sparsity))
+    stats = sparsity_stats(model, masks, target_prunable_sparsity, include_heads=bool(args.prune_output_heads))
     candidates = evaluate_model(model, tokenizer, samples, args, device, rank=rank, world_size=world_size)
     if not is_main_process(rank):
         return None
@@ -1276,6 +1313,9 @@ def run_single_eval(
         "pruning_mode": pruning_mode,
         "pruning_method": args.prune_method,
         "target_sparsity": float(target_sparsity),
+        "target_sparsity_denominator": target_resolution.get("target_sparsity_denominator", args.sparsity_denominator),
+        "target_prunable_sparsity": target_prunable_sparsity,
+        "target_whole_model_sparsity": target_resolution.get("target_whole_model_sparsity"),
         **stats,
         "seed": int(args.seed),
         **summary,
@@ -1390,6 +1430,16 @@ def main() -> None:
             maybe_print(rank, f"\n=== {family} {mode} target_sparsity={target_sparsity:g} ===")
             model, tokenizer = load_model_and_tokenizer(args, device)
             device = next(model.parameters()).device
+            target_resolution = resolve_experiment_sparsity_target(model, target_sparsity, args)
+            target_prunable_sparsity = float(target_resolution.get("target_prunable_sparsity", target_sparsity))
+            maybe_print(
+                rank,
+                "Resolved sparsity target: "
+                f"denominator={target_resolution.get('target_sparsity_denominator')} "
+                f"requested={float(target_sparsity):.6f} "
+                f"target_prunable={target_prunable_sparsity:.6f} "
+                f"target_whole={target_resolution.get('target_whole_model_sparsity')}",
+            )
             if mode == "progressive" and recovery_samples:
                 configure_recovery_parameter_dtype(model, args, rank)
             train_model: Any = model
@@ -1402,14 +1452,14 @@ def main() -> None:
                 )
             masks: dict[str, torch.Tensor] | None = None
             if mode == "oneshot":
-                masks = make_pruning_masks(model, tokenizer, target_sparsity, recovery_samples, args, device)
+                masks = make_pruning_masks(model, tokenizer, target_prunable_sparsity, recovery_samples, args, device)
                 apply_masks(model, masks)
             elif mode == "progressive":
                 masks, logs = run_progressive(
                     model,
                     train_model,
                     tokenizer,
-                    target_sparsity,
+                    target_prunable_sparsity,
                     recovery_samples,
                     validation_samples,
                     args,
@@ -1460,6 +1510,7 @@ def main() -> None:
                     output_dir,
                     mode,
                     target_sparsity,
+                    target_resolution,
                     masks,
                     checkpoint_path,
                     mask_path,

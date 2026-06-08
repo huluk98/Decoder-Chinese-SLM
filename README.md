@@ -81,6 +81,7 @@ The launcher uses:
 
 - `torchrun` with `NPROC_PER_NODE=8` for regular SFT, contrastive SFT, original one-shot evaluation, and progressive magnitude pruning.
 - `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` to expose all 8 H20 GPUs to every distributed stage.
+- `SPARSITY_DENOMINATOR=whole_model` by default, so the 30% and 50% pruning conditions target comparable real whole-model sparsity across encoder-only, decoder-only, and encoder-decoder runs. The pruning code converts that whole-model target into the architecture-specific selected-Linear sparsity needed to hit the real target.
 - The launcher fails fast unless it sees `EXPECTED_GPU_COUNT=8`, 8 visible GPU ids, and `NPROC_PER_NODE=8`. Set `ALLOW_H20_WORLD_SIZE_MISMATCH=1` only for deliberate debug runs.
 - Every prompt/response eval launch passes `--expected-world-size 8` and `--expected-visible-gpu-count 8`; if an eval starts with only 4 ranks or 4 visible GPUs, it aborts before generating metrics.
 - Progressive magnitude jobs run sequentially at 30% and 50%; each progressive job uses all visible GPUs instead of splitting one job per GPU.
@@ -147,6 +148,8 @@ Counting dense baselines, the expected final JSON has 20 result rows:
 Progressive recovery uses 1 recovery epoch after every pruning stage and 1 final recovery epoch after all stages.
 
 The summary is intended to include training-data EM@1/EM@5, benchmark EM@1/EM@5, and benchmark easy/medium/hard breakdowns when those eval files are available.
+
+For magnitude, WANDA, gradient/Taylor, and progressive magnitude, the reported 30%/50% targets are whole-model sparsity targets. Pure NVIDIA 2:4 is still a fixed 50% structured Linear pattern; if that native 2:4 constraint cannot hit the whole-model target exactly, the pruning report includes a `method_target_note` and the achieved whole-model sparsity should be interpreted separately.
 
 ## Decoder-Only C-Eval Metrics
 

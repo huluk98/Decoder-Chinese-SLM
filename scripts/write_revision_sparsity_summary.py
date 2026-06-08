@@ -109,6 +109,9 @@ def empty_matrix_row(
         "method": method,
         "target_sparsity": target,
         "target_sparsity_label": f"{float(target):.0%}" if isinstance(target, (int, float)) else "",
+        "target_sparsity_denominator": "",
+        "target_prunable_sparsity": "",
+        "target_whole_model_sparsity": "",
         "training_data_em1": "",
         "training_data_em5": "",
         "training_data_status": "",
@@ -155,6 +158,15 @@ def assign_native_eval_metrics(matrix_row: dict[str, Any], eval_name: str, row: 
     matrix_row["achieved_prunable_sparsity"] = (
         preferred_metric(row, "achieved_prunable_sparsity") or matrix_row["achieved_prunable_sparsity"]
     )
+    matrix_row["target_sparsity_denominator"] = (
+        preferred_metric(row, "target_sparsity_denominator") or matrix_row["target_sparsity_denominator"]
+    )
+    matrix_row["target_prunable_sparsity"] = (
+        preferred_metric(row, "target_prunable_sparsity") or matrix_row["target_prunable_sparsity"]
+    )
+    matrix_row["target_whole_model_sparsity"] = (
+        preferred_metric(row, "target_whole_model_sparsity") or matrix_row["target_whole_model_sparsity"]
+    )
 
 
 def assign_progressive_eval_metrics(matrix_row: dict[str, Any], eval_name: str, row: dict[str, Any]) -> None:
@@ -179,6 +191,15 @@ def assign_progressive_eval_metrics(matrix_row: dict[str, Any], eval_name: str, 
     )
     matrix_row["achieved_prunable_sparsity"] = (
         preferred_metric(row, "targeted_linear_sparsity_actual") or matrix_row["achieved_prunable_sparsity"]
+    )
+    matrix_row["target_sparsity_denominator"] = (
+        preferred_metric(row, "target_sparsity_denominator") or matrix_row["target_sparsity_denominator"]
+    )
+    matrix_row["target_prunable_sparsity"] = (
+        preferred_metric(row, "target_prunable_sparsity") or matrix_row["target_prunable_sparsity"]
+    )
+    matrix_row["target_whole_model_sparsity"] = (
+        preferred_metric(row, "target_whole_model_sparsity") or matrix_row["target_whole_model_sparsity"]
     )
 
 
