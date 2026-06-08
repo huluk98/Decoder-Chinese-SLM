@@ -1291,7 +1291,7 @@ def main() -> None:
                 write_summary(output_dir, rows)
                 if not continue_on_error:
                     raise
-    elif not args.dry_run:
+    elif not args.dry_run and bool(benchmark.get("require_dense_baseline", True)):
         raise RuntimeError("Dense baseline evaluation is required for pruning benchmark comparison.")
 
     for method in methods:

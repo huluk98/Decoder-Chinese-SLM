@@ -220,6 +220,15 @@ def make_masks(
     if calibration_loader is None:
         raise ValueError(f"Pruning method {method} requires prune.calibration_data_path.")
     if method == "wanda":
+        wanda_granularity = str(
+            prune_config.get("wanda_granularity", prune_config.get("wanda_pruning_granularity", "row"))
+        ).lower()
+        if wanda_granularity in {"per_row", "rowwise", "row-wise", "per-output-row", "per_output_row", "layer"}:
+            wanda_granularity = "row"
+        if wanda_granularity in {"global_prunable_parameter", "global_prunable_parameters"}:
+            wanda_granularity = "global"
+        if wanda_granularity not in {"row", "global"}:
+            raise ValueError(f"prune.wanda_granularity must be 'row' or 'global', got {wanda_granularity!r}.")
         scalers = collect_activation_scalers(
             model,
             calibration_loader,
@@ -234,7 +243,7 @@ def make_masks(
             sparsity=sparsity,
             include_lm_head=include_lm_head,
             scope=scope,
-            granularity=granularity,
+            granularity=wanda_granularity,
         )
         report = wanda_activation_report(
             scalers,
@@ -248,9 +257,12 @@ def make_masks(
         if not report["all_modules_valid"]:
             raise ValueError(f"Invalid Wanda activation statistics: {report['blocking_issues']}")
         return masks, {
-            "pruning_granularity": "global_prunable_parameter" if granularity == "global" else "per_output_row_linear_plus_per_parameter_tensor",
+            "pruning_granularity": (
+                "global_prunable_parameter" if wanda_granularity == "global" else "per_output_row_linear_plus_per_parameter_tensor"
+            ),
             "score_definition": "linear weights use abs(weight) * sqrt(mean(input_activation^2)); non-linear full-model tensors use abs(parameter)",
-            "method_variant": f"{scope}_wanda",
+            "method_variant": f"{scope}_{wanda_granularity}_wanda",
+            "wanda_granularity": wanda_granularity,
             "target_resolution": target_resolution,
             "wanda_activation_report": report,
         }

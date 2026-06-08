@@ -15,6 +15,7 @@ if str(ROOT / "src") not in sys.path:
 from chatlm_decoder.pruning import (  # noqa: E402
     apply_masks,
     assert_protected_parameters_unchanged,
+    collect_activation_scalers,
     exact_rowwise_score_masks,
     layerwise_gradient_score_masks,
     layerwise_magnitude_masks,
@@ -61,6 +62,25 @@ class TinyLlamaLikeDecoder(torch.nn.Module):
         block.input_layernorm = torch.nn.LayerNorm(16)
         block.post_attention_layernorm = torch.nn.LayerNorm(16)
         return block
+
+
+class TinyActivationProbeDecoder(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.block = torch.nn.Module()
+        self.block.proj = torch.nn.Linear(2, 2, bias=False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        use_cache: bool = False,
+    ) -> object:
+        del attention_mask, use_cache
+        values = input_ids.float()
+        hidden = torch.stack([values, values * 10.0], dim=-1)
+        logits = self.block.proj(hidden)
+        return type("TinyOutput", (), {"logits": logits})()
 
 
 def fill_weights(model: torch.nn.Module) -> None:
@@ -160,6 +180,25 @@ def test_wanda_transformer_layer_masks_prune_per_output_row() -> None:
     assert masks["block.good"].sum(dim=1).tolist() == [2, 2]
     assert masks["block.other"].sum(dim=1).tolist() == [3, 3]
     assert mask_sparsity(masks) == pytest.approx(0.5)
+
+
+def test_wanda_activation_scalers_ignore_padding_tokens() -> None:
+    model = TinyActivationProbeDecoder()
+    batches = [
+        {
+            "input_ids": torch.tensor([[1, 2, 100, 200]]),
+            "attention_mask": torch.tensor([[1, 1, 0, 0]]),
+        }
+    ]
+
+    scalers = collect_activation_scalers(
+        model,
+        batches,
+        device=torch.device("cpu"),
+        max_batches=1,
+    )
+
+    assert scalers["block.proj"].tolist() == pytest.approx([2.5, 250.0])
 
 
 def test_two_of_four_prunes_eligible_layers_and_skips_non_divisible_layers() -> None:

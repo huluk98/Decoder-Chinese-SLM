@@ -1225,11 +1225,22 @@ def collect_activation_scalers(
     sums: dict[str, torch.Tensor] = {}
     counts: dict[str, int] = defaultdict(int)
     hooks = []
+    current_attention_mask: torch.Tensor | None = None
 
     def hook_for(name: str):
         def _hook(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...], _output: torch.Tensor) -> None:
             hidden = inputs[0].detach().float()
-            flat = hidden.reshape(-1, hidden.shape[-1])
+            if (
+                current_attention_mask is not None
+                and hidden.ndim >= 3
+                and tuple(current_attention_mask.shape)[:2] == tuple(hidden.shape)[:2]
+            ):
+                token_mask = current_attention_mask.to(device=hidden.device, dtype=torch.bool)
+                flat = hidden[token_mask]
+            else:
+                flat = hidden.reshape(-1, hidden.shape[-1])
+            if flat.numel() == 0:
+                return
             sums[name] = sums.get(name, torch.zeros(flat.shape[-1], device="cpu")) + flat.pow(2).sum(dim=0).cpu()
             counts[name] += flat.shape[0]
 
@@ -1244,6 +1255,7 @@ def collect_activation_scalers(
             if batch_index >= int(max_batches):
                 break
             batch = {key: value.to(device) for key, value in batch.items() if key in {"input_ids", "attention_mask", "labels"}}
+            current_attention_mask = batch.get("attention_mask")
             forward_causal_lm(
                 model,
                 input_ids=batch["input_ids"],
