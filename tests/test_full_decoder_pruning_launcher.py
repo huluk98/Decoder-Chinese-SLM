@@ -40,6 +40,7 @@ def test_full_decoder_launcher_defaults_are_guarded_and_report_em5() -> None:
     assert config["max_new_token_hit_rate_threshold"] == 1.01
     assert config["sparsity_denominator"] == "prunable"
     assert config["granularity"] == "global"
+    assert config["wanda_granularity"] == "row"
     assert config["pruning_scope"] == "transformer_linears"
     assert config["include_lm_head"] is False
     assert config["sparsity_levels"] is None
@@ -85,6 +86,7 @@ def test_full_decoder_launcher_expands_native_sparsity_levels(tmp_path: Path) ->
     )
 
     assert benchmark_config["prune"]["sparsity"] == 0.3
+    assert benchmark_config["prune"]["wanda_granularity"] == "row"
     assert benchmark_config["benchmark"]["output_dir"].endswith("sparsity_0p3")
 
 

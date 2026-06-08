@@ -38,7 +38,9 @@ Environment overrides:
                         when set, pruning/eval runs once per level after training.
   SPARSITY               default: 0.5 when SPARSITY_LEVELS is unset.
   SPARSITY_DENOMINATOR  default: prunable, so 50% means selected Linear weights rather than whole model parameters.
-  GRANULARITY           default: global for magnitude/WANDA/Taylor; 2:4 remains fixed per 4-weight group.
+  GRANULARITY           default: global for magnitude/Taylor; 2:4 remains fixed per 4-weight group.
+  WANDA_GRANULARITY     default: row, so WANDA prunes each Linear output row to the requested sparsity.
+  RUN_DENSE_BASELINE    default: 1; set to 0 for method-only reruns that should skip dense eval.
   EOS_RETUNE            set to 1 to add masked SFT recovery rows after one-shot pruning.
   EOS_LOSS_WEIGHT       default when EOS_RETUNE=1 via wrapper: 5.0.
   EOS_RETUNE_EPOCHS     default when EOS_RETUNE=1 via wrapper: 1.0.

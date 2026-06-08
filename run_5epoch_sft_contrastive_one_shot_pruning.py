@@ -66,6 +66,7 @@ CONFIG: dict[str, Any] = {
     "pruning_scope": "transformer_linears",
     "sparsity_denominator": "prunable",
     "granularity": "global",
+    "wanda_granularity": "row",
     "include_lm_head": False,
     "calibration_batches": 64,
     "prune_batch_size": 2,
@@ -82,6 +83,7 @@ CONFIG: dict[str, Any] = {
     "train_contrastive_sft": True,
     "train_only": False,
     "run_pruning_benchmarks": True,
+    "run_dense_baseline": True,
     "dry_run": False,
 }
 
@@ -126,6 +128,7 @@ ENV_OVERRIDES = {
     "PRUNING_SCOPE": "pruning_scope",
     "SPARSITY_DENOMINATOR": "sparsity_denominator",
     "GRANULARITY": "granularity",
+    "WANDA_GRANULARITY": "wanda_granularity",
     "INCLUDE_LM_HEAD": "include_lm_head",
     "CALIBRATION_BATCHES": "calibration_batches",
     "PRUNE_BATCH_SIZE": "prune_batch_size",
@@ -138,7 +141,11 @@ ENV_OVERRIDES = {
     "EOS_RETUNE_MAX_STEPS": "eos_retune_max_steps",
     "EOS_RETUNE_MODE": "eos_retune_mode",
     "RUN_ORIGINAL_DECODER_EVAL": "run_original_decoder_eval",
+    "TRAIN_REGULAR_SFT": "train_regular_sft",
+    "TRAIN_CONTRASTIVE_SFT": "train_contrastive_sft",
     "TRAIN_ONLY": "train_only",
+    "RUN_PRUNING_BENCHMARKS": "run_pruning_benchmarks",
+    "RUN_DENSE_BASELINE": "run_dense_baseline",
     "DRY_RUN": "dry_run",
 }
 
@@ -583,7 +590,8 @@ def benchmark_config(
             "prune_config": str(settings["prune_config"]),
             "methods": benchmark_methods,
             "eval_files": eval_files,
-            "run_dense_baseline": True,
+            "run_dense_baseline": bool(settings["run_dense_baseline"]),
+            "require_dense_baseline": bool(settings["run_dense_baseline"]),
             "min_dense_exact_match_accuracy": None,
             "benchmark_runs": int(settings["eval_runs"]),
             "top_k_exact_match": int(settings["top_k_exact_match"]),
@@ -605,6 +613,7 @@ def benchmark_config(
             "scope": str(settings["pruning_scope"]),
             "sparsity_denominator": str(settings["sparsity_denominator"]),
             "granularity": str(settings["granularity"]),
+            "wanda_granularity": str(settings["wanda_granularity"]),
             "include_lm_head": bool(settings["include_lm_head"]),
             "calibration_data_path": inputs["calibration"],
             "calibration_batches": int(settings["calibration_batches"]),
@@ -847,10 +856,11 @@ def result_completeness(rows: list[dict[str, Any]], settings: dict[str, Any]) ->
             for eval_name in expected_eval_names
         )
     for family in ("base_sft", "contrastive_sft"):
-        expected_rows.extend(
-            {"model_family": family, "eval_name": eval_name, "method": "base_model"}
-            for eval_name in expected_eval_names
-        )
+        if settings.get("run_dense_baseline", True):
+            expected_rows.extend(
+                {"model_family": family, "eval_name": eval_name, "method": "base_model"}
+                for eval_name in expected_eval_names
+            )
         for level in settings.get("sparsity_levels", [settings["sparsity"]]):
             level_methods = methods_for_sparsity_level(list(settings["methods"]), float(level))
             expected_rows.extend(
@@ -925,8 +935,22 @@ def write_results_json(
         slug = sparsity_slug(level)
         base_dir = pruning_output_dir_for_level(settings["regular_pruning_output_dir"], level, settings)
         contrastive_dir = pruning_output_dir_for_level(settings["contrastive_pruning_output_dir"], level, settings)
-        rows.extend(rows_for_family("base_sft", base_dir, target_sparsity=level, include_dense=index == 0))
-        rows.extend(rows_for_family("contrastive_sft", contrastive_dir, target_sparsity=level, include_dense=index == 0))
+        rows.extend(
+            rows_for_family(
+                "base_sft",
+                base_dir,
+                target_sparsity=level,
+                include_dense=index == 0 and bool(settings.get("run_dense_baseline", True)),
+            )
+        )
+        rows.extend(
+            rows_for_family(
+                "contrastive_sft",
+                contrastive_dir,
+                target_sparsity=level,
+                include_dense=index == 0 and bool(settings.get("run_dense_baseline", True)),
+            )
+        )
         base_summaries[slug] = read_pruning_summary(base_dir)
         contrastive_summaries[slug] = read_pruning_summary(contrastive_dir)
     datasets = dataset_summary(settings)
@@ -942,6 +966,7 @@ def write_results_json(
             "cuda_visible_devices": settings["cuda_visible_devices"],
             "nproc_per_node": settings["nproc_per_node"],
             "run_root": settings["run_root"],
+            "run_dense_baseline": settings["run_dense_baseline"],
             "config_files": {
                 "original_decoder_source": settings["sft_config"],
                 "base_sft": settings["sft_config"],
@@ -1063,6 +1088,7 @@ def print_plan(settings: dict[str, Any]) -> None:
         f"{settings['sparsity_denominator']} "
         f"{settings['pruning_scope']} ({settings['granularity']})"
     )
+    print(f"  WANDA granularity:     {settings['wanda_granularity']}")
     print(f"  calibration batches:   {settings['calibration_batches']}")
     print(f"  run root:              {settings['run_root']}")
     print(f"  CUDA_VISIBLE_DEVICES:  {settings['cuda_visible_devices']}")
