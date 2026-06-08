@@ -27,6 +27,7 @@ Environment overrides:
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
+  RECOVERY_PARAM_DTYPE           default: fp32 for stable progressive recovery optimizer updates
   EOS_LOSS_WEIGHT                default: 5.0
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
   NPROC_PER_NODE                 default: 8
@@ -83,6 +84,7 @@ export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
 export ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 export EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-5.0}"
+export RECOVERY_PARAM_DTYPE="${RECOVERY_PARAM_DTYPE:-fp32}"
 
 RUN_ROOT="${RUN_ROOT:-runs/revision-original-four-one-shot}"
 if [[ $# -eq 2 ]]; then
@@ -136,6 +138,7 @@ echo "contrastive checkpoint: ${CONTRASTIVE_SFT_FINAL}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "visible_gpu_count=${VISIBLE_GPU_COUNT}"
 echo "NPROC_PER_NODE=${NPROC_PER_NODE}"
+echo "RECOVERY_PARAM_DTYPE=${RECOVERY_PARAM_DTYPE}"
 echo "EOS_LOSS_WEIGHT=${EOS_LOSS_WEIGHT}"
 echo
 
@@ -163,6 +166,7 @@ run_progressive_linear_sparsity() {
       --recovery_train_path "${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
       --recovery_epochs_per_stage "${RECOVERY_EPOCHS_PER_STAGE:-1}" \
       --final_recovery_epochs "${FINAL_RECOVERY_EPOCHS:-1}" \
+      --recovery_param_dtype "${RECOVERY_PARAM_DTYPE}" \
       --eos_loss_weight "${EOS_LOSS_WEIGHT}" \
       --num_beams "${NUM_BEAMS:-5}" \
       --num_return_sequences "${NUM_RETURN_SEQUENCES:-5}" \
@@ -196,4 +200,3 @@ else
   echo "Skipping combined JSON because native results JSON was not found: ${NATIVE_RESULTS_JSON}"
   echo "Progressive CSVs are under: ${LINEAR_SPARSITY_BASE_DIR}"
 fi
-

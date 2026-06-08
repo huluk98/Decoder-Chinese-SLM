@@ -36,6 +36,7 @@ Environment overrides:
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
+  RECOVERY_PARAM_DTYPE           default: fp32 for stable progressive recovery optimizer updates
   EOS_LOSS_WEIGHT                default: 5.0 for progressive recovery EOS reinforcement
   TORCHRUN                       default: torchrun
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
@@ -102,6 +103,7 @@ export TOP_K_EXACT_MATCH="${TOP_K_EXACT_MATCH:-5}"
 export COMPARISON_MODE="${COMPARISON_MODE:-whitespace}"
 export MAX_NEW_TOKEN_HIT_RATE_THRESHOLD="${MAX_NEW_TOKEN_HIT_RATE_THRESHOLD:-1.01}"
 export EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-5.0}"
+export RECOVERY_PARAM_DTYPE="${RECOVERY_PARAM_DTYPE:-fp32}"
 
 visible_gpu_count() {
   local visible="${CUDA_VISIBLE_DEVICES:-}"
@@ -175,6 +177,7 @@ run_progressive_linear_sparsity() {
       --recovery_train_path "${RECOVERY_TRAIN_PATH:-data/scenic/SCENIC_full_training_dataset.json}" \
       --recovery_epochs_per_stage "${RECOVERY_EPOCHS_PER_STAGE:-1}" \
       --final_recovery_epochs "${FINAL_RECOVERY_EPOCHS:-1}" \
+      --recovery_param_dtype "${RECOVERY_PARAM_DTYPE}" \
       --eos_loss_weight "${EOS_LOSS_WEIGHT}" \
       --num_beams "${NUM_BEAMS:-5}" \
       --num_return_sequences "${NUM_RETURN_SEQUENCES:-5}" \
