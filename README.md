@@ -86,6 +86,7 @@ The launcher uses:
 - Progressive magnitude jobs run sequentially at 30% and 50%; each progressive job uses all visible GPUs instead of splitting one job per GPU.
 - The active terminal environment's `python`/`python3`; bare executable names are resolved through `PATH`.
 - FP16 autocast training with GradScaler, while keeping trainable weights in full precision.
+- EOS-reinforced SFT and progressive recovery. The pipeline defaults `EOS_LOSS_WEIGHT=5.0`, so supervised `<|eos|>` labels get extra loss weight during stopping recovery.
 - SDPA attention by default, not FlashAttention 2.
 - `SYMPY_GROUND_TYPES=python` and disabled Dynamo/compile paths to avoid the H20 `gmp: overflow in mpz type` abort.
 - Evaluator progress bars show rank 0's shard only. Check `world_size=8` and `all_rank_shards=[...]` in the log to confirm all 8 ranks are active.
