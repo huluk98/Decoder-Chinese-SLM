@@ -112,6 +112,28 @@ def setup_distributed_eval(requested_device: str) -> tuple[torch.device, int, in
     return select_device(requested_device), rank, local_rank, world_size
 
 
+def visible_cuda_device_count() -> int:
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if not visible.strip() or visible.strip() == "-1":
+        return int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+    return len([part for part in visible.split(",") if part.strip()])
+
+
+def assert_expected_distributed_eval(args: argparse.Namespace, world_size: int) -> None:
+    if args.expected_world_size is not None and int(world_size) != int(args.expected_world_size):
+        raise RuntimeError(
+            f"Eval expected world_size={int(args.expected_world_size)}, got {int(world_size)}. "
+            "Check NPROC_PER_NODE and the torchrun launch command."
+        )
+    if args.expected_visible_gpu_count is not None:
+        visible_count = visible_cuda_device_count()
+        if visible_count != int(args.expected_visible_gpu_count):
+            raise RuntimeError(
+                f"Eval expected {int(args.expected_visible_gpu_count)} visible GPUs, got {visible_count}: "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')!r}."
+            )
+
+
 def distributed_barrier(local_rank: int) -> None:
     if not dist.is_available() or not dist.is_initialized():
         return
@@ -1082,6 +1104,9 @@ def write_eval_run_config(
         "world_size": int(world_size),
         "local_rank": int(local_rank),
         "device": str(device),
+        "expected_world_size": args.expected_world_size,
+        "expected_visible_gpu_count": args.expected_visible_gpu_count,
+        "visible_cuda_device_count": visible_cuda_device_count(),
         "seed_info": seed_info,
         "max_length": int(max_length),
         "generation": {
@@ -1180,6 +1205,18 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-length", type=int, default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--expected-world-size",
+        type=int,
+        default=None,
+        help="Fail unless the actual torch distributed WORLD_SIZE matches this value.",
+    )
+    parser.add_argument(
+        "--expected-visible-gpu-count",
+        type=int,
+        default=None,
+        help="Fail unless CUDA_VISIBLE_DEVICES exposes this many GPUs.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-seed", "--data_seed", type=int, default=None)
     parser.add_argument(
@@ -1253,6 +1290,7 @@ def main() -> None:
 
     seed_info = set_eval_seeds(args.seed, deterministic=bool(args.deterministic_eval))
     device, rank, local_rank, world_size = setup_distributed_eval(args.device)
+    assert_expected_distributed_eval(args, world_size)
     requested_checkpoint = args.checkpoint
     args.requested_checkpoint = requested_checkpoint
     args.checkpoint = resolve_checkpoint_for_evaluation(args.checkpoint)

@@ -173,8 +173,12 @@ def test_run_eval_passes_max_new_token_hit_rate_threshold(monkeypatch: pytest.Mo
     cmd = captured["cmd"]
     threshold_index = cmd.index("--max-new-token-hit-rate-threshold")
     beam_index = cmd.index("--num-beams")
+    world_size_index = cmd.index("--expected-world-size")
+    visible_gpu_index = cmd.index("--expected-visible-gpu-count")
     assert cmd[threshold_index + 1] == "1.01"
     assert cmd[beam_index + 1] == "5"
+    assert cmd[world_size_index + 1] == "8"
+    assert cmd[visible_gpu_index + 1] == "8"
 
 
 def test_write_summary_has_eight_pruning_rows_with_missing_retuned(tmp_path: Path) -> None:

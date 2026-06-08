@@ -179,6 +179,8 @@ run_progressive_linear_sparsity() {
       --normalization_mode "${NORMALIZATION_MODE:-command}" \
       --seed "${SEED:-42}" \
       --dtype "${DTYPE:-fp16}" \
+      --expected_world_size "${EXPECTED_GPU_COUNT}" \
+      --expected_visible_gpu_count "${EXPECTED_GPU_COUNT}" \
       --output_dir "${output_dir}/sparsity_${target_sparsity//./p}"
 }
 

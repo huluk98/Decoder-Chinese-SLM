@@ -127,6 +127,8 @@ if { [[ -n "${EVAL_FILE}" && -f "${EVAL_FILE}" ]]; } || { [[ -n "${BENCHMARK_FIL
       --batch-size "${EVAL_BATCH_SIZE}"
       --dtype "${EVAL_DTYPE}"
       --benchmark-runs "${SFT_BENCHMARK_RUNS}"
+      --expected-world-size 8
+      --expected-visible-gpu-count 8
     )
     if [[ -n "${audit_train_file}" && -f "${audit_train_file}" ]]; then
       eval_args+=(--train-file "${audit_train_file}")
