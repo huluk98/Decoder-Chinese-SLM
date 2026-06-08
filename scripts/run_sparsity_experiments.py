@@ -138,9 +138,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--recovery_param_dtype",
         "--recovery-param-dtype",
-        default="fp32",
-        choices=("model", "fp32"),
-        help="Parameter dtype to use for progressive recovery optimization. fp32 avoids unstable direct FP16 AdamW updates.",
+        default="model",
+        choices=("model", "fp32", "fp16", "bf16"),
+        help=(
+            "Parameter dtype to use for progressive recovery optimization. "
+            "model keeps the loaded model dtype; fp32 is available as an explicit stability override."
+        ),
     )
     parser.add_argument(
         "--eos_loss_weight",
@@ -1034,11 +1037,18 @@ def maybe_validation_metrics(
     return summary["em1_overall"], summary["em5_overall"]
 
 
-def configure_recovery_parameter_dtype(model: Any, args: argparse.Namespace, rank: int) -> None:
-    if str(args.recovery_param_dtype).lower() != "fp32":
+def configure_recovery_parameter_dtype(model: Any, args: argparse.Namespace, device: torch.device, rank: int) -> None:
+    requested = str(args.recovery_param_dtype).lower()
+    if requested == "model":
         return
-    model.float()
-    maybe_print(rank, "Progressive recovery parameters cast to fp32 for stable optimizer updates.")
+    dtype = dtype_for(requested, device)
+    if dtype == "auto":
+        return
+    first_parameter = next(model.parameters(), None)
+    if first_parameter is not None and first_parameter.dtype == dtype:
+        return
+    model.to(dtype=dtype)
+    maybe_print(rank, f"Progressive recovery parameters cast to {dtype}.")
 
 
 def cast_recovered_model_to_eval_dtype(
@@ -1458,7 +1468,7 @@ def main() -> None:
                 f"target_whole={target_resolution.get('target_whole_model_sparsity')}",
             )
             if mode == "progressive" and recovery_samples:
-                configure_recovery_parameter_dtype(model, args, rank)
+                configure_recovery_parameter_dtype(model, args, device, rank)
             train_model: Any = model
             if int(world_size) > 1:
                 train_model = DistributedDataParallel(

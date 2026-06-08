@@ -27,7 +27,7 @@ Environment overrides:
   RECOVERY_TRAIN_PATH            default: data/scenic/SCENIC_full_training_dataset.json
   RECOVERY_EPOCHS_PER_STAGE      default: 1
   FINAL_RECOVERY_EPOCHS          default: 1
-  RECOVERY_PARAM_DTYPE           default: fp32 for stable progressive recovery optimizer updates
+  RECOVERY_PARAM_DTYPE           default: model, so recovery stays in DTYPE such as real fp16
   SPARSITY_DENOMINATOR           default: whole_model, so 30/50 targets are real model sparsity targets
   EOS_LOSS_WEIGHT                default: 5.0
   CUDA_VISIBLE_DEVICES           default: 0,1,2,3,4,5,6,7
@@ -85,7 +85,7 @@ export TORCHDYNAMO_DISABLE="${TORCHDYNAMO_DISABLE:-1}"
 export TORCH_COMPILE_DISABLE="${TORCH_COMPILE_DISABLE:-1}"
 export ACCELERATE_DYNAMO_BACKEND="${ACCELERATE_DYNAMO_BACKEND:-no}"
 export EOS_LOSS_WEIGHT="${EOS_LOSS_WEIGHT:-5.0}"
-export RECOVERY_PARAM_DTYPE="${RECOVERY_PARAM_DTYPE:-fp32}"
+export RECOVERY_PARAM_DTYPE="${RECOVERY_PARAM_DTYPE:-model}"
 export SPARSITY_DENOMINATOR="${SPARSITY_DENOMINATOR:-whole_model}"
 
 RUN_ROOT="${RUN_ROOT:-runs/revision-original-four-one-shot}"

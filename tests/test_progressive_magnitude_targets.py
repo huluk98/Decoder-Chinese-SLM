@@ -49,3 +49,20 @@ def test_progressive_magnitude_preserves_previous_prunes_without_overshooting() 
     assert int((~flat).sum().item()) == 3
     assert sparsity.mask_sparsity(masks) == pytest.approx(0.3)
 
+
+def test_recovery_param_dtype_model_keeps_loaded_fp16_dtype() -> None:
+    model = TinyLinearModel().half()
+    args = SimpleNamespace(recovery_param_dtype="model")
+
+    sparsity.configure_recovery_parameter_dtype(model, args, torch.device("cpu"), rank=0)
+
+    assert next(model.parameters()).dtype == torch.float16
+
+
+def test_recovery_param_dtype_fp32_requires_explicit_cast() -> None:
+    model = TinyLinearModel().half()
+    args = SimpleNamespace(recovery_param_dtype="fp32")
+
+    sparsity.configure_recovery_parameter_dtype(model, args, torch.device("cpu"), rank=0)
+
+    assert next(model.parameters()).dtype == torch.float32
