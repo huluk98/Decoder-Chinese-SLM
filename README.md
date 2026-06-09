@@ -87,7 +87,7 @@ The launcher uses:
 - Progressive magnitude jobs run sequentially at 30% and 50%; each progressive job uses all visible GPUs instead of splitting one job per GPU.
 - The active terminal environment's `python`/`python3`; bare executable names are resolved through `PATH`.
 - The 5-epoch SFT trainers use FP16 autocast with GradScaler while keeping trainable weights in full precision to avoid FP16 unscale errors.
-- Progressive recovery stays in the loaded model dtype by default via `RECOVERY_PARAM_DTYPE=model`. With `DTYPE=fp16`, progressive recovery, final save, and final eval use FP16. Set `RECOVERY_PARAM_DTYPE=fp32` only when you deliberately want a FP32 recovery stability ablation.
+- Progressive recovery stays in the loaded model dtype via `RECOVERY_PARAM_DTYPE=model`. With `DTYPE=fp16`, progressive recovery, final save, and final eval use FP16; FP32 progressive recovery is disabled for this workflow.
 - EOS-reinforced SFT and progressive recovery. The pipeline defaults `EOS_LOSS_WEIGHT=5.0`, so supervised `<|eos|>` labels get extra loss weight during stopping recovery.
 - SDPA attention by default, not FlashAttention 2.
 - `SYMPY_GROUND_TYPES=python` and disabled Dynamo/compile paths to avoid the H20 `gmp: overflow in mpz type` abort.

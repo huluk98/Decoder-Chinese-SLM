@@ -139,10 +139,10 @@ def parse_args() -> argparse.Namespace:
         "--recovery_param_dtype",
         "--recovery-param-dtype",
         default="model",
-        choices=("model", "fp32", "fp16", "bf16"),
+        choices=("model", "fp16", "bf16"),
         help=(
             "Parameter dtype to use for progressive recovery optimization. "
-            "model keeps the loaded model dtype; fp32 is available as an explicit stability override."
+            "model keeps the loaded model dtype; FP32 recovery is disabled for this workflow."
         ),
     )
     parser.add_argument(
@@ -1039,6 +1039,11 @@ def maybe_validation_metrics(
 
 def configure_recovery_parameter_dtype(model: Any, args: argparse.Namespace, device: torch.device, rank: int) -> None:
     requested = str(args.recovery_param_dtype).lower()
+    if requested not in {"model", "fp16", "bf16"}:
+        raise ValueError(
+            "Progressive recovery dtype must be model, fp16, or bf16. "
+            "FP32 recovery is disabled for this workflow."
+        )
     if requested == "model":
         return
     dtype = dtype_for(requested, device)
