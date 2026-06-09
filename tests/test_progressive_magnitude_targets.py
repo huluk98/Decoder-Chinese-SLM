@@ -59,10 +59,11 @@ def test_recovery_param_dtype_model_keeps_loaded_fp16_dtype() -> None:
     assert next(model.parameters()).dtype == torch.float16
 
 
-def test_recovery_param_dtype_fp32_requires_explicit_cast() -> None:
+def test_recovery_param_dtype_fp32_is_disabled() -> None:
     model = TinyLinearModel().half()
     args = SimpleNamespace(recovery_param_dtype="fp32")
 
-    sparsity.configure_recovery_parameter_dtype(model, args, torch.device("cpu"), rank=0)
+    with pytest.raises(ValueError, match="FP32 recovery is disabled"):
+        sparsity.configure_recovery_parameter_dtype(model, args, torch.device("cpu"), rank=0)
 
-    assert next(model.parameters()).dtype == torch.float32
+    assert next(model.parameters()).dtype == torch.float16
