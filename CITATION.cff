@@ -4,7 +4,8 @@ title: "Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Trainin
 version: "0.1.0"
 date-released: "2026-05-20"
 authors:
-  - name: "huluk98"
+  - family-names: "Hu"
+    given-names: "Luke Ztz"
 url: "https://github.com/huluk98/Decoder-Chinese-SLM"
 repository-code: "https://github.com/huluk98/Decoder-Chinese-SLM"
 abstract: "A codebase for training, evaluating, fine-tuning, and pruning a roughly 0.2B parameter decoder-only Chinese small language model with H20 multi-GPU recipes, public Chinese data preparation, C-Eval evaluation, and local inference utilities."
@@ -23,5 +24,6 @@ preferred-citation:
   version: "0.1.0"
   date-released: "2026-05-20"
   authors:
-    - name: "huluk98"
+    - family-names: "Hu"
+      given-names: "Luke Ztz"
   url: "https://github.com/huluk98/Decoder-Chinese-SLM"
