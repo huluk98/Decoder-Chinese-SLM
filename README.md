@@ -322,15 +322,16 @@ The main launcher sets those defaults automatically.
 
 ## How To Cite
 
-GitHub can read [`CITATION.cff`](CITATION.cff) and show a "Cite this repository" button. Use this BibTeX entry for this codebase:
+GitHub can read [`CITATION.cff`](CITATION.cff) and show a "Cite this repository" button. Use this BibTeX entry for this codebase. The same entry is also available in [`references.bib`](references.bib).
 
 ```bibtex
-@software{decoder_chinese_slm_2026,
-  author = {huluk98},
-  title = {Decoder-Chinese-SLM: A Decoder-Only Chinese Small Language Model Training Codebase},
+@misc{hu_decoder_chinese_slm_2026,
+  author = {Hu, Luke Ztz},
+  title = {{Decoder-Chinese-SLM}: A Decoder-Only Chinese Small Language Model Training Codebase},
   year = {2026},
-  version = {0.1.0},
-  url = {https://github.com/huluk98/Decoder-Chinese-SLM}
+  month = may,
+  howpublished = {\url{https://github.com/huluk98/Decoder-Chinese-SLM}},
+  note = {Version 0.1.0, released 2026-05-20; MIT License; accessed 2026-06-12}
 }
 ```
 
