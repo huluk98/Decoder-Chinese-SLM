@@ -24,3 +24,16 @@ def test_prune_defaults_protect_decoder_only_non_linear_parameters(tmp_path: Pat
     assert config["prune"]["scope"] == "transformer_linears"
     assert config["prune"]["sparsity_denominator"] == "prunable"
     assert config["prune"]["include_lm_head"] is False
+
+
+def test_jepa_defaults_define_encoder_decoder_latent_prediction_path(tmp_path: Path) -> None:
+    config_path = tmp_path / "minimal.yaml"
+    config_path.write_text("run:\n  seed: 123\n", encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config["jepa"]["model_name_or_path"] == "google/mt5-small"
+    assert config["jepa"]["context_fields"][0] == "context"
+    assert config["jepa"]["target_fields"][0] == "target"
+    assert config["jepa"]["loss"] == "smooth_l1"
+    assert config["jepa"]["ema_decay"] == pytest.approx(0.996)

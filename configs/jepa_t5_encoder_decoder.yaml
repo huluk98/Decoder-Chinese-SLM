@@ -1,0 +1,31 @@
+run:
+  seed: 42
+
+jepa:
+  # Use a local T5/mT5 checkpoint path when possible to avoid re-downloading.
+  model_name_or_path: google/mt5-small
+  train_file: data/scenic/SCENIC_full_training_dataset.json
+  output_dir: runs/jepa-mt5-small-scenic
+
+  # SCENIC prompt/response pairs become JEPA context/target pairs.
+  context_fields: [prompt, instruction, input, question, context]
+  target_fields: [response, output, answer, target]
+
+  max_context_length: 128
+  max_target_length: 64
+  batch_size: 8
+  max_steps: 1000
+  learning_rate: 0.0001
+  weight_decay: 0.01
+
+  # JEPA-specific pieces.
+  ema_decay: 0.996
+  predictor_hidden_size: null
+  num_target_queries: 1
+  dropout: 0.0
+  loss: smooth_l1
+  normalize_targets: true
+
+  num_workers: 0
+  log_every: 10
+  save_every: 500

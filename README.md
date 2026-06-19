@@ -95,6 +95,25 @@ The launcher uses:
 - Progressive sparsity logs print `Linear sparsity runtime: world_size=8 ... rank_devices=[...]` before each progressive job.
 - `MAX_NEW_TOKEN_HIT_RATE_THRESHOLD` defaults to `1.01` for pruning runs, so damaged pruned checkpoints still produce metric rows with max-token-hit rates instead of aborting the final matrix.
 
+## Encoder-Decoder JEPA Learning Path
+
+This repository also includes an experimental text JEPA path for encoder-decoder
+models such as T5 or mT5. It learns by predicting the target text encoder
+embedding from the context text encoder embedding, using an EMA target encoder
+and a predictor head. This is a latent prediction objective, not token
+reconstruction and not the existing contrastive SFT objective.
+
+```bash
+python scripts/pretrain_jepa.py \
+  --config configs/jepa_t5_encoder_decoder.yaml \
+  --model-name-or-path google/mt5-small \
+  --train-file data/scenic/SCENIC_full_training_dataset.json \
+  --max-steps 1000
+```
+
+See `docs/jepa_encoder_decoder.md` for the architecture, outputs, and suggested
+experiments.
+
 ## Expected Outputs
 
 The final combined JSON is written to:
