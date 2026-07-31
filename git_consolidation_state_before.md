@@ -1,7 +1,7 @@
 # Git consolidation state before
 
 ## pwd
-/Users/luke/Documents/Decoder Only
+Decoder Only
 
 ## git status --short --branch
 ## codex/sft-pruning-on-main...origin/codex/sft-pruning-on-main

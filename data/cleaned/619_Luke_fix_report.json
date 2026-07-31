@@ -1,7 +1,7 @@
 {
-  "source": "/Users/luke/Downloads/619_Luke.json",
-  "fixed_all_path": "/Users/luke/Documents/Decoder Only/data/cleaned/619_Luke_fixed_all.json",
-  "fixed_dedup_path": "/Users/luke/Documents/Decoder Only/data/cleaned/619_Luke_fixed_dedup.json",
+  "source": "619_Luke.json",
+  "fixed_all_path": "data/cleaned/619_Luke_fixed_all.json",
+  "fixed_dedup_path": "data/cleaned/619_Luke_fixed_dedup.json",
   "original_rows": 4515,
   "fixed_all_rows": 4515,
   "fixed_dedup_rows": 3474,
